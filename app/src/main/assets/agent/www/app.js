@@ -1,51 +1,201 @@
-// Frontend application logic & WebSocket connection
+// Frontend application logic, screen switching & WebSocket connection
 const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
 
-const messagesContainer = document.getElementById("messages-container");
-const chatForm = document.getElementById("chat-form");
-const chatInput = document.getElementById("chat-input");
-const statusDot = document.getElementById("status-dot");
-const statusText = document.getElementById("status-text");
-const runtimeBadge = document.getElementById("runtime-badge");
-const systemInfo = document.getElementById("system-info");
-const filesListContainer = document.getElementById("files-list-container");
+/* ---------- soft keyboard / viewport ----------
+   Android WebViews behave in one of two ways when the keyboard opens: adjustResize
+   shrinks the layout viewport, or adjustPan slides the whole view up
+   (visualViewport.offsetTop > 0) to reveal the focused composer. Under adjustPan the
+   topbar is pushed off the top of the screen, which is why typing made it disappear.
+   Pinning #app to the visual viewport and cancelling the pan works in both cases; when
+   the WebView already resizes, offsetTop is 0 and the height matches, so it is a no-op.
 
-// Tab Switching
+   While a field is focused the WebView also lets a drag move the page itself (the
+   visual viewport pans, or the document focus-scrolls), which slid the whole chat view
+   around -- topbar and composer leaving with it. Correcting on the visualViewport event
+   alone is too late for that, because the event is delivered after the frame it belongs
+   to has already been composited. So stay pinned every frame while something is focused
+   and stop the moment nothing is; idle reading costs nothing. */
+const appEl = document.getElementById("app");
+
+let pinFrame = 0;
+
+function syncViewport() {
+  if (!appEl) return;
+  // Only the message list scrolls. A window scroll here is focus scrolling or the
+  // keyboard pan leaking through, and it would move the whole app shell.
+  if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const pan = vv.offsetTop || 0;
+  appEl.style.height = `${vv.height}px`;
+  appEl.style.transform = pan ? `translateY(${-pan}px)` : "";
+}
+
+function fieldFocused() {
+  const el = document.activeElement;
+  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable === true);
+}
+
+function pinViewport() {
+  syncViewport();
+  pinFrame = fieldFocused() ? requestAnimationFrame(pinViewport) : 0;
+}
+
+function startPin() {
+  if (appEl && window.visualViewport && !pinFrame) pinFrame = requestAnimationFrame(pinViewport);
+}
+
+if (appEl && window.visualViewport) {
+  visualViewport.addEventListener("resize", syncViewport);
+  visualViewport.addEventListener("scroll", syncViewport);
+  window.addEventListener("scroll", syncViewport);
+  window.addEventListener("orientationchange", () => setTimeout(syncViewport, 250));
+  document.addEventListener("focusin", startPin);
+  startPin(); // one pass on load; the loop stops again immediately when nothing is focused
+}
+
+/* ---------- chrome touch guard ----------
+   A touch-drag starting on fixed chrome (composer, topbar, settings head/tabs) must
+   never move the chat view. CSS touch-action already forbids the vertical pan, but a
+   WebView can still turn a drag on the focused input into a visual-viewport pan or a
+   focus scroll, which slides the whole shell -- topbar and composer included -- with
+   the finger. So kill vertical pans at the source with a non-passive touchmove guard.
+   Only vertical-dominant moves are cancelled, so horizontal caret sliding in the
+   single-line field (and horizontal tab swipes) keep working, and taps are untouched.
+   There is no scroller inside the guarded chrome, so cancelling the move cannot trap
+   any legitimate scroll. */
+const guardRoots = ".composer, .topbar, .settings-head, .settings-tabs";
+let guardStart = null;
+
+document.addEventListener("touchstart", (e) => {
+  const t = e.touches?.[0];
+  guardStart = t ? {
+    x: t.clientX,
+    y: t.clientY,
+    chrome: !!(e.target?.closest?.(guardRoots)),
+  } : null;
+}, { passive: true });
+
+document.addEventListener("touchmove", (e) => {
+  if (!guardStart?.chrome || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  const dx = t.clientX - guardStart.x;
+  const dy = t.clientY - guardStart.y;
+  if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 8) e.preventDefault();
+}, { passive: false });
+
+/* ---------- screens: chat (main) and settings ---------- */
+
+const chatScreen = document.getElementById("screen-chat");
+const settingsScreen = document.getElementById("screen-settings");
+const settingsBack = document.getElementById("settings-back");
+const topbar = document.querySelector(".topbar");
+
+let settingsOpen = false;
+
+// Settings is a full-screen takeover: the chat topbar goes away and the settings head
+// (styled as a topbar) sits at the very top, so nothing of the chat peeks through.
+// Each open pushes a history entry so the Android back button returns here as well.
+function showScreen(name) {
+  const settings = name === "settings";
+  chatScreen.classList.toggle("active", !settings);
+  settingsScreen.classList.toggle("active", settings);
+  if (topbar) topbar.hidden = settings;
+
+  if (settings) {
+    settingsOpen = true;
+    history.pushState({ pidroidScreen: "settings" }, "");
+    // Cheap (~5 kB) and keeps the list honest after a sign-in elsewhere.
+    window.loadProviders?.();
+  } else {
+    settingsOpen = false;
+    if (history.state?.pidroidScreen === "settings") history.back(); // pops our own entry
+  }
+
+  if (!settings) window.scrollChatToBottom?.();
+}
+
+window.addEventListener("popstate", () => {
+  if (settingsOpen) showScreen("chat");
+});
+
+// Tab switching inside Settings
 document.querySelectorAll(".tab-btn").forEach(button => {
   button.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
 
     button.classList.add("active");
-    const tabId = `tab-${button.dataset.tab}`;
-    document.getElementById(tabId)?.classList.add("active");
+    document.getElementById(`tab-${button.dataset.tab}`)?.classList.add("active");
 
-    if (button.dataset.tab === "state") fetchState();
-    if (button.dataset.tab === "workspace") loadWorkspaceFiles();
+    if (button.dataset.tab === "workspace") window.loadFilesTree?.();
+    if (button.dataset.tab === "extensions") window.loadExtensionsTab?.();
+    if (button.dataset.tab === "providers") window.loadProviders?.();
+    if (button.dataset.tab === "changes") window.loadChanges?.();
   });
 });
+
+settingsBack?.addEventListener("click", () => showScreen("chat"));
+document.getElementById("open-settings-btn")?.addEventListener("click", () => {
+  window.closeSidebar?.();
+  showScreen("settings");
+});
+
+/* ---------- sidebar ---------- */
+
+const sidebar = document.getElementById("sidebar");
+const scrim = document.getElementById("sidebar-scrim");
+const burger = document.getElementById("burger-btn");
+
+function openSidebar() {
+  sidebar.classList.add("open");
+  scrim.hidden = false;
+  burger.setAttribute("aria-expanded", "true");
+  window.loadSidebarSessions?.();
+}
+
+function closeSidebar() {
+  sidebar.classList.remove("open");
+  scrim.hidden = true;
+  burger.setAttribute("aria-expanded", "false");
+}
+
+window.openSidebar = openSidebar;
+window.closeSidebar = closeSidebar;
+
+burger?.addEventListener("click", openSidebar);
+scrim?.addEventListener("click", closeSidebar);
+document.getElementById("sidebar-close")?.addEventListener("click", closeSidebar);
+// The title doubles as a shortcut to the session list.
+document.getElementById("session-btn")?.addEventListener("click", openSidebar);
+
 
 // WebSocket Setup
 let socket = null;
 let reloadTimeout = null;
 
+function setConnected(online) {
+  document.getElementById("conn-dot")?.classList.toggle("online", online);
+}
+
 function connectWebSocket() {
   socket = new WebSocket(wsUrl);
 
-  socket.onopen = () => {
-    statusDot.className = "status-dot online";
-    statusText.textContent = "Online";
-  };
+  socket.onopen = () => setConnected(true);
 
   socket.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
-      if (data.event === "connected") {
-        runtimeBadge.textContent = `Bun v${data.payload.version}`;
-      } else if (data.event === "message") {
-        appendMessage(data.payload.role, data.payload.content);
-      } else if (data.event === "ui_reload" || data.event === "file_modified") {
+      if (data.event === "agent_view") {
+        window.onAgentView?.(data.payload);
+      } else if (data.event === "sessions_changed") {
+        window.onSessionsEvent?.();
+      } else if (data.event === "changes") {
+        window.onChangesEvent?.();
+      } else if (data.event === "login" || data.event === "providers_changed") {
+        window.onProviderEvent?.(data);
+      } else if (data.event === "ui_reload") {
         console.log("[pidroid] UI file modified, hot-reloading:", data.payload);
         // Instant CSS / Page Hot-Reload
         clearTimeout(reloadTimeout);
@@ -64,93 +214,26 @@ function connectWebSocket() {
   };
 
   socket.onclose = () => {
-    statusDot.className = "status-dot";
-    statusText.textContent = "Reconnecting...";
+    setConnected(false);
     setTimeout(connectWebSocket, 2000);
   };
 }
 
-function appendMessage(role, text) {
-  const msgEl = document.createElement("div");
-  msgEl.className = `message ${role}`;
-  msgEl.innerHTML = `
-    <div class="message-content">${escapeHtml(text)}</div>
-    <div class="message-meta">${role === "user" ? "You" : "Agent"} • ${new Date().toLocaleTimeString()}</div>
-  `;
-  messagesContainer.appendChild(msgEl);
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
-}
-
 function escapeHtml(str) {
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Chat Form Submit
-chatForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const text = chatInput.value.trim();
-  if (!text) return;
-
-  chatInput.value = "";
-  try {
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text })
-    });
-    const data = await res.json();
-    if (data.error) alert(data.error);
-  } catch (err) {
-    console.error("Failed to send message:", err);
-  }
-});
-
-// Load Message History
-async function loadHistory() {
-  try {
-    const res = await fetch("/api/messages");
-    const data = await res.json();
-    if (data.messages && data.messages.length > 0) {
-      messagesContainer.innerHTML = "";
-      data.messages.forEach(m => appendMessage(m.role, m.content));
-    }
-  } catch (e) {
-    console.error("Could not load message history", e);
-  }
+/* Colour a unified diff (from changes.ts) for display. Shared: the Changes tab renders
+   checkpoint diffs with it, and so does the chat's tool preview. */
+function colorDiff(text) {
+  return escapeHtml(text).split("\n").map(line => {
+    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("===")) return `<span class="hunk">${line}</span>`;
+    if (line.startsWith("@@")) return `<span class="hunk">${line}</span>`;
+    if (line.startsWith("+")) return `<span class="add">${line}</span>`;
+    if (line.startsWith("-")) return `<span class="del">${line}</span>`;
+    return line;
+  }).join("\n");
 }
 
-// Load System State
-async function fetchState() {
-  try {
-    const res = await fetch("/api/status");
-    const data = await res.json();
-    systemInfo.textContent = JSON.stringify(data, null, 2);
-  } catch (e) {
-    systemInfo.textContent = "Error loading status: " + e;
-  }
-}
-
-// Load Workspace Files
-async function loadWorkspaceFiles() {
-  try {
-    const res = await fetch("/api/files/list?dir=www");
-    const data = await res.json();
-    if (filesListContainer && data.files) {
-      filesListContainer.innerHTML = data.files.map(f => `
-        <div class="file-item">
-          <span>📄 <strong>${escapeHtml(f.name)}</strong></span>
-          <span style="color: var(--text-secondary); font-size: 0.8rem;">${(f.size / 1024).toFixed(1)} KB</span>
-        </div>
-      `).join("");
-    }
-  } catch (e) {
-    if (filesListContainer) filesListContainer.innerHTML = "<p>Error loading files.</p>";
-  }
-}
-
-document.getElementById("refresh-state-btn")?.addEventListener("click", fetchState);
-document.getElementById("refresh-files-btn")?.addEventListener("click", loadWorkspaceFiles);
-
-// Initial Load
+// WebSocket Setup
 connectWebSocket();
-loadHistory();

@@ -1,14 +1,26 @@
 :root {
-  --bg-primary: #121316;
-  --bg-secondary: #1a1c22;
-  --bg-card: #22252e;
+  --bg-primary: #000000;
+  --bg-secondary: #000000;
+  --bg-card: #0d0d0d;
   --accent: #6366f1;
   --accent-hover: #4f46e5;
   --text-primary: #f3f4f6;
   --text-secondary: #9ca3af;
-  --border: #2e3340;
+  --border: #222222;
   --success: #10b981;
   --radius: 12px;
+}
+
+html {
+  background-color: #000;
+  color-scheme: dark;
+  /* The document itself never scrolls: the message list (and the settings tab
+     contents) are the only scrollers. Without this a drag starting on fixed chrome
+     (composer, topbar) finds the document / visual viewport as its scroll container
+     and the whole chat view slides with the finger. */
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 * {
@@ -22,7 +34,11 @@
 body {
   background-color: var(--bg-primary);
   color: var(--text-primary);
+  /* dvh (not vh): the Android soft keyboard shrinks the visual viewport but 100vh keeps
+     reporting the full window height, so the browser pans the focused composer into view
+     and the topbar scrolls off the top. Older WebViews without dvh fall back to 100vh. */
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -31,7 +47,16 @@ body {
 #app {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* Fixed to the visual viewport: app.js's syncViewport() sets the height from
+     window.visualViewport and undoes the soft-keyboard pan. Without that pan the topbar
+     slides off the top of the screen whenever the composer is focused. */
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100dvh; /* fallback until syncViewport() runs */
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 .header {
@@ -90,6 +115,8 @@ body {
 }
 
 .nav-tabs {
+  overflow-x: auto;
+  scrollbar-width: none;
   display: flex;
   background-color: var(--bg-secondary);
   padding: 0 8px;
@@ -107,6 +134,10 @@ body {
   cursor: pointer;
   border-bottom: 2px solid transparent;
   transition: all 0.2s;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
 }
 
 .tab-btn.active {
@@ -117,6 +148,8 @@ body {
 .tab-content {
   display: none;
   flex: 1;
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 16px;
   flex-direction: column;
@@ -126,14 +159,203 @@ body {
   display: flex;
 }
 
-/* Chat Tab */
-#tab-chat {
-  padding: 0;
+/* Screens: chat is the main one, settings holds the old tabs */
+.screen {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
-.chat-messages {
+.screen.active {
+  display: flex;
+}
+
+/* Top bar: burger + session name */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background-color: var(--bg-primary);
+  flex-shrink: 0;
+  /* Fixed chrome: a drag starting here must die, never pan the document / visual
+     viewport (which would slide the whole chat view, topbar included). Buttons only
+     need taps, which touch-action:none still delivers. */
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+/* Settings takes over the whole screen, so the chat topbar is hidden there; app.js
+   toggles [hidden] on it. Needed because .topbar's display:flex would beat the UA
+   [hidden] rule otherwise. */
+.topbar[hidden] {
+  display: none;
+}
+
+.topbar .icon-btn.burger {
+  padding: 8px;
+  display: flex;
+  align-items: center;
+}
+
+.topbar-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-align: left;
+  padding: 6px 8px;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.topbar-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Sidebar */
+.sidebar-scrim {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.6);
+  z-index: 40;
+}
+
+.sidebar {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(84vw, 320px);
+  background-color: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(-100%);
+  transition: transform 0.2s ease;
+}
+
+.sidebar.open {
+  transform: translateX(0);
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 8px 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-head h3 { font-size: 0.9rem; }
+
+.sidebar-list {
   flex: 1;
   overflow-y: auto;
+  padding: 8px;
+}
+
+.sidebar-foot {
+  border-top: 1px solid var(--border);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar-new { width: 100%; }
+
+.sidebar-settings {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+/* Settings screen header + tab strip */
+/* Settings has no topbar of its own above it any more, so its head *is* the topbar:
+   identical box, so swapping screens does not make the layout jump. */
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background-color: var(--bg-primary);
+  flex-shrink: 0;
+  /* Fixed chrome, same as .topbar: drags starting here die, never pan the view. */
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+.settings-head h2 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 6px 8px;
+}
+
+.settings-tabs {
+  flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* Horizontal tab swipes keep working; vertical drags die instead of panning the view. */
+  touch-action: pan-x;
+  overscroll-behavior: none;
+}
+
+.settings-tabs::-webkit-scrollbar { display: none; }
+
+/* A drag must not walk out of its scroller into a page pan: the keyboard pan and the
+   focus scroll are both triggered that way, and either one slides the whole app shell
+   (app.js re-pins #app to the visual viewport every frame while a field is focused). */
+html,
+body {
+  overscroll-behavior: none;
+}
+
+.chat-messages,
+.sidebar-list,
+.tab-content,
+.modal-card,
+.model-list,
+.think-body,
+.tool-out {
+  overscroll-behavior: contain;
+}
+
+/* Chat screen: the message list is the ONLY scroller here. The composer below is
+   fixed chrome -- a drag starting on it must die there, never become a page pan or a
+   message-list scroll (touch-action is intersected up the ancestor chain, so no
+   touch-action:none is set on #app/.screen here: that would disable message scrolling
+   too). */
+.chat-messages {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -149,9 +371,9 @@ body {
 }
 
 .message.assistant {
-  align-self: flex-start;
+  align-self: stretch;
+  max-width: 100%;
   background-color: var(--bg-card);
-  border: 1px solid var(--border);
 }
 
 .message.user {
@@ -164,6 +386,9 @@ body {
   font-size: 0.7rem;
   color: var(--text-secondary);
   margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .chat-input-bar {
@@ -172,6 +397,12 @@ body {
   background-color: var(--bg-secondary);
   border-top: 1px solid var(--border);
   gap: 8px;
+  /* A drag starting on the bar must not become a scroll of the message list above
+     (or a visual-viewport pan). pan-x keeps single-line caret/text movement working:
+     touch-action is intersected up the ancestor chain, so `none` here would also
+     strip the input's own pan-x below. */
+  touch-action: pan-x;
+  overscroll-behavior: none;
 }
 
 .chat-input-bar input {
@@ -183,6 +414,10 @@ body {
   color: var(--text-primary);
   font-size: 0.9rem;
   outline: none;
+  /* Single-line field: horizontal pan keeps long-text caret movement, but a
+     vertical drag starting on the field must not pan the page / message list. */
+  touch-action: pan-x;
+  overscroll-behavior: none;
 }
 
 .chat-input-bar input:focus {
@@ -200,7 +435,17 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  touch-action: manipulation;
 }
+
+/* Attach is muted, so the send button stays the one primary action in the composer. */
+.chat-input-bar .attach-btn {
+  background: none;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.chat-input-bar .attach-btn:disabled { opacity: 0.45; }
 
 /* Editor & State */
 .editor-header {
@@ -214,6 +459,194 @@ body {
   font-size: 0.85rem;
   color: var(--text-secondary);
   margin-bottom: 12px;
+}
+
+/* Files tab: tree view of the harness.
+   The tree indents with --depth rather than nesting DOM elements, so a row stays one flat node and
+   a deep path cannot overflow its scroll container. Rows are touch-sized and the whole row is the
+   tap target, since a 14px chevron is not a finger.
+   No heading, no blurb and no card: the tree is the page, straight on the background, and it is
+   its own scroll container (flex:1 + min-height:0 inside the tab's flex column) so a long tree pans
+   under the pinned search/actions row instead of pushing that row off the top. touch-action:pan-y
+   and overscroll-behavior:contain tell the WebView to scroll here and not chain the pan outward. */
+.files-tab { padding: 10px 0 0; }
+
+.files-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0 12px;
+  margin-bottom: 8px;
+}
+
+.files-actions {
+  flex-shrink: 0;
+}
+
+.files-toolbar .field-wrap {
+  flex: 1;
+  min-width: 140px;
+}
+/* The toolbar supplies its own spacing, and the field's own bottom margin would otherwise make
+   the wrapper taller than the input -- which is exactly what threw the icon off-centre. */
+.files-toolbar .field {
+  margin-bottom: 0;
+}
+
+.field-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.field-wrap .field {
+  padding-left: 34px;
+  width: 100%;
+}
+.field-icon {
+  position: absolute;
+  left: 11px;
+  /* The wrapper is a flex row, but an absolutely positioned child is out of flow, so flex
+     alignment never reaches it. Stretching it top-to-bottom with auto margins lets the browser
+     centre it in whatever height the wrapper ends up with, which survives font/height changes. */
+  top: 0;
+  bottom: 0;
+  margin-block: auto;
+  color: var(--text-secondary);
+  pointer-events: none;
+  display: inline-flex;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.files-summary {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  margin: 0;
+  padding: 0 12px 6px;
+}
+.files-summary .sum.edited { color: var(--accent); }
+.files-summary .sum.new { color: var(--text-primary); }
+.files-summary .sum.deleted { color: var(--text-secondary); text-decoration: line-through; }
+
+.files-summary:empty { display: none; }
+
+.files-tree {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 20px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px 9px calc(12px + var(--depth, 0) * 15px);
+  font-size: 0.85rem;
+  min-height: 40px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+}
+.tree-row:last-child { border-bottom: none; }
+.tree-row:active { background-color: var(--bg-card); }
+.tree-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.tree-dir .tree-name { font-weight: 600; }
+
+/* A folder kept visible only because something under it matched the filter: its own name did not
+   match, so it is dimmed rather than presented as a hit. */
+.tree-row.dim .tree-name { opacity: 0.55; font-weight: 500; }
+
+.tree-twist {
+  width: 15px;
+  flex-shrink: 0;
+  display: inline-flex;
+  justify-content: center;
+}
+.tree-file .tree-twist { visibility: hidden; }
+
+.tree-icon { display: inline-flex; flex-shrink: 0; }
+
+.tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-meta {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tree-badge {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.tree-badge.modified { color: var(--accent); border-color: var(--accent); }
+.tree-badge.not-shipped { color: var(--text-primary); }
+
+.tree-file.selected {
+  background-color: var(--bg-primary);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tree-sep {
+  padding: 12px 12px 4px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+.tree-file.is-deleted { cursor: default; }
+.tree-file.is-deleted .tree-name {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.files-empty {
+  padding: 12px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+/* Read-only preview. Wraps instead of scrolling horizontally: a source line that runs off the
+   right edge is unreachable in a horizontal scroller on a phone. */
+.file-preview {
+  margin: 0;
+  padding: 10px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 55vh;
+  overflow-y: auto;
+  color: var(--text-primary);
 }
 
 textarea {
@@ -253,12 +686,88 @@ textarea {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
   padding: 10px 14px;
   background-color: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   margin-bottom: 8px;
   font-size: 0.85rem;
+}
+
+.file-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Extension rows: label on the left, switch hard right, note between them on parked files. */
+.ext-item {
+  flex-wrap: wrap;
+}
+.ext-item.is-off .file-name,
+.ext-item.is-off .ext-note {
+  opacity: 0.45;
+}
+.ext-note {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The switch itself is a real checkbox, so it stays keyboard- and screen-reader-usable. */
+.ext-switch {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  margin-left: auto; /* .file-item is space-between, but the note sits in the middle: stay pinned right */
+  cursor: pointer;
+}
+.ext-switch input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+.ext-switch input:disabled {
+  cursor: wait;
+}
+.ext-switch-track {
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+  background-color: var(--border);
+  border: 1px solid var(--border);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  pointer-events: none;
+}
+.ext-switch-thumb {
+  display: block;
+  width: 16px;
+  height: 16px;
+  margin: 2px;
+  border-radius: 50%;
+  background-color: var(--text-secondary);
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+.ext-switch input:checked + .ext-switch-track {
+  background-color: var(--accent);
+  border-color: var(--accent);
+}
+.ext-switch input:checked + .ext-switch-track .ext-switch-thumb {
+  transform: translateX(18px);
+  background-color: #fff;
+}
+.ext-switch input:focus-visible + .ext-switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .btn-primary, .btn-secondary {
@@ -280,3 +789,1064 @@ textarea {
   color: var(--text-primary);
   border: 1px solid var(--border);
 }
+
+/* Providers & login */
+.field {
+  width: 100%;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font-size: 0.9rem;
+  outline: none;
+  margin-bottom: 8px;
+}
+
+.field:focus {
+  border-color: var(--accent);
+}
+
+.provider-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+
+.provider-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.provider-meta {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.provider-meta.ok {
+  color: var(--success);
+}
+
+.provider-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ---------- provider usage panel (Providers tab → Usage) ---------- */
+
+.usage-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.usage-plan {
+  background-color: var(--bg-card);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--text-primary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 4px 10px;
+}
+
+.usage-row {
+  margin-bottom: 12px;
+}
+
+.usage-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.usage-bar {
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 3px;
+  background-color: var(--border);
+  overflow: hidden;
+}
+
+.usage-bar > span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background-color: var(--success);
+}
+
+.usage-bar > span.warm { background-color: #f59e0b; }
+.usage-bar > span.hot { background-color: #ef4444; }
+
+.usage-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.usage-note {
+  margin: 14px 0 12px;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 10;
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 420px;
+  max-height: 90vh;
+  overflow-y: auto;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.modal-card h3 {
+  margin-bottom: 12px;
+}
+
+.modal-card p,
+.modal-card .field {
+  margin-bottom: 10px;
+  font-size: 0.85rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.login-link {
+  display: block;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  background-color: var(--accent);
+  color: white;
+  text-align: center;
+  font-weight: 600;
+  text-decoration: none;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.device-code {
+  font-family: monospace;
+  font-size: 1.6rem;
+  letter-spacing: 0.15em;
+  text-align: center;
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  user-select: all;
+}
+
+/* Chat toolbar & model chooser */
+.model-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 70%;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  color: var(--text-primary);
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.model-btn span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-card.square {
+  display: flex;
+  flex-direction: column;
+  width: min(92vw, 92vh, 440px);
+  height: min(92vw, 92vh, 440px);
+  max-height: none;
+  overflow: hidden;
+}
+
+.model-list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+
+.model-group {
+  position: sticky;
+  top: 0;
+  background-color: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 8px 4px 4px;
+}
+
+.model-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-primary);
+  padding: 8px;
+  text-align: left;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.model-row.selected {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--accent);
+}
+
+.model-row:active {
+  background-color: var(--bg-primary);
+}
+
+/* A row is the model button plus its "make default" star. The star is a sibling, not a child:
+   a button inside a button is invalid HTML and the tap would select the model as well. */
+.model-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.model-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-default {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: 10px;
+  cursor: pointer;
+}
+
+.model-default.active { color: var(--accent); }
+.model-default:disabled { opacity: 0.4; }
+
+.modal-actions {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.message.thinking {
+  color: var(--text-secondary);
+}
+
+/* Sweeping highlight across the live status text ("Thinking…", "Working…").
+   The gradient is clipped to the glyphs, so only the text itself lights up. */
+.shimmer {
+  background-image: linear-gradient(
+    100deg,
+    var(--text-secondary) 0%,
+    var(--text-secondary) 35%,
+    var(--text-primary) 45%,
+    var(--accent) 50%,
+    var(--text-primary) 55%,
+    var(--text-secondary) 65%,
+    var(--text-secondary) 100%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 1.6s linear infinite;
+  /* chat.js re-creates these nodes on every streamed update; --anim-phase makes the new
+     node resume the sweep instead of restarting it. */
+  animation-delay: calc(-1 * var(--anim-phase, 0s));
+}
+
+@keyframes shimmer {
+  from { background-position: 150% 0; }
+  to { background-position: -50% 0; }
+}
+
+/* Changes */
+.change-item {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+
+.change-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  padding: 10px 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.change-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.change-title strong {
+  overflow-wrap: anywhere;
+}
+
+.change-kind {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.change-kind.turn { color: var(--accent); }
+.change-kind.undo { color: #f59e0b; }
+
+.parked {
+  color: var(--text-secondary);
+  border-color: var(--text-secondary);
+}
+
+.change-body {
+  padding: 0 14px 12px;
+}
+
+.change-file {
+  margin-bottom: 6px;
+}
+
+.change-file summary {
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 0.78rem;
+  padding: 4px 0;
+}
+
+.st-added { color: var(--success); }
+.st-deleted { color: #f87171; }
+.st-modified { color: #f59e0b; }
+
+.diff {
+  margin: 4px 0 0;
+  padding: 8px;
+  max-height: 260px;
+  overflow: auto;
+  background-color: #050505;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: monospace;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  white-space: pre;
+}
+
+.diff .add { color: var(--success); }
+.diff .del { color: #f87171; }
+.diff .hunk { color: var(--text-secondary); }
+
+.change-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* Composer: stats, controls and input live together under the messages.
+   Same deal as the bar: kill vertical pans starting here, keep horizontal caret
+   movement inside the field. */
+.composer {
+  background-color: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  touch-action: pan-x;
+  overscroll-behavior: none;
+  /* The Android gesture nav pill is drawn over the bottom of the window, so the
+     send row sat right under it. Keep a fixed gap, and grow it to the real system
+     inset when the WebView reports one (edge-to-edge devices). */
+  padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
+}
+
+.composer .chat-input-bar {
+  border-top: none;
+  padding-top: 6px;
+}
+
+.composer-meta {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 2px;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  touch-action: pan-x;
+  overscroll-behavior: none;
+}
+
+.meta-stats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 9px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.stat-pill span:not(.meter):not(.conn-dot) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#cache-label {
+  flex-shrink: 0;
+}
+
+.meta-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: #ef4444;
+  flex-shrink: 0;
+}
+
+.conn-dot.online { background-color: var(--success); }
+
+.meter {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background-color: var(--border);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.meter-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background-color: var(--success);
+}
+
+.meter-fill.warm { background-color: #f59e0b; }
+.meter-fill.hot { background-color: #ef4444; }
+
+.think-select {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-primary);
+  padding: 6px 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  max-width: 96px;
+  flex-shrink: 0;
+  touch-action: manipulation;
+}
+
+.think-select:disabled { color: var(--text-secondary); opacity: 0.6; }
+
+.composer .model-btn {
+  min-width: 0;
+  max-width: 148px;
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border-radius: 999px;
+  flex-shrink: 1;
+}
+
+.composer .model-btn #model-btn-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer .model-btn .ico-slot {
+  flex-shrink: 0;
+}
+
+.queue-bar {
+  padding: 6px 12px 0;
+  font-size: 0.72rem;
+  color: #f59e0b;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.queue-bar[hidden] { display: none; }
+
+.stop-btn {
+  background-color: #ef4444 !important;
+}
+
+.stop-btn[hidden] { display: none; }
+
+/* Messages: turns, thinking, tool calls */
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-self: stretch;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.message.queued {
+  opacity: 0.6;
+  border: 1px dashed var(--accent);
+  background-color: transparent;
+}
+
+.message.error { border-color: #ef4444; color: #f87171; }
+
+/* Anything that is code gets the same monospace face as the diff, wherever it appears --
+   not just inside a message, but also in the static tab descriptions and the tool bodies. */
+code,
+pre,
+.code {
+  font-family: monospace;
+  font-size: 0.78rem;
+}
+
+/* Inline code is a chip... */
+.message-content code,
+.description code {
+  background-color: var(--bg-primary);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+/* ...but code inside a block is not. The markdown renderer emits <pre><code class="language-x">
+   with no .code class on the <pre>, so a block that keyed off .code alone rendered as one long
+   chip instead of a code box; and while a fence was streaming (chat.js's fallback) it did have
+   the class, so the same code looked different before and after it committed. */
+.message-content pre code,
+.description pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+pre.code,
+.message-content pre {
+  margin: 4px 0;
+  padding: 8px;
+  background-color: #050505;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Server-rendered markdown */
+.message-content h1, .message-content h2, .message-content h3,
+.message-content h4, .message-content h5, .message-content h6 {
+  margin: 10px 0 4px;
+  line-height: 1.3;
+  font-weight: 700;
+}
+.message-content h1 { font-size: 1.15rem; }
+.message-content h2 { font-size: 1.05rem; }
+.message-content h3 { font-size: 1rem; }
+.message-content h4, .message-content h5, .message-content h6 { font-size: 0.9rem; color: var(--text-secondary); }
+
+.message-content > *:first-child { margin-top: 0; }
+.message-content > *:last-child { margin-bottom: 0; }
+
+.message-content ul, .message-content ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+.message-content li { margin: 2px 0; }
+.message-content li > ul, .message-content li > ol { margin: 2px 0; }
+
+.message-content blockquote {
+  margin: 6px 0;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.message-content a { color: var(--accent); text-decoration: none; }
+.message-content a:active { text-decoration: underline; }
+
+.message-content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 10px 0;
+}
+
+.message-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 6px 0;
+  font-size: 0.82rem;
+  display: block;
+  overflow-x: auto;
+}
+
+.message-content th, .message-content td {
+  border: 1px solid var(--border);
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.message-content th { background-color: var(--bg-primary); font-weight: 600; }
+
+.message-content img { max-width: 100%; border-radius: 8px; }
+
+details.think,
+details.tool {
+  background-color: var(--bg-card);
+  border-radius: var(--radius);
+  font-size: 0.8rem;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+details summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-secondary);
+}
+
+details summary::-webkit-details-marker { display: none; }
+
+/* No collapse marker: the summary line is the only affordance, so rows stay quiet. */
+
+/* Which tool ran, at a glance — same colour as the row it sits in. */
+.tool-ico {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.think-body {
+  padding: 0 12px 10px;
+  color: var(--text-secondary);
+  font-style: italic;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+/* A finished tool row reads exactly like a Thought row: same size, weight and
+   colour. State is carried by the little icon, not by colour or bold text. */
+.tool-name {
+  font-weight: inherit;
+  color: inherit;
+}
+
+.tool-sum {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: inherit;
+}
+
+.tool-status { font-size: inherit; flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px; }
+
+/* A failed call turns red: icon, tool name and argument preview. */
+details.tool.failed .tool-ico,
+details.tool.failed .tool-name,
+details.tool.failed .tool-sum { color: #f87171; }
+
+.tool-body { padding: 0 12px 10px; }
+.tool-label { font-size: 0.65rem; text-transform: uppercase; color: var(--text-secondary); margin-top: 6px; }
+.tool-out { max-height: 220px; overflow-y: auto; }
+
+/* Tool previews (edit diff, written content). Same diff colours as the Changes tab, but a
+   little taller: the body has room for it and an edit is usually short. */
+.tool-diff { max-height: 320px; }
+.diff-stat { margin-left: 6px; font-family: monospace; letter-spacing: 0; text-transform: none; }
+.tool-note { margin: 4px 0 0; color: var(--text-secondary); font-style: italic; }
+
+/* web_search results, as cards. A numbered text dump is unreadable on a phone: the eye needs the
+   title and the host to judge a result, and the excerpt is only worth two lines. Backgrounds stay
+   at #000/#0a0a0a so the list does not glow against the AMOLED black. */
+.ws {
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  max-height: 340px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ws-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: #0a0a0a;
+  border-bottom: 1px solid var(--border);
+}
+.ws-q {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-prov {
+  flex-shrink: 0;
+  font-size: 0.58rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #a5b4fc;
+  border: 1px solid #2b2b52;
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.ws-item {
+  display: flex;
+  gap: 9px;
+  padding: 9px 10px;
+  border-top: 1px solid #151515;
+  text-decoration: none;
+  color: inherit;
+}
+.ws-head + .ws-item { border-top: none; }
+a.ws-item:active { background: #141414; }
+.ws-rank {
+  flex-shrink: 0;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 5px;
+  background: #171717;
+  color: var(--text-secondary);
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ws-main { flex: 1; min-width: 0; }
+.ws-title {
+  display: block;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+a.ws-item .ws-title { color: #c7d2fe; }
+.ws-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.63rem;
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-snip {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.ws-note {
+  padding: 7px 10px;
+  border-top: 1px solid #151515;
+  font-size: 0.63rem;
+  font-style: italic;
+  color: #6b7280;
+}
+
+.spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  animation-delay: calc(-1 * var(--anim-phase, 0s));
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+p.empty { padding: 24px 8px; text-align: center; }
+
+/* Sessions */
+.session-btn { max-width: 68%; }
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 2px 4px;
+}
+
+.session-row.selected {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--accent);
+}
+
+.session-row .model-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-row .model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1rem;
+  padding: 6px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.icon-btn:active { background-color: var(--bg-primary); }
+.icon-btn.danger { color: #f87171; }
+.busy-dot { color: #f59e0b; }
+
+/* Theme editor */
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.preset {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.preset.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.swatch {
+  width: 100%;
+  height: 16px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.theme-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.theme-row:last-child { border-bottom: none; }
+
+.theme-label {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.theme-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.theme-value input[type="color"] {
+  width: 40px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: none;
+  cursor: pointer;
+}
+
+.theme-hex {
+  width: 84px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  padding: 7px 8px;
+  font-family: monospace;
+  font-size: 0.78rem;
+  text-transform: lowercase;
+  outline: none;
+}
+
+.theme-hex:focus { border-color: var(--accent); }
+.theme-hex.invalid { border-color: #f87171; }
+
+.theme-value input[type="range"] {
+  width: 150px;
+  accent-color: var(--accent);
+}
+
+.theme-out {
+  width: 44px;
+  font-family: monospace;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+/* ---------- Lucide icons (markup comes from www/icons.js) ---------- */
+.ico {
+  display: inline-block;
+  vertical-align: -0.15em;
+  flex-shrink: 0;
+}
+
+.ico-inline { margin-right: 4px; }
+
+.ico.dim, .ico-wrap.dim { color: var(--text-secondary); }
+
+/* Slot left behind by <span data-icon="…"> once it is filled in. */
+.ico-slot {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* The model chip ellipsises its text span; the chevron must stay whole. */
+.model-btn .ico-slot { overflow: visible; }
+
+/* Lucide's loader takes over from the old CSS spinner. The negative delay keeps
+   streamed re-renders from restarting the cycle from zero. */
+.ico.spin {
+  animation: spin 0.8s linear infinite;
+  animation-delay: calc(-1 * var(--anim-phase, 0s));
+}
+
+/* Icon + label buttons and rows */
+.icon-btn-text {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.icon-btn .ico { display: block; }
+.sidebar-settings .ico-wrap, .sidebar-settings .ico-slot { flex-shrink: 0; }
+

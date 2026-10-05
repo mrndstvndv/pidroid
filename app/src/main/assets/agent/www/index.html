@@ -2,75 +2,261 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <!-- interactive-widget=resizes-content: shrink the layout viewport when the soft keyboard
+       opens instead of panning it, so the topbar is not pushed off the top of the screen. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
   <title>Pidroid Agent</title>
   <link rel="stylesheet" href="style.css" id="main-stylesheet">
+  <script>
+    // Apply the saved theme before first paint so there is no flash of the default palette.
+    try {
+      const saved = JSON.parse(localStorage.getItem("pidroid.theme") || "{}");
+      for (const [k, v] of Object.entries(saved)) if (v) document.documentElement.style.setProperty(k, v);
+    } catch (e) {}
+  </script>
 </head>
 <body>
   <div id="app">
-    <!-- Header -->
-    <header class="header">
-      <div class="logo">
-        <span class="logo-dot"></span>
-        <h1>Pidroid</h1>
-        <span class="badge" id="runtime-badge">Bun</span>
-      </div>
-      <div class="status-indicator">
-        <span class="status-dot online" id="status-dot"></span>
-        <span id="status-text">Connected</span>
-      </div>
+
+    <!-- Top bar: burger + session name. Chat is the only always-on screen. -->
+    <header class="topbar">
+      <button type="button" class="icon-btn burger" id="burger-btn" aria-label="Open sessions" aria-expanded="false">
+        <span data-icon="menu" data-size="20"></span>
+      </button>
+      <button type="button" class="topbar-title" id="session-btn" title="Sessions">
+        <span id="session-title">Session</span>
+      </button>
     </header>
 
-    <!-- Main Navigation Tabs -->
-    <nav class="nav-tabs">
-      <button class="tab-btn active" data-tab="chat">Agent Chat</button>
-      <button class="tab-btn" data-tab="workspace">Workspace Files</button>
-      <button class="tab-btn" data-tab="state">Runtime State</button>
-    </nav>
+    <!-- Screen 1: Chat (main) -->
+    <section class="screen active" id="screen-chat">
+      <div class="chat-messages" id="messages-container"></div>
 
-    <!-- Tab 1: Chat -->
-    <section class="tab-content active" id="tab-chat">
-      <div class="chat-messages" id="messages-container">
-        <div class="message assistant">
-          <div class="message-content">
-            Hello! I am your autonomous Android agent running on <strong>Bun + SQLite</strong>.
-            I have full tool access (<code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>) to modify my own UI, runtime, and files directly.
+      <div class="composer">
+        <div class="queue-bar" id="queue-bar" hidden></div>
+        <div class="composer-meta">
+          <div class="meta-stats" id="meta-stats">
+            <span class="stat-pill" id="ctx-pill" title="Context window usage">
+              <span class="conn-dot" id="conn-dot" title="Connection"></span>
+              <span id="ctx-label">Ctx –</span>
+              <span class="meter"><span class="meter-fill" id="ctx-fill"></span></span>
+            </span>
+            <span class="stat-pill" id="cache-label" title="Prompt cache hit rate">Cache –</span>
           </div>
-          <div class="message-meta">System</div>
+          <div class="meta-controls">
+            <select id="thinking-select" class="think-select" title="Thinking effort"></select>
+            <button type="button" class="model-btn" id="model-btn" title="Choose model">
+              <span data-icon="cpu" data-size="13"></span>
+              <span id="model-btn-label">Loading model...</span>
+              <span data-icon="chevron-down" data-size="14"></span>
+            </button>
+          </div>
+        </div>
+        <form class="chat-input-bar" id="chat-form">
+          <button type="button" class="attach-btn" id="attach-btn" title="Attach a file: it is uploaded and its path is put in the message for you to send">
+            <span data-icon="paperclip" data-size="18"></span>
+          </button>
+          <input type="text" id="chat-input" placeholder="Give the agent a task..." autocomplete="off" />
+          <button type="submit" id="send-btn" title="Send (queues while the agent is busy)">
+            <span data-icon="send" data-size="19"></span>
+          </button>
+          <button type="button" id="stop-btn" class="stop-btn" title="Stop the current run" hidden>
+            <span data-icon="square" data-size="16"></span>
+          </button>
+        </form>
+        <!-- Outside the form: picking a file must never look like a submit. -->
+        <input type="file" id="attach-input" multiple hidden />
+      </div>
+    </section>
+
+    <!-- Screen 2: Settings (all the old tabs) -->
+    <section class="screen" id="screen-settings">
+      <div class="settings-head">
+        <button type="button" class="icon-btn" id="settings-back" aria-label="Back to chat">
+          <span data-icon="arrow-left" data-size="20"></span>
+        </button>
+        <h2>Settings</h2>
+      </div>
+
+      <nav class="nav-tabs settings-tabs">
+        <button class="tab-btn active" data-tab="providers"><span data-icon="cpu" data-size="16"></span>Providers</button>
+        <button class="tab-btn" data-tab="theme"><span data-icon="palette" data-size="16"></span>Theme</button>
+        <button class="tab-btn" data-tab="extensions"><span data-icon="puzzle" data-size="16"></span>Extensions</button>
+        <button class="tab-btn" data-tab="changes"><span data-icon="git-compare" data-size="16"></span>Changes</button>
+        <button class="tab-btn" data-tab="workspace"><span data-icon="folder" data-size="16"></span>Files</button>
+      </nav>
+
+      <section class="tab-content active" id="tab-providers">
+        <div class="editor-header">
+          <h2>Models</h2>
+          <button class="btn-secondary icon-btn-text" id="refresh-models-btn">
+            <span data-icon="refresh-cw" data-size="15"></span><span class="btn-label">Refresh catalogs</span>
+          </button>
+        </div>
+        <p class="description">Pick the active model from the chat composer. Refresh re-fetches the OpenCode free and Command Code catalogs.</p>
+
+        <div class="editor-header">
+          <h2>Providers</h2>
+        </div>
+        <input type="search" id="provider-filter" class="field" placeholder="Filter providers..." autocomplete="off" />
+        <p class="description">Sign in to use a provider's models. OpenCode free models need no login.</p>
+        <div id="providers-list"><p>Loading providers...</p></div>
+      </section>
+
+      <section class="tab-content" id="tab-changes">
+        <div class="editor-header">
+          <h2>Changes</h2>
+          <div class="provider-actions">
+            <button class="btn-secondary icon-btn-text" id="undo-latest-btn">
+              <span data-icon="undo-2" data-size="15"></span><span class="btn-label">Undo last</span>
+            </button>
+            <button class="btn-secondary icon-btn-text" id="refresh-changes-btn">
+              <span data-icon="refresh-cw" data-size="15"></span><span class="btn-label">Refresh</span>
+            </button>
+          </div>
+        </div>
+        <p class="description">Every agent turn is checkpointed. Undo reverts just that turn's changes; Restore returns every file to how it was right after it. Undoing an undo brings the change back.</p>
+        <div id="changes-list"><p>Loading changes...</p></div>
+      </section>
+
+      <section class="tab-content files-tab" id="tab-workspace">
+        <div class="files-toolbar">
+          <div class="header-actions files-actions">
+            <button class="btn-secondary icon-btn-text" id="files-expand-btn">
+              <span data-icon="chevron-down" data-size="15"></span><span class="btn-label">Expand</span>
+            </button>
+            <button class="btn-secondary icon-btn-text" id="files-collapse-btn">
+              <span data-icon="chevron-right" data-size="15"></span><span class="btn-label">Collapse</span>
+            </button>
+            <button class="btn-secondary icon-btn-text" id="refresh-files-btn">
+              <span data-icon="refresh-cw" data-size="15"></span><span class="btn-label">Refresh</span>
+            </button>
+          </div>
+          <div class="field-wrap">
+            <span data-icon="search" data-size="15" class="field-icon"></span>
+            <input type="search" id="files-search" class="field" placeholder="Filter files..." autocomplete="off" />
+          </div>
+        </div>
+        <p class="files-summary" id="files-summary"></p>
+        <div class="files-tree" id="files-tree">
+          <p>Loading files...</p>
+        </div>
+      </section>
+
+      <section class="tab-content" id="tab-theme">
+        <div class="editor-header">
+          <h2>Theme</h2>
+          <button class="btn-secondary icon-btn-text" id="theme-reset">
+            <span data-icon="rotate-ccw" data-size="15"></span><span class="btn-label">Reset</span>
+          </button>
+        </div>
+        <p class="description">Presets are all dark to keep the AMOLED black background. Pick one, then fine-tune any color below.</p>
+
+        <div class="editor-header">
+          <h2>Presets</h2>
+        </div>
+        <div class="preset-grid" id="preset-grid"></div>
+
+        <div class="editor-header">
+          <h2>Colors</h2>
+        </div>
+        <div id="theme-controls"></div>
+
+        <div class="editor-header">
+          <h2>Shape</h2>
+        </div>
+        <div id="theme-shape"></div>
+      </section>
+
+      <section class="tab-content" id="tab-extensions">
+        <div class="editor-header">
+          <h2>Extensions</h2>
+          <div class="provider-actions">
+            <button class="btn-secondary icon-btn-text" id="reload-ext-btn">
+              <span data-icon="rotate-cw" data-size="15"></span><span class="btn-label">Reload</span>
+            </button>
+          </div>
+        </div>
+        <p class="description">
+          Every <code>extensions/*.ts</code> file default-exports one extension and is hot-swapped on reload —
+          no restart, sessions keep running. The switch on each row turns that extension off or on: flipping it
+          reloads right away, so a disabled extension drops its tools, prompt sections and hooks from the next
+          turn on. Files starting with an underscore are skipped by the loader and have no switch.
+        </p>
+        <div id="extensions-list"><p>Loading extensions...</p></div>
+        <div class="editor-header">
+          <h2>Reload result</h2>
+        </div>
+        <div class="state-card" id="extensions-result"><p>No reload yet this session.</p></div>
+      </section>
+    </section>
+
+    <!-- Sidebar: sessions, with settings at the bottom -->
+    <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
+    <aside class="sidebar" id="sidebar" aria-hidden="true">
+      <div class="sidebar-head">
+        <h3>Sessions</h3>
+        <button type="button" class="icon-btn" id="sidebar-close" aria-label="Close">
+          <span data-icon="x" data-size="18"></span>
+        </button>
+      </div>
+      <div class="sidebar-list" id="sidebar-session-list"></div>
+      <div class="sidebar-foot">
+        <button type="button" class="btn-primary sidebar-new icon-btn-text" id="new-session-btn">
+          <span data-icon="plus" data-size="16"></span><span class="btn-label">New session</span>
+        </button>
+        <button type="button" class="sidebar-settings" id="open-settings-btn">
+          <span data-icon="settings" data-size="18"></span>
+          <span>Settings</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Model chooser dialog -->
+    <div class="modal" id="model-modal" hidden>
+      <div class="modal-card square">
+        <input type="search" id="model-search" class="field" placeholder="Search models or providers..." autocomplete="off" />
+        <div class="model-list" id="model-list"></div>
+        <div class="modal-actions">
+          <span class="provider-meta" id="model-default"></span>
+          <span class="provider-meta" id="model-count"></span>
+          <button class="btn-secondary" id="model-close">Close</button>
         </div>
       </div>
-      <form class="chat-input-bar" id="chat-form">
-        <input type="text" id="chat-input" placeholder="Give the agent a task (e.g., 'Change theme to amber')..." autocomplete="off" />
-        <button type="submit" id="send-btn">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-          </svg>
-        </button>
-      </form>
-    </section>
+    </div>
 
-    <!-- Tab 2: Workspace Files -->
-    <section class="tab-content" id="tab-workspace">
-      <div class="editor-header">
-        <h2>Agent Workspace</h2>
-        <button class="btn-secondary" id="refresh-files-btn">Refresh</button>
+    <!-- File preview dialog (Files tab) -->
+    <div class="modal" id="file-modal" hidden>
+      <div class="modal-card">
+        <h3 id="file-modal-title"></h3>
+        <div id="file-modal-body"></div>
+        <div class="modal-actions">
+          <button class="btn-secondary" id="file-modal-close">Close</button>
+        </div>
       </div>
-      <p class="description">These are the actual files being executed and served. Any modification made here or by the agent immediately takes effect.</p>
-      <div class="files-list" id="files-list-container">
-        <p>Loading files...</p>
-      </div>
-    </section>
+    </div>
 
-    <!-- Tab 3: Agent State & System Info -->
-    <section class="tab-content" id="tab-state">
-      <h2>System & DB Status</h2>
-      <div class="state-card" id="system-info">
-        <p>Loading agent state...</p>
+    <!-- Login dialog -->
+    <div class="modal" id="login-modal" hidden>
+      <div class="modal-card">
+        <h3 id="login-title">Sign in</h3>
+        <div id="login-body"></div>
+        <div class="modal-actions">
+          <button class="btn-secondary" id="login-close">Cancel</button>
+        </div>
       </div>
-      <button class="btn-secondary" id="refresh-state-btn">Refresh State</button>
-    </section>
+    </div>
+
   </div>
 
+  <script src="icons.js"></script>
   <script src="app.js"></script>
+  <script src="files-tab.js"></script>
+  <script src="theme.js"></script>
+  <script src="extensions-tab.js"></script>
+  <script src="providers.js"></script>
+  <script src="chat.js"></script>
+  <script src="sessions.js"></script>
+  <script src="changes.js"></script>
 </body>
 </html>
