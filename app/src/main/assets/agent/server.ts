@@ -328,6 +328,9 @@ const SelfModify = defineExtension({
         "Every turn is checkpointed to git, so the user can undo your changes to the app (the workspace is not). If the server fails to start repeatedly the app falls back to a safe-mode server, so a broken edit can be undone from the Changes tab. " +
         "The Android shell around the web view (Kotlin) is not part of your sandbox and cannot be edited from here; if a feature needs it, say so instead of searching the device. " +
         "The shell userland on this phone is Android's toybox/mksh, not GNU: expect missing or different flags (cat -A is unsupported; use cat -etv, od -c, or read the file with the read tool; prefer small portable commands). " +
+        "On PATH: bun (the full CLI: bun run / test / build / install / add), bunx, ssh and ssh-keygen. Use bun to try out your own changes: run scripts and `bun test` against extensions in isolation, and `bun build server.ts --target=bun --outfile=/tmp/x.js` to check that the server still builds. " +
+        "Never `bun run server.ts` (a second server would fight this one for the port and the databases). " +
+        "A package's own CLI cannot be started through bunx or node_modules/.bin on Android (those scripts start with #!/usr/bin/env, which does not exist here): after `bun add <pkg>` run its script directly, e.g. `bun node_modules/<pkg>/bin/<cli>.js`. " +
         "Keep shell commands small and targeted; never loop over /proc or search the whole filesystem.",
       { tag: false },
     ),
