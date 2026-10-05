@@ -1,7 +1,72 @@
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.compose.compiler)
   alias(libs.plugins.kotlin.serialization)
+}
+
+/**
+ * Builds what the phone needs to run the agent from source with no node_modules:
+ *  - vendor/ + tsconfig.json: the npm dependencies as split bundles, with `paths` mapping package names to them, so
+ *    server.ts and the agent's own extensions run (and can be edited) as plain TypeScript;
+ *  - fallback/server.js: a full bundle of the shipped server, started in safe mode if an edited server keeps failing.
+ * Dependencies install from the committed bun.lock (--frozen-lockfile) in a scratch dir, keeping node_modules out of the APK.
+ */
+abstract class BundleAgentTask @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
+  @get:InputDirectory
+  @get:PathSensitive(PathSensitivity.RELATIVE)
+  abstract val agentDir: DirectoryProperty
+
+  /** package.json, bun.lock and build-vendor.ts */
+  @get:InputDirectory
+  @get:PathSensitive(PathSensitivity.RELATIVE)
+  abstract val toolsDir: DirectoryProperty
+
+  @get:Internal
+  abstract val workDir: DirectoryProperty
+
+  @get:OutputDirectory
+  abstract val outputDir: DirectoryProperty
+
+  @TaskAction
+  fun bundle() {
+    val work = workDir.get().asFile
+    work.deleteRecursively()
+    work.mkdirs()
+    agentDir.get().asFile.copyRecursively(work, overwrite = true)
+    toolsDir.get().asFile.copyRecursively(work, overwrite = true)
+
+    val home = System.getProperty("user.home")
+    val path = listOf("$home/.nix-profile/bin", "$home/.bun/bin", System.getenv("PATH") ?: "").joinToString(":")
+    val out = outputDir.get().asFile
+    out.deleteRecursively()
+    val agentOut = out.resolve("agent")
+    agentOut.mkdirs()
+
+    fun bun(vararg args: String) = exec.exec {
+      workingDir = work
+      environment("PATH", path)
+      commandLine("bun", *args)
+    }
+    bun("install", "--frozen-lockfile")
+    bun("build-vendor.ts", agentOut.absolutePath)
+    bun("build", "server.ts", "--target=bun", "--outfile=${agentOut.resolve("fallback/server.js").absolutePath}")
+  }
+}
+
+val bundleAgent = tasks.register<BundleAgentTask>("bundleAgent") {
+  agentDir.set(layout.projectDirectory.dir("src/main/assets/agent"))
+  toolsDir.set(layout.projectDirectory.dir("agent-build"))
+  workDir.set(layout.buildDirectory.dir("agent-bundle-work"))
+  outputDir.set(layout.buildDirectory.dir("generated/agentBundle"))
+}
+
+androidComponents {
+  onVariants { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(bundleAgent, BundleAgentTask::outputDir)
+  }
 }
 
 android {

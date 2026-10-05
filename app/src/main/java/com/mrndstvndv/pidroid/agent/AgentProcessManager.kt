@@ -1,16 +1,26 @@
 package com.mrndstvndv.pidroid.agent
 
 import android.content.Context
+import android.system.Os
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.TimeUnit
+import org.json.JSONObject
+
+/** PRIMARY runs the (agent-editable) server.ts; SAFE runs the shipped, known-good bundle after repeated startup failures. */
+enum class AgentMode { PRIMARY, SAFE }
 
 object AgentProcessManager {
     private const val TAG = "AgentProcessManager"
@@ -22,18 +32,39 @@ object AgentProcessManager {
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
+    /** Files the agent edited that an app update also changed; the UI asks which version to keep. */
+    private val _conflicts = MutableStateFlow<List<String>>(emptyList())
+    val conflicts: StateFlow<List<String>> = _conflicts.asStateFlow()
+
+    private val _mode = MutableStateFlow(AgentMode.PRIMARY)
+    val mode: StateFlow<AgentMode> = _mode.asStateFlow()
+
+    /** The server exits with this code to ask for an immediate relaunch (restart_server); anything else is a crash. */
+    private const val PLANNED_EXIT_CODE = 75
+    private const val FAST_EXIT_MS = 20_000L
+    private const val FAST_FAILURES_BEFORE_SAFE_MODE = 3
+    private var startedAt = 0L
+    private var fastFailures = 0
+
     private val _logs = MutableStateFlow<List<String>>(emptyList())
     val logs: StateFlow<List<String>> = _logs.asStateFlow()
 
     @Synchronized
-    fun startAgent(context: Context): Boolean {
+    fun startAgent(context: Context, choice: ConflictChoice? = null, force: Boolean = false): Boolean {
         if (process != null && process?.isAlive == true) {
             Log.d(TAG, "Agent process already running.")
             return true
         }
 
         try {
-            val agentDir = AssetExtractor.extractAgentAssets(context)
+            val extracted = AssetExtractor.extractAgentAssets(context, choice, force)
+            if (extracted.conflicts.isNotEmpty()) {
+                appendLog("[INFO] Waiting for you to resolve ${extracted.conflicts.size} update conflict(s) with the agent's edits")
+                _conflicts.value = extracted.conflicts
+                return false
+            }
+            _conflicts.value = emptyList()
+            val agentDir = extracted.dir
             val nativeDir = context.applicationInfo.nativeLibraryDir
             val bunBinary = File(nativeDir, "libbun.so")
 
@@ -42,7 +73,14 @@ object AgentProcessManager {
                 return false
             }
 
-            val serverScript = File(agentDir, "server.ts")
+            // Primary: the editable TypeScript source, with dependencies prebuilt in vendor/ (see tsconfig.json paths).
+            // Safe mode: a full bundle of the shipped server, built by bundleAgent, used if edits keep breaking startup.
+            val serverScript = if (_mode.value == AgentMode.SAFE) File(agentDir, "fallback/server.js") else File(agentDir, "server.ts")
+            if (!serverScript.exists()) {
+                appendLog("[ERROR] ${serverScript.absolutePath} not found")
+                return false
+            }
+            startedAt = System.currentTimeMillis()
             appendLog("[INFO] Spawning Bun runtime: ${bunBinary.absolutePath} run ${serverScript.absolutePath}")
 
             val processBuilder = ProcessBuilder(
@@ -54,6 +92,11 @@ object AgentProcessManager {
                 environment()["PORT"] = SERVER_PORT.toString()
                 environment()["TMPDIR"] = context.cacheDir.absolutePath
                 environment()["HOME"] = context.filesDir.absolutePath
+                // bun / bunx / ssh / ssh-keygen on PATH: the agent's bash tool can run scripts and install packages with
+                // Bun, and pi-env finds the OpenSSH client (from Termux, packaged as native libs) by name.
+                prepareTools(context)?.let { bin ->
+                    environment()["PATH"] = bin + ":" + (environment()["PATH"] ?: "/system/bin:/system/xbin")
+                }
                 redirectErrorStream(true)
             }
 
@@ -62,20 +105,35 @@ object AgentProcessManager {
             _isRunning.value = true
 
             scope.launch {
-                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
-                    var line: String?
-                    while (reader.readLine().also { line = it } != null) {
-                        line?.let {
-                            Log.d(TAG, "[Bun] $it")
-                            appendLog(it)
+                // Reading can throw when the process dies or is destroyed (e.g. Android's phantom-process killer);
+                // that must never take the app down.
+                runCatching {
+                    BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                        var line: String?
+                        while (reader.readLine().also { line = it } != null) {
+                            line?.let {
+                                Log.d(TAG, "[Bun] $it")
+                                appendLog(it)
+                            }
                         }
                     }
-                }
-                val exitCode = proc.waitFor()
+                }.onFailure { Log.w(TAG, "Bun output stream closed: ${it.message}") }
+
+                val exitCode = runCatching { proc.waitFor() }.getOrDefault(-1)
                 Log.d(TAG, "Bun process exited with code $exitCode")
                 appendLog("[INFO] Bun process stopped with exit code $exitCode")
-                _isRunning.value = false
-                process = null
+
+                // A restart may already have replaced this process; don't clobber the new one's state.
+                val unexpected = synchronized(this@AgentProcessManager) {
+                    if (process === proc) {
+                        _isRunning.value = false
+                        process = null
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (unexpected) onUnexpectedExit(context.applicationContext, exitCode, System.currentTimeMillis() - startedAt)
             }
 
             return true
@@ -95,6 +153,119 @@ object AgentProcessManager {
             _isRunning.value = false
             appendLog("[INFO] Agent process stopped by request.")
         }
+    }
+
+    private val crashTimes = ArrayDeque<Long>()
+
+    /**
+     * Bun exited without the app asking it to stop.
+     *  - Exit code 75: a planned restart (restart_server); relaunch at once.
+     *  - Otherwise a crash: relaunch after 2s. Three crashes in a row within seconds of starting mean the (edited)
+     *    server can't start, so switch to the shipped safe-mode server; the user can then undo the edit from the
+     *    Changes tab and tap Restart. Give up after repeated crashes so a poisoned run can't spin forever.
+     */
+    private suspend fun onUnexpectedExit(context: Context, exitCode: Int, livedMs: Long) {
+        if (exitCode == PLANNED_EXIT_CODE) {
+            appendLog("[INFO] Agent requested a restart")
+            delay(300)
+            startAgent(context)
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        fastFailures = if (livedMs < FAST_EXIT_MS) fastFailures + 1 else 0
+        if (fastFailures >= FAST_FAILURES_BEFORE_SAFE_MODE && _mode.value == AgentMode.PRIMARY) {
+            appendLog("[ERROR] The server failed to start $fastFailures times in a row; falling back to the shipped safe-mode server. Undo the last change in the Changes tab, then tap Restart.")
+            _mode.value = AgentMode.SAFE
+            fastFailures = 0
+        }
+
+        synchronized(crashTimes) {
+            crashTimes.addLast(now)
+            while (crashTimes.isNotEmpty() && now - crashTimes.first() > 120_000) crashTimes.removeFirst()
+            if (crashTimes.size > 8) {
+                appendLog("[ERROR] Agent crashed ${crashTimes.size} times in 2 minutes; not restarting. Tap Restart to try again.")
+                return
+            }
+        }
+        appendLog("[INFO] Agent stopped unexpectedly (exit $exitCode); restarting in 2s")
+        delay(2000)
+        startAgent(context)
+    }
+
+    /** User-initiated restart: leaves safe mode and tries the editable server again. */
+    fun restart(context: Context) {
+        scope.launch {
+            val old = process
+            stopAgent()
+            old?.waitFor(5, TimeUnit.SECONDS)
+            synchronized(crashTimes) { crashTimes.clear() }
+            fastFailures = 0
+            _mode.value = AgentMode.PRIMARY
+            startAgent(context.applicationContext)
+        }
+    }
+
+    /** Apply the user's choice for update conflicts, then start the agent. */
+    fun resolveConflicts(context: Context, choice: ConflictChoice) {
+        scope.launch { startAgent(context, choice) }
+    }
+
+    /** Overwrite every shipped file (and drop extras under www/), then restart. The server checkpoints the result to git. */
+    fun resetToShipped(context: Context) {
+        scope.launch {
+            val old = process
+            stopAgent()
+            old?.waitFor(5, TimeUnit.SECONDS)
+            startAgent(context, force = true)
+        }
+    }
+
+    /** Ask the running agent to undo its newest change. Returns a short message for the user. */
+    suspend fun undoLatestChange(): String = withContext(Dispatchers.IO) {
+        runCatching {
+            val conn = URL("http://127.0.0.1:$SERVER_PORT/api/changes/undo-latest").openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 3000
+            conn.readTimeout = 15000
+            val text = (if (conn.responseCode < 400) conn.inputStream else conn.errorStream).bufferedReader().readText()
+            val json = JSONObject(text)
+            when {
+                json.has("error") -> "Undo failed: ${json.getString("error")}"
+                json.getJSONArray("reverted").length() == 0 -> "Nothing to undo"
+                else -> "Reverted ${json.getJSONArray("reverted").length()} file(s)"
+            }
+        }.getOrElse { "Agent not reachable: ${it.message}" }
+    }
+
+    /**
+     * Command-line tools the agent's shell (and pi-env) expect by name. Android only lets an app execute files from its
+     * native library directory, where they live as lib*.so (libbun.so is the complete Bun CLI; libopenssh_*.so is
+     * OpenSSH). Link them under their real names into filesDir/bin, which the caller puts on PATH. The link target
+     * moves with every install, so the links are recreated on each start. Returns that directory, or null if no tool
+     * could be linked.
+     *
+     * `bunx` is the same binary: Bun switches to its `x` mode when started under that name.
+     */
+    private fun prepareTools(context: Context): String? {
+        val nativeDir = File(context.applicationInfo.nativeLibraryDir)
+        val bin = File(context.filesDir, "bin").apply { mkdirs() }
+        val tools = mapOf(
+            "bun" to "libbun.so",
+            "bunx" to "libbun.so",
+            "ssh" to "libopenssh_ssh.so",
+            "ssh-keygen" to "libopenssh_keygen.so",
+        )
+        var linked = 0
+        for ((name, lib) in tools) {
+            val target = File(nativeDir, lib)
+            if (!target.exists()) continue
+            val link = File(bin, name)
+            link.delete()
+            runCatching { Os.symlink(target.absolutePath, link.absolutePath); linked++ }
+                .onFailure { appendLog("[WARN] Could not link $name: ${it.message}") }
+        }
+        return if (linked > 0) bin.absolutePath else null
     }
 
     private fun appendLog(line: String) {
