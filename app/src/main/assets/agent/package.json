@@ -1,0 +1,14 @@
+{
+  "name": "pidroid-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.ts",
+  "scripts": {
+    "start": "bun run server.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-durable": "^1.0.3",
+    "@earendil-works/pi-ai": "^1.0.3",
+    "@earendil-works/chord": "^1.0.3"
+  }
+}

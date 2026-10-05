@@ -5,10 +5,10 @@ plugins {
 }
 
 android {
-    namespace = "dev.mrndstvndv.pidroid"
+    namespace = "com.mrndstvndv.pidroid"
     compileSdk = 36
     defaultConfig {
-        applicationId = "dev.mrndstvndv.pidroid"
+        applicationId = "com.mrndstvndv.pidroid"
         minSdk = 24
         targetSdk = 36
         versionCode = 1
@@ -35,6 +35,9 @@ android {
     packaging {
       resources {
         excludes += "/META-INF/{AL2.0,LGPL2.1}"
+      }
+      jniLibs {
+        useLegacyPackaging = true
       }
     }
 }
@@ -81,11 +84,4 @@ dependencies {
   implementation(libs.androidx.navigation3.ui)
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
-
-  // Networking (pi-bridge: HTTP discovery + WebSocket session)
-  implementation(libs.ktor.client.core)
-  implementation(libs.ktor.client.okhttp)
-  implementation(libs.ktor.client.websockets)
-  implementation(libs.ktor.client.content.negotiation)
-  implementation(libs.ktor.serialization.kotlinx.json)
 }
