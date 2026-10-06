@@ -22,6 +22,7 @@ const BINARY_EXT = new Set(["zip", "gz", "tar", "sqlite", "db", "so", "apk", "ja
 
 let data = null;
 const openDirs = new Set();
+let errors = []; // errors reported by the previewed page (see the hook the server injects into HTML)
 let openFile = null; // { node, mode: "preview" | "source" }
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -112,7 +113,14 @@ async function showFile(node, mode) {
 
   if (isHtml && openFile.mode === "preview") {
     // allow-same-origin is deliberately absent: the page gets an opaque origin.
-    viewer.innerHTML = `<iframe class="artifact-frame" sandbox="allow-scripts allow-forms allow-modals allow-popups" src="${esc(url)}"></iframe>`;
+    errors = [];
+    viewer.innerHTML =
+      `<iframe class="artifact-frame" sandbox="allow-scripts allow-forms allow-modals allow-popups" src="${esc(url)}"></iframe>` +
+      `<div class="artifact-errors" hidden>` +
+        `<div class="artifact-errors-bar"><span class="artifact-errors-title"></span>` +
+          `<button type="button" data-act="copy">Copy</button><button type="button" data-act="clear">Dismiss</button></div>` +
+        `<pre class="artifact-errors-text"></pre>` +
+      `</div>`;
     return;
   }
   if (IMAGE_EXT.has(e)) {
@@ -164,6 +172,58 @@ refreshBtn.addEventListener("click", () => {
   else loadArtifacts();
 });
 
+/* ---------- preview errors ----------
+   The server injects a script into served HTML that postMessages uncaught errors up to here. The panel is
+   plain selectable text in a scroll container, so it can be read in full and copied, unlike an error the
+   page paints on its own canvas. */
+
+function renderErrors() {
+  const panel = viewer.querySelector(".artifact-errors");
+  if (!panel) return;
+  panel.hidden = errors.length === 0;
+  panel.querySelector(".artifact-errors-title").textContent = errors.length === 1 ? "Page error" : `${errors.length} page errors`;
+  panel.querySelector(".artifact-errors-text").textContent = errors.join("\n\n");
+}
+
+window.addEventListener("message", (e) => {
+  const frame = viewer.querySelector("iframe");
+  if (!frame || e.source !== frame.contentWindow) return;
+  const msg = e.data && e.data.pidroidArtifactError;
+  if (typeof msg !== "string") return;
+  if (errors.length < 20 && errors[errors.length - 1] !== msg) errors.push(msg);
+  renderErrors();
+});
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;opacity:0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (err) { /* nothing more to try */ }
+    ta.remove();
+    return ok;
+  }
+}
+
+viewer.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".artifact-errors button");
+  if (!btn) return;
+  if (btn.dataset.act === "clear") {
+    errors = [];
+    renderErrors();
+  } else {
+    const ok = await copyText(errors.join("\n\n"));
+    btn.textContent = ok ? "Copied" : "Copy failed";
+    setTimeout(() => (btn.textContent = "Copy"), 1500);
+  }
+});
+
 /* ---------- loading ---------- */
 
 async function loadArtifacts() {
@@ -182,11 +242,7 @@ async function loadArtifacts() {
 }
 
 window.loadArtifacts = loadArtifacts;
-// app.js's Android back-button handler: close an open file first, the screen only when none is open.
-window.artifactsHandleBack = () => {
-  if (!openFile) return false;
-  closeFile();
-  return true;
-};
+// Back closes an open file first; the screen itself is closed by app.js's own layer below it.
+registerBackLayer(60, () => openFile !== null, closeFile);
 
 })();

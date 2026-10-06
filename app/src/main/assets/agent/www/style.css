@@ -426,6 +426,9 @@ body {
   border-radius: var(--radius);
   font-size: 0.9rem;
   line-height: 1.4;
+  /* Long unbroken strings (URLs, stack traces) wrap inside the bubble instead of poking out of it. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .message.assistant {
@@ -2114,3 +2117,39 @@ html[data-mode="light"] { color-scheme: light; }
 }
 .mode-seg button + button { border-left: 1px solid var(--border); }
 .mode-seg button.selected { background: var(--accent); color: #fff; }
+
+/* Errors reported by an HTML preview: a bottom sheet of selectable, scrollable text. */
+.artifact-errors {
+  flex: none;
+  max-height: 45%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+}
+.artifact-errors[hidden] { display: none; }
+.artifact-errors-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; }
+.artifact-errors-title { flex: 1; font-size: 0.8rem; font-weight: 600; color: var(--danger-text); }
+.artifact-errors-bar button {
+  padding: 5px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.artifact-errors-text {
+  margin: 0;
+  padding: 4px 12px max(12px, env(safe-area-inset-bottom, 0px));
+  overflow: auto;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+  touch-action: pan-x pan-y;
+}

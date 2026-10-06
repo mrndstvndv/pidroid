@@ -1168,13 +1168,24 @@ const server = Bun.serve({
       let real = insideWorkspace(ws.dir, rel);
       if (real && statSync(real).isDirectory()) real = insideWorkspace(ws.dir, join(rel, "index.html"));
       if (!real || !statSync(real).isFile()) return new Response("Not found", { status: 404 });
-      return new Response(Bun.file(real), {
-        headers: {
-          "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-modals allow-popups",
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-        },
-      });
+      const headers = {
+        "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-modals allow-popups",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      };
+      if (/\.html?$/i.test(real)) {
+        // The preview iframe has an opaque origin, so the app cannot see inside it. A tiny script injected
+        // ahead of the page's own forwards uncaught errors (and console.error) to the Artifacts screen, which
+        // shows them in a scrollable, copyable panel instead of whatever the page manages to draw.
+        const html = readFileSync(real, "utf-8");
+        const hook = `<script>(function(){function send(m){try{parent.postMessage({pidroidArtifactError:String(m).slice(0,20000)},"*")}catch(e){}}` +
+          `addEventListener("error",function(e){send((e.error&&e.error.stack)||(e.message+(e.filename?"\\n  at "+e.filename+":"+e.lineno+":"+e.colno:"")))});` +
+          `addEventListener("unhandledrejection",function(e){var r=e.reason;send("Unhandled rejection: "+((r&&r.stack)||r))});` +
+          `var ce=console.error;console.error=function(){send(Array.prototype.map.call(arguments,function(a){return a&&a.stack||(typeof a==="object"?JSON.stringify(a):String(a))}).join(" "));return ce.apply(console,arguments)};})()</script>`;
+        const injected = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + hook) : hook + html;
+        return new Response(injected, { headers: { ...headers, "Content-Type": "text/html; charset=utf-8" } });
+      }
+      return new Response(Bun.file(real), { headers });
     }
 
     // View one file from the tree. Guarded: the path must stay inside APP_DIR once resolved, and the

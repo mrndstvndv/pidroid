@@ -15,6 +15,7 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.net.toUri
@@ -85,6 +86,13 @@ fun AgentWebViewScreen() {
     statusBarDp[0] = with(density) { WindowInsets.statusBars.getTop(density).toDp().value }
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    // Back gesture: the page owns what is open (dialogs, sidebar, file viewer, Settings/Artifacts) and tells us
+    // through setCanGoBack, because the handler must be armed before the gesture starts. With nothing open this
+    // is disabled, so back leaves the app as usual.
+    var pageCanGoBack by remember { mutableStateOf(false) }
+    BackHandler(enabled = pageCanGoBack) {
+        webViewRef?.evaluateJavascript("window.pidroidBack && pidroidBack()", null)
+    }
     LaunchedEffect(systemDark) {
         webViewRef?.evaluateJavascript("window.pidroidSystemThemeChanged && pidroidSystemThemeChanged()", null)
     }
@@ -246,6 +254,11 @@ fun AgentWebViewScreen() {
                             fun setBarColor(css: String) {
                                 val parsed = runCatching { android.graphics.Color.parseColor(css.trim()) }.getOrNull() ?: return
                                 post { reportedBg = Color(parsed) }
+                            }
+
+                            @JavascriptInterface
+                            fun setCanGoBack(canGoBack: Boolean) {
+                                post { pageCanGoBack = canGoBack }
                             }
 
                             @JavascriptInterface

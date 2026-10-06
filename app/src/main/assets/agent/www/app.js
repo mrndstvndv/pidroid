@@ -143,41 +143,62 @@ let overlay = null;
 
 // Settings and Artifacts are full-screen takeovers: the chat topbar goes away and their head
 // (styled as a topbar) sits at the very top, so nothing of the chat peeks through.
-// Each open pushes a history entry so the Android back button returns here as well.
 function showScreen(name) {
   const next = name === "settings" || name === "artifacts" ? name : null;
   chatScreen.classList.toggle("active", !next);
   settingsScreen.classList.toggle("active", next === "settings");
   artifactsScreen.classList.toggle("active", next === "artifacts");
   if (topbar) topbar.hidden = !!next;
+  overlay = next;
 
   syncChromeHeights(); // the hidden topbar must stop reserving space
 
-  if (next) {
-    if (!overlay) history.pushState({ pidroidScreen: next }, "");
-    overlay = next;
-    // Cheap (~5 kB) and keeps the list honest after a sign-in elsewhere.
-    if (next === "settings") window.loadProviders?.();
-    if (next === "artifacts") window.loadArtifacts?.();
-  } else {
-    const wasOpen = overlay;
-    overlay = null;
-    if (wasOpen && history.state?.pidroidScreen) history.back(); // pops our own entry
-    window.scrollChatToBottom?.();
-  }
+  if (next === "settings") window.loadProviders?.(); // cheap (~5 kB) and keeps the list honest after a sign-in elsewhere
+  else if (next === "artifacts") window.loadArtifacts?.();
+  else window.scrollChatToBottom?.();
 }
 
-window.addEventListener("popstate", () => {
-  if (overlay && window.artifactsHandleBack?.()) {
-    // Back closed an open file viewer, not the screen: keep our history entry.
-    history.pushState({ pidroidScreen: overlay }, "");
-    return;
+/* ---------- back navigation ----------
+   One place decides what "back" closes, so the Android back gesture (and any later caller) needs no
+   per-screen knowledge. Anything dismissable registers a layer: isOpen() says whether it is showing,
+   close() dismisses it. The open layer with the highest priority wins, so the topmost thing on screen
+   closes first. Layers read live DOM state rather than tracking open/close calls, because several of
+   them are toggled directly via `hidden` from more than one place.
+   The native host calls window.pidroidBack(); false means nothing was open, and the app may exit. */
+const backLayers = [];
+window.registerBackLayer = (priority, isOpen, close) => {
+  backLayers.push({ priority, isOpen, close });
+  backLayers.sort((x, y) => y.priority - x.priority);
+};
+window.pidroidBack = () => {
+  for (const layer of backLayers) {
+    if (!layer.isOpen()) continue;
+    layer.close();
+    return true;
   }
-  if (overlay) {
-    overlay = null;
-    showScreen("chat");
-  }
-});
+  return false;
+};
+window.addEventListener("load", () => { reportedCanGoBack = null; reportBackState(); });
+
+// The native back handler has to be armed before the gesture starts (predictive back), so tell the host
+// whenever "something is open" flips. A MutationObserver on class/hidden changes covers every layer without
+// each one having to announce itself; the check is a handful of DOM reads, batched to one per frame.
+let reportedCanGoBack = null;
+function reportBackState() {
+  const open = backLayers.some((layer) => layer.isOpen());
+  if (open === reportedCanGoBack) return;
+  reportedCanGoBack = open;
+  try { window.PidroidHost?.setCanGoBack?.(open); } catch (e) { /* not in the app */ }
+}
+let backCheckQueued = false;
+new MutationObserver(() => {
+  if (backCheckQueued) return;
+  backCheckQueued = true;
+  requestAnimationFrame(() => { backCheckQueued = false; reportBackState(); });
+}).observe(document.body, { subtree: true, attributes: true, attributeFilter: ["hidden", "class"] });
+
+// Priorities: dialogs 100, sidebar 80, in-screen detail 60, full-screen takeovers 40.
+registerBackLayer(40, () => overlay !== null, () => showScreen("chat"));
 
 // Tab switching inside Settings
 document.querySelectorAll(".tab-btn").forEach(button => {
@@ -250,6 +271,7 @@ window.closeSidebar = closeSidebar;
 burger?.addEventListener("click", openSidebar);
 scrim?.addEventListener("click", closeSidebar);
 document.getElementById("sidebar-close")?.addEventListener("click", closeSidebar);
+registerBackLayer(80, () => sidebar.classList.contains("open"), closeSidebar);
 // The title doubles as a shortcut to the session list.
 document.getElementById("session-btn")?.addEventListener("click", openSidebar);
 

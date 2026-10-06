@@ -230,6 +230,8 @@ function closeModal() {
 }
 
 document.getElementById("login-close").addEventListener("click", closeModal);
+registerBackLayer(110, () => !loginModal.hidden, closeModal);
+registerBackLayer(100, () => !modelModal.hidden, () => (modelModal.hidden = true));
 
 function showKeyForm(provider) {
   openModal(`${provider.name} API key`);

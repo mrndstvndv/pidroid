@@ -263,6 +263,7 @@ document.getElementById("refresh-files-btn")?.addEventListener("click", () => {
 });
 
 document.getElementById("file-modal-close")?.addEventListener("click", closePreview);
+registerBackLayer(100, () => document.getElementById("file-modal")?.hidden === false, closePreview);
 document.getElementById("file-modal")?.addEventListener("click", (event) => {
   if (event.target.id === "file-modal") closePreview(); // tap the scrim
 });
