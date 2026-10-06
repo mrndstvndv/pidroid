@@ -30,6 +30,8 @@ object AndroidBridge {
     private const val MAX_REQUEST_BYTES = 256 * 1024
 
     private var server: LocalServerSocket? = null
+    // LocalServerSocket(fd) borrows this socket's descriptor; if it is collected, its finalizer closes the fd under the server.
+    private var bound: LocalSocket? = null
     private var scope: CoroutineScope? = null
 
     fun socketPath(context: Context): String = File(context.filesDir, SOCKET_NAME).absolutePath
@@ -42,9 +44,10 @@ object AndroidBridge {
         try {
             File(path).delete()
             // A filesystem socket (rather than the abstract namespace) so permissions apply and Bun can address it by path.
-            val bound = LocalSocket().apply { bind(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM)) }
+            val sock = LocalSocket().apply { bind(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM)) }
+            bound = sock
             Os.chmod(path, 384) // 0600
-            val srv = LocalServerSocket(bound.fileDescriptor)
+            val srv = LocalServerSocket(sock.fileDescriptor)
             server = srv
             val s = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             scope = s
@@ -58,13 +61,17 @@ object AndroidBridge {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start bridge", e)
             server = null
+            runCatching { bound?.close() }
+            bound = null
         }
     }
 
     @Synchronized
     fun stop(context: Context) {
         runCatching { server?.close() }
+        runCatching { bound?.close() }
         server = null
+        bound = null
         scope?.cancel()
         scope = null
         File(socketPath(context)).delete()
