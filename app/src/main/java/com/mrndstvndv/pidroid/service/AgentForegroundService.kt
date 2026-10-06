@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import com.mrndstvndv.pidroid.MainActivity
 import com.mrndstvndv.pidroid.R
 import com.mrndstvndv.pidroid.agent.AgentProcessManager
+import com.mrndstvndv.pidroid.bridge.AndroidBridge
 
 class AgentForegroundService : Service() {
 
@@ -51,8 +52,10 @@ class AgentForegroundService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 AgentProcessManager.stopAgent()
+                AndroidBridge.stop(this)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
+                MainActivity.closeApp()
                 return START_NOT_STICKY
             }
             ACTION_START, null -> {
@@ -67,6 +70,7 @@ class AgentForegroundService : Service() {
                     startForeground(NOTIFICATION_ID, notification)
                 }
 
+                AndroidBridge.start(applicationContext)
                 AgentProcessManager.startAgent(applicationContext)
             }
         }
@@ -75,6 +79,7 @@ class AgentForegroundService : Service() {
 
     override fun onDestroy() {
         AgentProcessManager.stopAgent()
+        AndroidBridge.stop(this)
         super.onDestroy()
     }
 
@@ -102,12 +107,20 @@ class AgentForegroundService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val stopIntent = PendingIntent.getService(
+            this,
+            1,
+            Intent(this, AgentForegroundService::class.java).apply { action = ACTION_STOP },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Pidroid Autonomous Agent")
             .setContentText(status)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .addAction(0, "Stop agent", stopIntent)
             .build()
     }
 }

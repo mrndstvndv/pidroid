@@ -3,6 +3,7 @@ package com.mrndstvndv.pidroid.agent
 import android.content.Context
 import android.system.Os
 import android.util.Log
+import com.mrndstvndv.pidroid.bridge.AndroidBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -92,6 +93,7 @@ object AgentProcessManager {
                 environment()["PORT"] = SERVER_PORT.toString()
                 environment()["TMPDIR"] = context.cacheDir.absolutePath
                 environment()["HOME"] = context.filesDir.absolutePath
+                environment()["PIDROID_BRIDGE_SOCKET"] = AndroidBridge.socketPath(context)
                 // bun / bunx / ssh / ssh-keygen on PATH: the agent's bash tool can run scripts and install packages with
                 // Bun, and pi-env finds the OpenSSH client (from Termux, packaged as native libs) by name.
                 prepareTools(context)?.let { bin ->

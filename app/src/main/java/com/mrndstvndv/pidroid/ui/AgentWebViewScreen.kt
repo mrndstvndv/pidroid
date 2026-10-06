@@ -268,6 +268,12 @@ fun AgentWebViewScreen() {
                                     AgentProcessManager.restart(ctx)
                                 }
                             }
+
+                            // Same path as the notification's Stop agent button: the service stops the agent and closes the app.
+                            @JavascriptInterface
+                            fun shutdown() {
+                                post { AgentForegroundService.stop(ctx) }
+                            }
                         }, "PidroidHost")
                         webViewRef = this
                     }

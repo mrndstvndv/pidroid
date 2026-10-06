@@ -47,6 +47,9 @@
     <!-- Screen 1: Chat (main) -->
     <section class="screen active" id="screen-chat">
       <div class="chat-messages" id="messages-container"></div>
+      <button type="button" class="chat-jump-bottom" id="chat-jump-bottom" title="Jump to latest" aria-label="Jump to latest turn" hidden>
+        <span data-icon="chevron-down" data-size="20"></span>
+      </button>
 
       <div class="composer">
         <div class="attachment-tray" id="attachment-tray" role="list" aria-label="Attached images" hidden></div>
@@ -290,6 +293,9 @@
           <button type="button" class="sidebar-settings" id="open-settings-btn">
             <span data-icon="settings" data-size="18"></span>
             <span>Settings</span>
+          </button>
+          <button type="button" class="sidebar-settings sidebar-stop" id="stop-btn" aria-label="Stop agent" title="Stop agent and close app">
+            <span data-icon="power" data-size="18"></span>
           </button>
           <button type="button" class="sidebar-settings sidebar-restart" id="restart-btn" aria-label="Restart agent" title="Restart agent">
             <span data-icon="rotate-cw" data-size="18"></span>

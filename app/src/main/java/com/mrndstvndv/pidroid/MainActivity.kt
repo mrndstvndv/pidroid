@@ -15,8 +15,18 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import com.mrndstvndv.pidroid.theme.PidroidTheme
 import com.mrndstvndv.pidroid.ui.AgentWebViewScreen
+import java.lang.ref.WeakReference
 
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        private var current: WeakReference<MainActivity>? = null
+
+        /** Closes the UI and removes the task from recents; a no-op when the activity is already gone. */
+        fun closeApp() {
+            current?.get()?.let { it.runOnUiThread { it.finishAndRemoveTask() } }
+        }
+    }
 
     private val requestNotificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
@@ -25,6 +35,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        current = WeakReference(this)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -45,5 +56,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        if (current?.get() === this) current = null
+        super.onDestroy()
     }
 }

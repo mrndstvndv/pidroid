@@ -254,6 +254,34 @@ restartBtn?.addEventListener("click", async () => {
   }
 });
 
+// Stop shuts everything down. In the app the Android host does it (same path as the notification's
+// Stop agent button: kills the agent process and closes the app). A plain browser has no host, so
+// it falls back to the server's own stop endpoint, which only exits the Bun process.
+const stopBtn = document.getElementById("stop-btn");
+stopBtn?.addEventListener("click", async () => {
+  const hosted = !!window.PidroidHost?.shutdown;
+  const msg = hosted
+    ? "Stop the agent and close Pidroid? This ends any running work."
+    : "Stop the server process? This ends any running work.";
+  if (!confirm(msg)) return;
+  stopBtn.disabled = true;
+  if (hosted) {
+    serverStopping = true;
+    window.PidroidHost.shutdown();
+    return;
+  }
+  try {
+    const res = await fetch("/api/stop", { method: "POST" });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    serverStopping = true;
+    setConnected(false);
+    alert("The Bun server has stopped. Reopen Pidroid to start it again.");
+  } catch (err) {
+    alert("Could not stop the server: " + (err instanceof Error ? err.message : err));
+    stopBtn.disabled = false;
+  }
+});
+
 /* ---------- sidebar ---------- */
 
 const sidebar = document.getElementById("sidebar");
@@ -289,12 +317,14 @@ document.getElementById("session-btn")?.addEventListener("click", openSidebar);
 // WebSocket Setup
 let socket = null;
 let reloadTimeout = null;
+let serverStopping = false;
 
 function setConnected(online) {
   document.getElementById("conn-dot")?.classList.toggle("online", online);
 }
 
 function connectWebSocket() {
+  if (serverStopping) return;
   socket = new WebSocket(wsUrl);
 
   socket.onopen = () => setConnected(true);
@@ -304,6 +334,8 @@ function connectWebSocket() {
       const data = JSON.parse(event.data);
       if (data.event === "agent_view") {
         window.onAgentView?.(data.payload);
+      } else if (data.event === "agent_update") {
+        window.onAgentUpdate?.(data.payload);
       } else if (data.event === "sessions_changed") {
         window.onSessionsEvent?.();
       } else if (data.event === "changes") {
@@ -330,7 +362,7 @@ function connectWebSocket() {
 
   socket.onclose = () => {
     setConnected(false);
-    setTimeout(connectWebSocket, 2000);
+    if (!serverStopping) setTimeout(connectWebSocket, 2000);
   };
 }
 
