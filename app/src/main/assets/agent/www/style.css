@@ -1151,15 +1151,19 @@ textarea {
 /* Sweeping highlight across the live status text ("Thinking…", "Working…").
    The gradient is clipped to the glyphs, so only the text itself lights up. */
 .shimmer {
+  /* base = resting text, peak = the sweep. Dark mode brightens towards white; on a light page a
+     brighter sweep would vanish, so the base is washed out and the sweep darkens through the accent. */
+  --shimmer-base: var(--text-secondary);
+  --shimmer-peak: var(--text-primary);
   background-image: linear-gradient(
     100deg,
-    var(--text-secondary) 0%,
-    var(--text-secondary) 35%,
-    var(--text-primary) 45%,
+    var(--shimmer-base) 0%,
+    var(--shimmer-base) 32%,
+    var(--shimmer-peak) 44%,
     var(--accent) 50%,
-    var(--text-primary) 55%,
-    var(--text-secondary) 65%,
-    var(--text-secondary) 100%
+    var(--shimmer-peak) 56%,
+    var(--shimmer-base) 68%,
+    var(--shimmer-base) 100%
   );
   background-size: 220% 100%;
   -webkit-background-clip: text;
@@ -1170,6 +1174,11 @@ textarea {
   /* chat.js re-creates these nodes on every streamed update; --anim-phase makes the new
      node resume the sweep instead of restarting it. */
   animation-delay: calc(-1 * var(--anim-phase, 0s));
+}
+
+html[data-mode="light"] .shimmer {
+  --shimmer-base: color-mix(in srgb, var(--text-secondary) 45%, var(--bg-primary));
+  --shimmer-peak: var(--text-primary);
 }
 
 @keyframes shimmer {
