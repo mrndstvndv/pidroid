@@ -1,0 +1,205 @@
+// Pidroid launcher-icon generator — writes brand/pidroid-icon*.svg.
+//
+// The ">_" knockout has mitred corners and the cursor is a stadium, so the
+// coordinates are derived here rather than nudged by hand. Edit TUNE, re-run
+// `bun brand/gen.mjs`, and the SVG layers are rewritten.
+//
+//   bun brand/gen.mjs            # regenerate the layers
+//   bun brand/gen.mjs --print    # just dump the path data
+//
+// Geometry rules that are easy to break by hand:
+//   * Adaptive icons are 108dp; the launcher may crop the outer 18dp per side,
+//     so all art must stay within r=36 of (54,54).
+//   * Knockouts are real subpaths under fill-rule="evenodd" — no <mask>, no CSS,
+//     no filters — so the files convert to Android VectorDrawable unchanged.
+//   * An arc whose radii are too small for its chord gets scaled up by the SVG
+//     spec, so the cursor is two semicircles (chord == 2r), not a rounded rect.
+
+import { join, dirname } from "path";
+
+const OUT = dirname(new URL(import.meta.url).pathname);
+
+const r2 = (n) => Math.round(n * 100) / 100;
+
+const TUNE = {
+  plate: { r: 24 },
+  head: { x: 30, y: 33, w: 48, h: 38, r: 13 },
+  // Face prompt, optically centred on the head. Small on purpose: at launcher
+  // sizes the knockout has to read as two marks, not a big black arrow.
+  prompt: { P: [40.6, 45.2], V: [50.4, 54.0], R: [40.6, 62.8], w: 3.1 },
+  // Cursor sits on the prompt's baseline, which is what makes it read as ">_"
+  // instead of "play button and minus sign".
+  cursor: { cx: 64.2, cy: 60.2, w: 11.5, h: 5.2 },
+  // Antennae are the tallest art, so they set the safe-zone budget: Google's
+  // guaranteed-visible area is a 66dp circle (r=33), not the 72dp crop, so the
+  // tips have to clear 33 even though the mask would only crop at 36.
+  antennae: [
+    { stem: [[45.4, 36], [43.8, 29.4]], dot: [43.2, 26.6], r: 3.2 },
+    { stem: [[62.6, 36], [64.2, 29.4]], dot: [64.8, 26.6], r: 3.2 },
+  ],
+  antennaStroke: 4.3,
+  markScale: 1.08,
+  colors: {
+    shellTop: "#a5b4fc",
+    shellBottom: "#6366f1",
+    plateTop: "#241f4d",
+    plateMid: "#0d0c1a",
+    plateBottom: "#000000",
+  },
+};
+
+// --- geometry ---------------------------------------------------------------
+
+function headPath({ x, y, w, h, r }) {
+  return `M${x + r} ${y} H${x + w - r} A${r} ${r} 0 0 1 ${x + w} ${y + r} V${y + h - r} A${r} ${r} 0 0 1 ${x + w - r} ${y + h} H${x + r} A${r} ${r} 0 0 1 ${x} ${y + h - r} V${y + r} A${r} ${r} 0 0 1 ${x + r} ${y} Z`;
+}
+
+// Mitred ">" band around the polyline P -> V -> R, half-width w.
+function chevron(P, V, R, w) {
+  const unit = (a, b) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
+    return [dx / L, dy / L];
+  };
+  const d1 = unit(P, V), d2 = unit(V, R);
+  // The arms run in opposite directions, so the same [dy,-dx] rotation lands on
+  // opposite sides — which is exactly "outer" for each arm.
+  const nA = [d1[1], -d1[0]], nB = [d2[1], -d2[0]];
+  const add = (p, n) => [p[0] + w * n[0], p[1] + w * n[1]];
+  const sub = (p, n) => [p[0] - w * n[0], p[1] - w * n[1]];
+  const xing = (a, da, b, db) => {
+    const t = ((b[0] - a[0]) * db[1] - (b[1] - a[1]) * db[0]) / (da[0] * db[1] - da[1] * db[0]);
+    return [a[0] + t * da[0], a[1] + t * da[1]];
+  };
+  const P_up = add(P, nA), P_dn = sub(P, nA);
+  const R_dn = add(R, nB), R_up = sub(R, nB);
+  // Top face out to the mitre, round the tip, back along the bottom face, across
+  // the end cap, in along the inner faces, across the top cap.
+  return [P_up, xing(P_up, d1, R_dn, d2), R_dn, R_up, xing(P_dn, d1, R_up, d2), P_dn];
+}
+
+const wedge = (pts) => "M" + pts.map(([x, y], i) => `${i ? "L" : ""}${r2(x)} ${r2(y)}`).join(" ") + " Z";
+
+// Horizontal stadium: two semicircular caps of radius h/2.
+function cursorPath({ cx, cy, w, h }) {
+  const r = r2(h / 2);
+  const xa = r2(cx - w / 2 + r), xb = r2(cx + w / 2 - r);
+  return `M${xa} ${r2(cy - r)} A${r} ${r} 0 0 0 ${xa} ${r2(cy + r)} L${xb} ${r2(cy + r)} A${r} ${r} 0 0 0 ${xb} ${r2(cy - r)} Z`;
+}
+
+const HEAD = headPath(TUNE.head);
+const HOLES = [
+  wedge(chevron(TUNE.prompt.P, TUNE.prompt.V, TUNE.prompt.R, TUNE.prompt.w)),
+  cursorPath(TUNE.cursor),
+];
+const STEMS = TUNE.antennae.map((a) => `    <path d="M${a.stem[0][0]} ${a.stem[0][1]} L${a.stem[1][0]} ${a.stem[1][1]}"/>`).join("\n");
+const DOTS = TUNE.antennae.map((a) => `    <circle cx="${a.dot[0]}" cy="${a.dot[1]}" r="${a.r}" stroke="none"/>`).join("\n");
+
+// Head outline plus both knockouts, as one evenodd path.
+const headBlock = [HEAD, ...HOLES].map((d) => "    " + d).join("\n");
+
+// --- documents --------------------------------------------------------------
+
+const C = TUNE.colors;
+
+const antennaeBlock = (paint) => `  <g stroke="${paint}" stroke-width="${TUNE.antennaStroke}" stroke-linecap="round" fill="${paint}">
+${STEMS}
+${DOTS}
+  </g>`;
+
+const foreground = `<!-- Pidroid — adaptive icon FOREGROUND layer.
+     Generated by brand/gen.mjs — edit TUNE there rather than these numbers.
+     108x108 adaptive grid; all art stays inside the centre 72x72 (r=36 about
+     54,54) because the launcher may crop the outer 18dp per side. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="${C.shellTop}"/>
+      <stop offset="1" stop-color="${C.shellBottom}"/>
+    </linearGradient>
+  </defs>
+
+${antennaeBlock("url(#shell)")}
+
+  <!-- Head: subpath 1 is the shell, 2 and 3 the ">" and "_" knocked out of it. -->
+  <path fill="url(#shell)" fill-rule="evenodd" d="
+${headBlock}
+  "/>
+</svg>
+`;
+
+const monochrome = `<!-- Pidroid — MONOCHROME layer (108x108) for Android 13+ themed icons.
+     Generated by brand/gen.mjs. The launcher tints this from the wallpaper
+     palette, so it is flat white and only the alpha channel matters; the ">_"
+     knockouts are real transparency. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+${antennaeBlock("#ffffff")}
+
+  <path fill="#ffffff" fill-rule="evenodd" d="
+${headBlock}
+  "/>
+</svg>
+`;
+
+const R = TUNE.plate.r;
+const standalone = `<!-- Pidroid — standalone mark (legacy mipmap / web favicon).
+     Generated by brand/gen.mjs. Full-bleed squircle plus the same mark scaled
+     up, since nothing masks it here. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 108 108">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="${C.plateTop}"/>
+      <stop offset="0.6" stop-color="${C.plateMid}"/>
+      <stop offset="1" stop-color="${C.plateBottom}"/>
+    </linearGradient>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="${C.shellTop}"/>
+      <stop offset="1" stop-color="${C.shellBottom}"/>
+    </linearGradient>
+  </defs>
+
+  <path fill="url(#plate)" d="M${R} 0 H${108 - R} A${R} ${R} 0 0 1 108 ${R} V${108 - R} A${R} ${R} 0 0 1 ${108 - R} 108 H${R} A${R} ${R} 0 0 1 0 ${108 - R} V${R} A${R} ${R} 0 0 1 ${R} 0 Z"/>
+
+  <g transform="translate(54 54) scale(${TUNE.markScale}) translate(-54 -54)">
+${antennaeBlock("url(#shell)")}
+
+    <path fill="url(#shell)" fill-rule="evenodd" d="
+${headBlock}
+    "/>
+  </g>
+</svg>
+`;
+
+const background = `<!-- Pidroid — adaptive icon BACKGROUND layer (108x108).
+     Generated by brand/gen.mjs. A near-black indigo wash so the icon sits on the
+     wallpaper instead of punching a hard black square into it, while staying
+     AMOLED-dark for the themed UI. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+  <defs>
+    <radialGradient id="bg" cx="0.5" cy="0.38" r="0.78">
+      <stop offset="0" stop-color="${C.plateTop}"/>
+      <stop offset="0.55" stop-color="${C.plateMid}"/>
+      <stop offset="1" stop-color="${C.plateBottom}"/>
+    </radialGradient>
+  </defs>
+  <path fill="url(#bg)" d="M0 0 H108 V108 H0 Z"/>
+</svg>
+`;
+
+const files = {
+  "pidroid-icon-foreground.svg": foreground,
+  "pidroid-icon-monochrome.svg": monochrome,
+  "pidroid-icon.svg": standalone,
+  "pidroid-icon-background.svg": background,
+};
+
+if (process.argv.includes("--print")) {
+  console.log(headBlock);
+} else {
+  for (const [name, body] of Object.entries(files)) {
+    await Bun.write(join(OUT, name), body);
+    console.log("wrote", join(OUT, name));
+  }
+  // The web UI needs its own copy: a favicon cannot reference an external SVG.
+  await Bun.write(join(OUT, "..", "www", "icon.svg"), standalone);
+  console.log("wrote", join(OUT, "..", "www", "icon.svg"));
+}

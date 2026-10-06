@@ -1,22 +1,25 @@
 import { Database } from "bun:sqlite";
-import { join, dirname, resolve } from "path";
-import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync, statSync, rmSync, mkdirSync, realpathSync } from "fs";
+import { join, dirname, resolve, extname, sep } from "path";
+import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync, statSync, cpSync, rmSync, mkdirSync, realpathSync } from "fs";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { Type } from "@earendil-works/pi-ai";
 import { AssistantEntry, createRegistry, defineExtension, defineTool, Harness, hook, section, ToolTask, type Conversation } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { CodingTools, createReadTool } from "@earendil-works/pi-durable/tools";
 import WebTools from "./web-tools.ts";
 import { commandCodeProvider, commandCodeUsage, commandCodeUsageData } from "./providers/commandcode.ts";
 import { opencodeProvider } from "./providers/opencode.ts";
+import { GITHUB_COPILOT_PROVIDER_ID, withCopilotOAuth } from "./providers/github-copilot.ts";
 import { FileCredentialStore, LoginManager } from "./auth.ts";
 import { Changes } from "./changes.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
-import { buildChatView, clampLevel, supportedLevels, type ChatView } from "./chatview.ts";
+import { buildChatView, clampLevel, renderMarkdown, supportedLevels, type ChatView } from "./chatview.ts";
+import { Timings } from "./timings.ts";
 
 const PORT = Number(process.env.PORT) || 8765;
 /** The app itself: the server, the UI and the git checkpoint journal. */
@@ -33,7 +36,116 @@ const DB_PATH = join(APP_DIR, "pidroid.sqlite");
  */
 const WORKSPACES_DIR = join(dirname(APP_DIR), "workspaces");
 const UPLOADS_DIR = join(APP_DIR, "uploads");
+const MAX_AGENT_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_AGENT_IMAGES = 8;
+const MAX_AGENT_TOTAL_IMAGE_BYTES = 32 * 1024 * 1024;
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+};
 const workspaceDir = (conversationId: number) => join(WORKSPACES_DIR, String(conversationId));
+
+/**
+ * A branch inherits the parent's transcript, and that transcript tends to name files the parent made in
+ * its own workspace, so the branch starts with a copy of them rather than an empty directory. The copy
+ * is a snapshot of the directory as it is when you branch: the parent's later writes do not appear, and
+ * the two never share a file.
+ *
+ * It is capped because these directories are scratch, not curated — one session on this phone holds
+ * 300 MB of downloads, and silently duplicating that per branch would fill the device. Over the cap
+ * nothing is copied: half a workspace would be worse than none, since the missing half is invisible.
+ */
+const FORK_COPY_LIMIT_BYTES = 64 * 1024 * 1024;
+
+/** Total bytes under a directory, or Infinity if it cannot be walked. */
+function treeSize(dir: string): number {
+  let total = 0;
+  const walk = (path: string): void => {
+    for (const item of readdirSync(path, { withFileTypes: true })) {
+      const child = join(path, item.name);
+      if (item.isDirectory()) walk(child);
+      else if (item.isFile()) {
+        try {
+          total += statSync(child).size;
+        } catch {
+          return; // vanished mid-walk; it is scratch, so losing it is not worth failing over
+        }
+      }
+    }
+  };
+  try {
+    walk(dir);
+    return total;
+  } catch {
+    return Infinity;
+  }
+}
+
+type AgentInputContent = string | Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
+type AgentImageAttachment = { path?: string; label?: string; name?: string };
+
+/** Resolve composer image references and legacy upload paths into ordered multimodal blocks. */
+function agentInputContent(text: string, attachments: AgentImageAttachment[] = []): { content: AgentInputContent; error?: string } {
+  let uploadRoot: string;
+  try {
+    uploadRoot = realpathSync(UPLOADS_DIR);
+  } catch {
+    return attachments.length ? { content: text, error: "The upload directory is unavailable; reattach the image and try again." } : { content: text };
+  }
+
+  const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  let totalBytes = 0;
+  const uploadPrefix = resolve(UPLOADS_DIR) + sep;
+
+  const addImage = (candidate: string, requestedLabel?: string, explicit = false): string | undefined => {
+    try {
+      if (!candidate.startsWith(uploadPrefix)) return explicit ? "Invalid image attachment path." : undefined;
+      const file = realpathSync(candidate);
+      if (!file.startsWith(uploadRoot + sep)) return explicit ? "Image attachments must be inside the app uploads directory." : undefined;
+      if (seen.has(file)) return undefined;
+      const stat = statSync(file);
+      if (!stat.isFile()) return explicit ? "Only supported image files can be attached this way." : undefined;
+      if (stat.size > MAX_AGENT_IMAGE_BYTES) return `Image attachments must be 8 MB or smaller (${candidate}).`;
+      if (images.length >= MAX_AGENT_IMAGES) return `Attach no more than ${MAX_AGENT_IMAGES} images in one message.`;
+      if (totalBytes + stat.size > MAX_AGENT_TOTAL_IMAGE_BYTES) return "Attached images must total 32 MB or less.";
+      const bytes = readFileSync(file);
+      const mimeType = imageMimeFromHeader(bytes.subarray(0, 12)) ?? IMAGE_MIME_BY_EXTENSION[extname(file).toLowerCase()];
+      if (!mimeType) return explicit ? "Only supported image files can be attached this way." : undefined;
+      images.push({ type: "image", mimeType, data: bytes.toString("base64") });
+      labels.push(requestedLabel && /^Image #\d+$/.test(requestedLabel) ? requestedLabel : `Image #${images.length}`);
+      seen.add(file);
+      totalBytes += stat.size;
+      return undefined;
+    } catch {
+      return explicit ? `Could not read image attachment: ${candidate}` : undefined;
+    }
+  };
+
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment.path !== "string") return { content: text, error: "Invalid image attachment." };
+    const error = addImage(attachment.path.trim(), attachment.label, true);
+    if (error) return { content: text, error };
+  }
+
+  // Keep accepting absolute upload paths inserted by older clients or pasted into the composer.
+  for (const line of text.split(/\r?\n/)) {
+    const candidate = line.trim();
+    if (!candidate.startsWith(uploadPrefix)) continue;
+    const error = addImage(candidate);
+    if (error) return { content: text, error };
+  }
+
+  if (!images.length) return { content: text };
+  const imageNote = `Attached images are provided in this order: ${labels.map(label => `[${label}]`).join(", ")}. Refer to each image by its label.`;
+  const prompt = text ? `${text}\n\n${imageNote}` : imageNote;
+  return { content: [{ type: "text", text: prompt }, ...images] };
+}
 
 /* ---------- file tree (Files tab) ----------
    The Files tab mirrors what the save_bundle extension archives, so its skip lists duplicate the
@@ -64,6 +176,12 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS timings (
+    session INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (session, key)
+  ) WITHOUT ROWID;
 `);
 
 console.log(`[pidroid] Agent runtime initialized. SQLite DB at: ${DB_PATH}`);
@@ -147,6 +265,22 @@ const credentials = new FileCredentialStore(join(process.cwd(), "auth.json"));
 const models = builtinModels({ credentials, modelsStore: new FileModelsStore(MODELS_STORE_PATH) });
 models.setProvider(opencodeProvider());
 models.setProvider(commandCodeProvider());
+
+// Same id again: the bundle's github-copilot login points at an OAuth module that
+// was never packaged ("./github-copilot.js"), so give it a working sign-in instead.
+// The tap reports which models this Copilot plan actually serves (learned from
+// Copilot's own error) so the picker stops offering the ones it will refuse.
+const copilotProvider = models.getProvider(GITHUB_COPILOT_PROVIDER_ID);
+if (copilotProvider) {
+  models.setProvider(
+    withCopilotOAuth(copilotProvider, async (availableModelIds) => {
+      await credentials.modify(GITHUB_COPILOT_PROVIDER_ID, async (current) =>
+        current?.type === "oauth" ? { ...current, availableModelIds } : current,
+      );
+      broadcast("providers_changed", {});
+    }),
+  );
+}
 
 // Catalogs self-heal at boot; without this the picker only ever shows whatever
 // the last manual "Refresh catalogs" produced (and nothing, on a fresh install).
@@ -308,22 +442,112 @@ const restartServerTool = defineTool({
   },
 });
 
+const READ_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const READ_IMAGE_MAX_INPUT_BYTES = 32 * 1024 * 1024;
+
+function imageMimeFromHeader(bytes: Uint8Array): string | undefined {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38 && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61) return "image/gif";
+  if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return "image/webp";
+  if (bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
+  return undefined;
+}
+
+const textReadTool = createReadTool();
+const imageAwareReadTool = defineTool({
+  name: "read",
+  description: `Read text files and images (jpg, png, gif, webp, bmp). Images are attached to the conversation so vision-capable models can inspect them. Text output is truncated to 2000 lines or 50KB; use offset/limit for large files.`,
+  parameters: Type.Object({
+    path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
+    offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
+    limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+  }),
+  async execute(args, api, context) {
+    const env = api.env;
+    const resolved = await env.absolutePath(args.path, context);
+    if (!resolved.ok) throw resolved.error;
+    const opened = await env.openBinaryReader(resolved.value, undefined, context);
+    if (!opened.ok) throw opened.error;
+    const reader = opened.value;
+    try {
+      const infoResult = await reader.info(context);
+      if (!infoResult.ok) throw infoResult.error;
+      const info = infoResult.value;
+      const prefixResult = await reader.read(0, Math.min(info.size, 12), context);
+      if (!prefixResult.ok) throw prefixResult.error;
+      const mimeType = imageMimeFromHeader(prefixResult.value);
+      if (!mimeType) return await textReadTool.execute(args, api, context);
+
+      if (info.size > READ_IMAGE_MAX_INPUT_BYTES) {
+        return { content: [{ type: "text", text: `Read image file [${mimeType}]\nImage is too large to process safely (${info.size} bytes; maximum ${READ_IMAGE_MAX_INPUT_BYTES}).` }] };
+      }
+      const imageResult = await reader.read(0, info.size, context);
+      if (!imageResult.ok) throw imageResult.error;
+      const original = Buffer.from(imageResult.value);
+      const activeAgent = await api.agent(context);
+      const modelRef = activeAgent.model;
+      const model = modelRef ? models.getModel(modelRef.provider, modelRef.modelId) : undefined;
+      if (model && !model.input.includes("image")) {
+        return { content: [{ type: "text", text: `Read image file [${mimeType}]\n[Current model does not support images. The image is omitted from this request.]` }] };
+      }
+
+      let imageBytes = original;
+      let outputMimeType = mimeType;
+      let resizeNote = "";
+      if (original.length > READ_IMAGE_MAX_BYTES) {
+        try {
+          const maxDimension = 2048;
+          const image = new Bun.Image(original, { maxPixels: 40_000_000 });
+          const metadata = await image.metadata();
+          imageBytes = Buffer.from(await image.resize(maxDimension, maxDimension, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 85 }).bytes());
+          outputMimeType = "image/jpeg";
+          resizeNote = `\nImage resized from ${metadata.width}×${metadata.height} to fit the ${READ_IMAGE_MAX_BYTES / (1024 * 1024)} MB attachment limit.`;
+          if (imageBytes.length > READ_IMAGE_MAX_BYTES) {
+            return { content: [{ type: "text", text: `Read image file [${mimeType}]\nImage is still too large after resizing (${imageBytes.length} bytes); it was omitted.` }] };
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { content: [{ type: "text", text: `Read image file [${mimeType}]\nImage could not be processed and was omitted: ${message}` }] };
+        }
+      }
+      return {
+        content: [
+          { type: "text", text: `Read image file [${outputMimeType}]${resizeNote}` },
+          { type: "image", data: imageBytes.toString("base64"), mimeType: outputMimeType },
+        ],
+      };
+    } finally {
+      await reader.close(context);
+    }
+  },
+});
+
+const ImageAwareCodingTools = defineExtension({
+  ...CodingTools,
+  tools: CodingTools.tools.map((tool) => tool.name === "read" ? imageAwareReadTool : tool),
+});
+
 const SelfModify = defineExtension({
   name: "pidroid",
   tools: [reloadUiTool, reloadExtensionsTool, restartServerTool],
   sections: [
     section(
       "pidroid",
-      () =>
+      // `input.conversationId` is passed by the runtime (pi-durable's renderSections),
+      // so the workspace path below is the real one for this conversation rather than
+      // a placeholder the reader has to guess at. workspaceDir() is the same helper
+      // used to create the directory, so the two cannot drift apart.
+      (input) =>
         "You are the agent embedded in the Pidroid Android app, running on Bun inside the app's own process sandbox. " +
-        `Your working directory is this session's own workspace (${WORKSPACES_DIR}/<session id>, also $PIDROID_WORKSPACE): scratch files, scripts and experiments belong there and are yours alone. ` +
+        `Your working directory is this session's own workspace (${workspaceDir(Number(input.conversationId))}, also $PIDROID_WORKSPACE): scratch files, scripts and experiments belong there and are yours alone. ` +
         `It is NOT version controlled: nothing in it is checkpointed, so nothing in it can be undone -- if the user wants to keep something, copy it into the app tree (below). ` +
         `The app itself lives at ${APP_DIR} (also $PIDROID_APP_DIR), and you can change it -- every path below is relative to it: ` +
         "www/ is the web UI (index.html, style.css, app.js, chat.js, sessions.js, providers.js, changes.js); CSS edits apply instantly, but HTML/JS edits only show after you call reload_ui (call it once when a batch of UI edits is finished, not after every file). " +
         "extensions/*.ts are hot-swappable pi-durable extensions (extensions/save-bundle.ts is a worked example): add tools, prompt sections and hooks there, then call reload_extensions. No restart is needed. " +
         "server.ts, auth.ts, changes.ts, chatview.ts, sessions.ts, extensions.ts, web-tools.ts and providers/ are the server; after editing them call restart_server (it builds first and refuses if the build fails; all sessions continue afterwards). " +
         "vendor/ holds prebuilt dependencies and is not editable; only the packages mapped in tsconfig.json can be imported. " +
-        `Files the user attaches from the phone are saved under ${UPLOADS_DIR} (also $PIDROID_UPLOADS); the path you are given for one is absolute, so use it as is. ` +
+        `Files the user attaches from the phone are saved under ${UPLOADS_DIR} (also $PIDROID_UPLOADS). Composer image attachments are labeled [Image #N] and sent as image inputs in that order; use those labels to distinguish multiple images. The read tool also supports image files and sends them as image input to vision-capable models. If a file path is shown in the message, it is absolute and should be used as given. ` +
         "The UI is black (AMOLED) themed; keep it that way. " +
         "Every turn is checkpointed to git, so the user can undo your changes to the app (the workspace is not). If the server fails to start repeatedly the app falls back to a safe-mode server, so a broken edit can be undone from the Changes tab. " +
         "The Android shell around the web view (Kotlin) is not part of your sandbox and cannot be edited from here; if a feature needs it, say so instead of searching the device. " +
@@ -348,7 +572,7 @@ const SelfModify = defineExtension({
 });
 
 const registry = createRegistry();
-registry.install(CodingTools);
+registry.install(ImageAwareCodingTools);
 registry.install(SelfModify);
 registry.install(WebTools);
 const loader = new ExtensionLoader(registry, join(APP_DIR, "extensions"), file => !disabledExtensions().has(file));
@@ -441,6 +665,14 @@ function pickDefaultModel(): { provider: string; modelId: string } {
   return defaultModel();
 }
 
+function titleModelPreference(): { key: string; provider: string; modelId: string } | undefined {
+  const key = getState("title_model")?.trim();
+  if (!key) return undefined;
+  const [provider, ...rest] = key.split("/");
+  const modelId = rest.join("/");
+  return provider && modelId && models.getModel(provider, modelId) ? { key, provider, modelId } : undefined;
+}
+
 /** Preferred thinking effort for the displayed session, clamped to what its model supports. */
 function thinkingInfo() {
   const agent = pickDefaultModel();
@@ -483,6 +715,47 @@ async function pointAtWorkspace(row: SessionRow): Promise<string> {
   const conv = await handleFor(row);
   await conv.configure({ cwd: dir } as any, context);
   return dir;
+}
+
+/**
+ * Branch a new session off an existing one at a committed entry. pi-durable records the parent and the
+ * entry on the child's conversation and copies its documents, so the two share the history up to `at`
+ * (entries are read through that parent link and never duplicated) and can then run side by side.
+ *
+ * The branch keeps the parent's title on purpose: the sidebar filters rows on it, so a branch is found
+ * by searching for the session it came from.
+ */
+async function forkSession(row: SessionRow, at: number): Promise<{ branch: SessionRow; copied: boolean }> {
+  const parent = await handleFor(row);
+  const child = await parent.fork(at, { ownership: { kind: "ownerless" } }, context);
+  const branch = sessions.create(Number(child.id), row.title, row.model, row.thinking, row.id, at);
+  handles.set(branch.conversationId, child);
+  // The copied agent doc carries the parent's cwd, so without this the two sessions would run in one
+  // workspace. The child's own conversation id names its directory and cannot collide with the parent's.
+  await pointAtWorkspace(branch);
+  const from = workspaceDir(row.conversationId);
+  const to = workspaceDir(branch.conversationId);
+  let copied = false;
+  if (treeSize(from) <= FORK_COPY_LIMIT_BYTES) {
+    try {
+      // The contents, item by item. Copying the directory itself merges or nests depending on the
+      // runtime's cp semantics; the child's directory already exists by now, so merging is what we want.
+      for (const item of readdirSync(from, { withFileTypes: true })) {
+        cpSync(join(from, item.name), join(to, item.name), { recursive: true, force: true });
+      }
+      copied = true;
+    } catch (err) {
+      console.warn(`[pidroid] branch of session ${row.id}: workspace copy failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  if (!copied) {
+    // An empty directory is still right — the agent can work in it — it just does not start with the
+    // parent's scratch in it.
+    rmSync(to, { recursive: true, force: true });
+    mkdirSync(to, { recursive: true });
+    console.warn(`[pidroid] branch of session ${row.id}: workspace left empty (limit ${Math.round(FORK_COPY_LIMIT_BYTES / 1048576)} MB)`);
+  }
+  return { branch, copied };
 }
 
 // The conversation that existed before sessions were introduced becomes the first session.
@@ -532,6 +805,12 @@ console.log(`[pidroid] pi-durable agent ready (${AGENT_DB_PATH}), ${sessions.lis
 
 // Live chat state for the UI: every commit (including throttled streaming partials) is pushed over the WebSocket.
 let latestView: ChatView = buildChatView(undefined, models);
+// Wall-clock stamps for the durations the chat view shows ("Thought · 12s", "Worked 1m 30s").
+let timings = new Timings(db, current.id);
+function buildLatestView(value: unknown) {
+  timings.stamp(value);
+  return buildChatView(value, models, timings.lookup, timings.liveStarts());
+}
 function chatPayload() {
   return {
     view: latestView,
@@ -554,12 +833,12 @@ async function attachView() {
     if (pushTimer) return;
     pushTimer = setTimeout(() => {
       pushTimer = undefined;
-      latestView = buildChatView(pendingValue, models);
+      latestView = buildLatestView(pendingValue);
       broadcast("agent_view", chatPayload());
     }, 50);
   };
   // Set the first view synchronously so a request right after a switch never sees the previous session's state.
-  latestView = buildChatView((view as any).value ?? (view as any).get?.(), models);
+  latestView = buildLatestView((view as any).value ?? (view as any).get?.());
   const unsubscribe = view.subscribe((value: unknown) => refresh(value));
   detachView = () => {
     active = false;
@@ -573,6 +852,9 @@ async function switchTo(id: number) {
   const row = sessions.get(id);
   if (!row) throw new Error("No such session");
   current = row;
+  finishedRuns.delete(row.conversationId); // opening the session is what clears its "done" mark
+  timings.close();
+  timings = new Timings(db, current.id);
   root = await handleFor(row);
   setState("session", String(id));
   await attachView();
@@ -585,6 +867,67 @@ async function busySessions(): Promise<Set<number>> {
   const live = await harness.inspect(context);
   return new Set(live.submissions.map((s) => Number(s.conversationId)));
 }
+
+/* ---------- "done" marks ----------
+   A session that was working flips from "running" to "done" in the list when its run ends, so a run
+   that finished while the user was elsewhere is visibly not still running. Opening the session clears
+   the mark again (switchTo), which makes it read as "there is something new in here" — and a run that
+   ends in the session already on screen is not marked at all.
+
+   Whether a run is alive is read from the harness rather than from the places a run happens to end
+   (a turn settling, an abort, a run resumed after a restart), and the harness is only polled while
+   something is in flight, so an idle agent pays nothing. */
+const finishedRuns = new Set<number>();
+const runningConversations = new Set<number>();
+let runWatchTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleRunWatch(delay = 1200) {
+  if (runWatchTimer) clearTimeout(runWatchTimer);
+  runWatchTimer = setTimeout(watchRunStates, delay);
+}
+
+async function watchRunStates() {
+  runWatchTimer = undefined;
+  const live = await busySessions().catch(() => null);
+  if (live) for (const id of [...runningConversations]) if (!live.has(id)) markRunFinished(id);
+  // Nothing left to watch: stop, and let noteRunStarted wake the watcher again.
+  if (runningConversations.size > 0) scheduleRunWatch();
+}
+
+/** A run is starting: take the row's stale "done" mark away and put it under observation. */
+function noteRunStarted(conversationId: number) {
+  runningConversations.add(conversationId);
+  if (finishedRuns.delete(conversationId)) broadcast("sessions_changed", {});
+  scheduleRunWatch();
+}
+
+/**
+ * The run in this conversation ended (done, errored or aborted). The session on screen is deliberately
+ * left unmarked: its result is right there in the chat, so a "done" dot on it would only repeat what
+ * the user is already reading. A run that ends in some other session is what the mark is for.
+ */
+function markRunFinished(conversationId: number) {
+  runningConversations.delete(conversationId);
+  if (conversationId === current.conversationId) {
+    finishedRuns.delete(conversationId); // the open session never carries a mark, not even a stale one
+  } else if (finishedRuns.add(conversationId)) {
+    broadcast("sessions_changed", {}); // add() reports whether this is new, so repeats stay quiet
+  }
+  if (runningConversations.size === 0 && runWatchTimer) {
+    clearTimeout(runWatchTimer);
+    runWatchTimer = undefined;
+  }
+}
+
+/* A run interrupted by a restart resumes inside this process with no request of ours to hang the
+   "done" mark on, so adopt whatever the harness still calls running and let the watcher end it. */
+busySessions()
+  .then(live => {
+    if (!live.size) return;
+    for (const conversationId of live) runningConversations.add(conversationId);
+    scheduleRunWatch();
+  })
+  .catch(() => {});
 
 async function deleteSession(id: number) {
   const row = sessions.get(id);
@@ -608,6 +951,92 @@ function answerText(entry: any): string {
     .map((block: any) => block.text)
     .join("")
     .trim();
+}
+
+/**
+ * Title for a session when no title model is picked (or the one picked failed): the opening line of
+ * what the user asked, stripped of markdown and clipped to sit on one row in the session list.
+ */
+function messageTitle(firstMessage: string): string {
+  const line = firstMessage
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => l.length > 0) ?? "";
+  const cleaned = line
+    .replace(/^(?:#{1,6}|>|[-*+]|\d+[.)])\s*/, "")
+    .replace(/\s+/g, " ")
+    .replace(/^['"`]+|['"`]+$/g, "")
+    .trim();
+  if (cleaned.length <= 64) return cleaned;
+  const clipped = cleaned.slice(0, 64);
+  const lastSpace = clipped.lastIndexOf(" ");
+  return `${(lastSpace > 40 ? clipped.slice(0, lastSpace) : clipped).trimEnd()}…`;
+}
+
+/** Store a generated title, unless the session was renamed by hand or deleted in the meantime. */
+function applyGeneratedTitle(sessionId: number, title: string): boolean {
+  if (!title) return false;
+  const row = sessions.get(sessionId);
+  if (!row || row.title !== DEFAULT_TITLE) return false;
+  sessions.rename(sessionId, title);
+  const updated = sessions.get(sessionId);
+  if (updated && current.id === sessionId) {
+    current = updated;
+    broadcast("agent_view", chatPayload());
+  }
+  broadcast("sessions_changed", {});
+  return true;
+}
+
+const titleGenerationJobs = new Set<number>();
+function scheduleTitleGeneration(sessionId: number, firstMessage: string) {
+  const preference = titleModelPreference();
+  if (!preference) {
+    // Auto titles are off: the conversation is named after the message that opened it.
+    applyGeneratedTitle(sessionId, messageTitle(firstMessage));
+    return;
+  }
+  if (titleGenerationJobs.has(sessionId)) return;
+  titleGenerationJobs.add(sessionId);
+
+  void (async () => {
+    try {
+      const model = models.getModel(preference.provider, preference.modelId);
+      if (!model) return;
+      const stream = models.streamSimple(model, {
+        messages: [{
+          role: "user",
+          content: `Write a concise, descriptive title for this conversation in at most 8 words. Return only the title, with no quotes or explanation.\n\nFirst user message:\n${firstMessage.slice(0, 4000)}`,
+        }],
+      });
+      const result = await stream.result();
+      if (result.stopReason === "error" || result.errorMessage) {
+        throw new Error(result.errorMessage || "Title model returned an error");
+      }
+      const generated = (result.content ?? [])
+        .filter((block: any) => block?.type === "text")
+        .map((block: any) => block.text)
+        .join(" ")
+        .split(/\r?\n/, 1)[0]
+        .replace(/^\s*(?:title|conversation title)\s*:\s*/i, "")
+        .replace(/^\s*#+\s*/, "")
+        .replace(/^['"`]+|['"`]+$/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 80);
+      if (!generated) return;
+
+      // Respect a manual rename, a changed title-model preference, or a deleted session.
+      if (titleModelPreference()?.key !== preference.key) return;
+      applyGeneratedTitle(sessionId, generated);
+    } catch (err) {
+      console.warn(`[pidroid] title generation failed for session ${sessionId}:`, err);
+      // Better a plain title from the message than a session stuck on "New session".
+      if (titleModelPreference()?.key === preference.key) applyGeneratedTitle(sessionId, messageTitle(firstMessage));
+    } finally {
+      titleGenerationJobs.delete(sessionId);
+    }
+  })();
 }
 
 // Watch www directory for direct agent modifications
@@ -658,31 +1087,38 @@ const server = Bun.serve({
     }
 
     if (url.pathname === "/api/chat" && req.method === "POST") {
-      return req.json().then(async (body: { message?: string }) => {
-        const text = body.message?.trim();
-        if (!text) {
-          return Response.json({ error: "Message is required" }, { status: 400 });
+      return req.json().then(async (body: { message?: string; attachments?: AgentImageAttachment[] }) => {
+        const text = body.message?.trim() ?? "";
+        const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+        if (!text && !attachments.length) {
+          return Response.json({ error: "Message or image attachment is required" }, { status: 400 });
+        }
+        const refs = attachments.map((attachment, index) => {
+          const label = attachment?.label && /^Image #\d+$/.test(attachment.label) ? attachment.label : `Image #${index + 1}`;
+          return text.includes(`[${label}]`) ? "" : `[${label}]`;
+        }).filter(Boolean);
+        const visibleText = [text, refs.join(" ")].filter(Boolean).join(" ");
+        const agentInput = agentInputContent(visibleText, attachments);
+        if (agentInput.error) {
+          return Response.json({ error: agentInput.error }, { status: 413 });
         }
 
         // Store user message
-        db.query("INSERT INTO messages (role, content) VALUES (?, ?)").run("user", text);
-        broadcast("message", { role: "user", content: text });
+        db.query("INSERT INTO messages (role, content) VALUES (?, ?)").run("user", visibleText);
+        broadcast("message", { role: "user", content: visibleText });
 
         let replyText: string;
         const conv = root; // a session switch mid-run must not redirect this request
         const session = current;
-        if (session.title === DEFAULT_TITLE) {
-          sessions.rename(session.id, text.replace(/\s+/g, " ").slice(0, 48));
-          current = sessions.get(session.id) ?? current;
-          broadcast("sessions_changed", {});
-        }
+        if (session.title === DEFAULT_TITLE) scheduleTitleGeneration(session.id, visibleText);
         sessions.touch(session.id);
+        noteRunStarted(session.conversationId); // the row switches to "running" until this settles
         // Capture manual edits first so the turn commit holds only what the agent changed.
         await changes.snapshot("[edits] Changes made outside the agent").catch(() => {});
         try {
           // A message sent while the agent is working is "steered": it is placed after the current step (model response and its
         // tool calls) and joins the running work, instead of waiting for the entire run to finish.
-        const submission = await conv.submit({ type: "input", content: text, whenBusy: "steer" } as any, context);
+        const submission = await conv.submit({ type: "input", content: agentInput.content, whenBusy: "steer" } as any, context);
           const settled = await submission.wait(context);
           if (settled.status === "done" && settled.type === "input") {
             const answer = await conv.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
@@ -693,8 +1129,9 @@ const server = Bun.serve({
         } catch (err) {
           replyText = `Agent error: ${err instanceof Error ? err.message : String(err)}`;
         }
+        markRunFinished(session.conversationId); // done, aborted or errored: the run is over either way
         const turnOid = await changes
-          .snapshot(`[turn] ${text.replace(/\s+/g, " ").slice(0, 80)}\n\nsession: ${session.title}\nmodel: ${pickDefaultModel().provider}/${pickDefaultModel().modelId}`)
+          .snapshot(`[turn] ${visibleText.replace(/\s+/g, " ").slice(0, 80)}\n\nsession: ${session.title}\nmodel: ${pickDefaultModel().provider}/${pickDefaultModel().modelId}`)
           .catch(() => null);
         if (turnOid) broadcast("changes", { oid: turnOid });
         db.query("INSERT INTO messages (role, content) VALUES (?, ?)").run("assistant", replyText);
@@ -707,6 +1144,7 @@ const server = Bun.serve({
     if (url.pathname === "/api/models" && req.method === "GET") {
       const agent = pickDefaultModel();
       const fallback = defaultModel();
+      const titleModel = titleModelPreference()?.key ?? "";
       return logins.providers().then(providers => {
         // Usable = signed-in providers, plus the anonymous OpenCode free tier.
         const usable = new Set(providers.filter(p => p.configured).map(p => p.id));
@@ -715,8 +1153,9 @@ const server = Bun.serve({
         return Response.json({
           current: `${agent.provider}/${agent.modelId}`,
           default: `${fallback.provider}/${fallback.modelId}`,
+          titleModel,
           models: models.getModels()
-            .filter(m => usable.has(m.provider) || (m.provider === agent.provider && m.id === agent.modelId))
+            .filter(m => usable.has(m.provider) || (m.provider === agent.provider && m.id === agent.modelId) || `${m.provider}/${m.id}` === titleModel)
             .map((m) => ({
               id: `${m.provider}/${m.id}`,
               name: m.name,
@@ -759,6 +1198,23 @@ const server = Bun.serve({
         console.log(`[pidroid] default model is now ${provider}/${modelId}`);
         // The session on screen keeps its own model: setting a default is not a silent switch.
         return Response.json({ success: true, default: `${provider}/${modelId}` });
+      }).catch(err => Response.json({ error: String(err) }, { status: 500 }));
+    }
+
+    if (url.pathname === "/api/title-model" && req.method === "POST") {
+      return req.json().then((body: { model?: string }) => {
+        const selected = (body.model ?? "").trim();
+        if (!selected || selected === "none") {
+          setState("title_model", "");
+          return Response.json({ success: true, model: "" });
+        }
+        const [provider, ...rest] = selected.split("/");
+        const modelId = rest.join("/");
+        if (!models.getModel(provider, modelId)) {
+          return Response.json({ error: `Unknown title model: ${selected}` }, { status: 400 });
+        }
+        setState("title_model", `${provider}/${modelId}`);
+        return Response.json({ success: true, model: `${provider}/${modelId}` });
       }).catch(err => Response.json({ error: String(err) }, { status: 500 }));
     }
 
@@ -870,8 +1326,29 @@ const server = Bun.serve({
     if (url.pathname === "/api/sessions" && req.method === "GET") {
       return busySessions().then(busy => Response.json({
         current: current.id,
-        sessions: sessions.list().map(r => ({ ...r, busy: busy.has(r.conversationId) })),
+        // Depth-ordered forest: branches sit under the session they came from.
+        sessions: sessions.tree().map(({ row, depth }) => ({
+          ...row,
+          depth,
+          busy: busy.has(row.conversationId),
+          // A run that ended and hasn't been looked at yet: the sidebar shows "done" instead of "running".
+          done: finishedRuns.has(row.conversationId),
+        })),
       })).catch(err => Response.json({ error: String(err) }, { status: 500 }));
+    }
+
+    // Branching posts to the collection rather than to a row: the id names the session and `at` names an
+    // entry inside it, which /api/sessions/:id/fork would wrongly imply is the entry.
+    if (url.pathname === "/api/sessions/fork" && req.method === "POST") {
+      return req.json().then(async (body: { id?: number; at?: number }) => {
+        const row = sessions.get(Number(body.id));
+        if (!row) throw new Error("No such session");
+        const at = Number(body.at);
+        if (!Number.isSafeInteger(at) || at < 1) throw new Error("No entry to branch at");
+        const { branch, copied } = await forkSession(row, at);
+        await switchTo(branch.id); // also announces the new session
+        return Response.json({ success: true, id: branch.id, copied });
+      }).catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
     }
 
     if (url.pathname === "/api/sessions" && req.method === "POST") {
@@ -900,8 +1377,9 @@ const server = Bun.serve({
     if (url.pathname === "/api/view" && req.method === "GET") return Response.json(chatPayload());
 
     if (url.pathname === "/api/abort" && req.method === "POST") {
+      const conversationId = current.conversationId;
       return root.abort(context)
-        .then(() => Response.json({ success: true }))
+        .then(() => { markRunFinished(conversationId); return Response.json({ success: true }); })
         .catch(err => Response.json({ error: String(err) }, { status: 500 }));
     }
 
@@ -962,7 +1440,7 @@ const server = Bun.serve({
         if (!buf.byteLength) return Response.json({ error: "Empty upload" }, { status: 400 });
         if (buf.byteLength > 24 * 1024 * 1024) return Response.json({ error: "File is larger than 24 MB" }, { status: 413 });
         mkdirSync(UPLOADS_DIR, { recursive: true });
-        const file = join(UPLOADS_DIR, `${Date.now()}-${requested || "attachment"}`);
+        const file = join(UPLOADS_DIR, `${Date.now()}-${randomUUID()}-${requested || "attachment"}`);
         await Bun.write(file, buf);
         return Response.json({ path: file, size: buf.byteLength });
       }).catch(err => Response.json({ error: String(err) }, { status: 500 }));
@@ -1157,6 +1635,25 @@ const server = Bun.serve({
       };
       const tree = existsSync(ws.dir) ? walk(ws.dir, "", 0) : [];
       return Response.json({ session: ws.row.id, title: ws.row.title, tree, truncated });
+    }
+
+    // Markdown from the workspace, rendered to HTML. Same renderer the chat uses, so a README looks
+    // like a message. Only the body is returned: the Artifacts screen wraps it in a sandboxed iframe
+    // with its own stylesheet, which keeps raw HTML in the file (Bun's renderer passes it through)
+    // out of the app's own origin.
+    if (url.pathname === "/api/workspace/markdown" && req.method === "GET") {
+      const ws = workspaceFor(url.searchParams.get("session"));
+      if (!ws) return Response.json({ error: "No such session" }, { status: 404 });
+      const real = insideWorkspace(ws.dir, url.searchParams.get("path") || "");
+      if (!real || !statSync(real).isFile()) return Response.json({ error: "Not found" }, { status: 404 });
+      const size = statSync(real).size;
+      if (size > MAX_READ_BYTES) {
+        return Response.json({ error: `Too large to preview (${(size / 1024).toFixed(0)} KB)`, size });
+      }
+      const buffer = readFileSync(real);
+      if (buffer.subarray(0, 4096).includes(0)) return Response.json({ error: "Binary file, no preview" }, { status: 415 });
+      const html = renderMarkdown(buffer.toString("utf-8"));
+      return Response.json({ path: url.searchParams.get("path"), size, html });
     }
 
     if (url.pathname.startsWith("/workspace/") && (req.method === "GET" || req.method === "HEAD")) {

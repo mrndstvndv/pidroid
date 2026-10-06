@@ -1,0 +1,49 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/pi-durable": [
+        "./vendor/pi-durable.js"
+      ],
+      "@earendil-works/pi-durable/env/node": [
+        "./vendor/pi-durable-env-node.js"
+      ],
+      "@earendil-works/pi-durable/storage/sqlite/node": [
+        "./vendor/pi-durable-storage-sqlite-node.js"
+      ],
+      "@earendil-works/pi-durable/tools": [
+        "./vendor/pi-durable-tools.js"
+      ],
+      "@earendil-works/pi-ai": [
+        "./vendor/pi-ai.js"
+      ],
+      "@earendil-works/pi-ai/providers/all": [
+        "./vendor/pi-ai-providers-all.js"
+      ],
+      "@earendil-works/pi-ai/api/anthropic-messages.lazy": [
+        "./vendor/pi-ai-api-anthropic-messages.js"
+      ],
+      "@earendil-works/pi-ai/api/openai-completions.lazy": [
+        "./vendor/pi-ai-api-openai-completions.js"
+      ],
+      "@earendil-works/pi-ai/api/openai-responses.lazy": [
+        "./vendor/pi-ai-api-openai-responses.js"
+      ],
+      "@earendil-works/chord": [
+        "./vendor/chord.js"
+      ],
+      "@earendil-works/chord/context": [
+        "./vendor/chord-context.js"
+      ],
+      "isomorphic-git": [
+        "./vendor/isomorphic-git.js"
+      ],
+      "diff": [
+        "./vendor/diff.js"
+      ]
+    },
+    "module": "esnext",
+    "target": "esnext",
+    "moduleResolution": "bundler"
+  }
+}

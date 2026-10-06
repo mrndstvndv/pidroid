@@ -5,7 +5,7 @@
  * common cases (-r, -n, -i, -E, -w, -o, -A/-B/-C, --include, --exclude-dir, -l, -c, -q) but
  * hard-fails with "Unknown option" and exit 2 on the GNU-only flags an agent reaches for by
  * habit: -P (perl regex), --stats, --group-separator. It also cannot skip binaries, so a
- * recursive grep from the agent directory walks .git objects and the sqlite write-ahead log and
+ * recursive grep over a source tree walks .git objects and the sqlite write-ahead log and
  * drowns the real matches in "Binary file ... matches". Shelling out additionally drags in this
  * sandbox's broken getcwd, which prefixes stderr to every single command.
  *
@@ -20,10 +20,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { readdir, readFile, lstat } from "node:fs/promises";
-import { join, resolve, relative, isAbsolute } from "node:path";
-
-/** The agent directory: the parent of extensions/. Relative paths in the tool resolve here. */
-const AGENT_DIR = decodeURIComponent(new URL("../", import.meta.url).pathname).replace(/\/$/, "");
+import { join, relative, isAbsolute } from "node:path";
 
 /** Directories never descended into: version-control internals and installed deps. */
 const SKIP_DIRS = new Set([".git", "node_modules", ".bun"]);
@@ -62,7 +59,23 @@ export interface GrepOptions {
   exclude?: string[];
   maxMatches?: number;
   maxFiles?: number;
+  /**
+   * Display root only: match paths are printed relative to it when they sit
+   * under it, and absolute otherwise. Defaults to the caller's cwd via the tool.
+   * It has no say in *resolution* -- see resolvePath below.
+   */
   base?: string;
+
+  /**
+   * Turns a caller-supplied path into an absolute one. Required only for relative
+   * paths, and deliberately injected rather than looked up here: the tool passes
+   * ExecutionEnv.absolutePath, which resolves against the same cwd bash starts in,
+   * so `grep`, `read`, `write`, `edit` and `bash` all agree on what "." means. This
+   * file used to anchor on its own location (the parent of extensions/, i.e. the app
+   * dir), which made the same relative path mean two different things depending on
+   * which tool ran it. Absolute paths work without a resolver.
+   */
+  resolvePath?: (path: string) => Promise<string>;
 }
 
 export interface GrepResult {
@@ -134,7 +147,13 @@ function escapeRe(s: string): string {
  * Throws only for a malformed pattern; unreadable files are collected in `notes`.
  */
 export async function runGrep(opts: GrepOptions): Promise<GrepResult> {
-  const base = opts.base ?? AGENT_DIR;
+  const resolvePath = opts.resolvePath;
+  /** Paths under the base print relative; anything else stays absolute, since a ../../.. chain reads worse than the real path. */
+  const display = (target: string): string => {
+    const rel = opts.base ? relative(opts.base, target) : target;
+    const shown = rel && !rel.startsWith("..") ? rel : target;
+    return shown.replace(/\\/g, "/");
+  };
   const mode: Mode = opts.mode ?? "content";
   const context = Math.max(0, opts.context ?? 0);
   const maxMatches = Math.max(1, opts.maxMatches ?? MAX_MATCHES);
@@ -171,7 +190,7 @@ export async function runGrep(opts: GrepOptions): Promise<GrepResult> {
     }
     if (st.isSymbolicLink()) return; // a symlinked dir can cycle, and adds nothing we do not have
     if (st.isFile()) {
-      const rel = (relative(base, target) || target).replace(/\\/g, "/");
+      const rel = display(target);
       if (SKIP_SUFFIXES.some((s) => rel.endsWith(s))) return;
       if (st.size > MAX_FILE_BYTES) {
         notes.push(`Skipped (over ${MAX_FILE_BYTES} bytes): ${rel}`);
@@ -200,7 +219,12 @@ export async function runGrep(opts: GrepOptions): Promise<GrepResult> {
   }
 
   for (const raw of opts.paths.length ? opts.paths : ["."]) {
-    await walk(isAbsolute(raw) ? raw : resolve(base, raw));
+    if (!isAbsolute(raw) && !resolvePath) {
+      throw new Error(
+        `cannot resolve ${JSON.stringify(raw)} without a base directory: pass an absolute path, or a resolvePath resolver`,
+      );
+    }
+    await walk(isAbsolute(raw) ? raw : await resolvePath!(raw));
   }
 
   const lines: Line[] = [];
@@ -227,7 +251,7 @@ export async function runGrep(opts: GrepOptions): Promise<GrepResult> {
     }
     filesScanned++;
 
-    const rel = (relative(base, file) || file).replace(/\\/g, "/");
+    const rel = display(file);
     const text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
     const fileLines = text.split("\n");
 
@@ -287,7 +311,9 @@ const grep = defineTool({
     path: Type.Optional(
       Type.Union([Type.String(), Type.Array(Type.String())], {
         description:
-          "File or directory to search, or an array of them. Relative paths resolve against the agent directory. Default '.', the whole agent directory.",
+          "File or directory to search, or an array of them. Relative paths resolve against your cwd, the same as bash, " +
+          "read/write/edit — so the default '.' is this session's workspace. Pass $PIDROID_APP_DIR (or any absolute path) " +
+          "to search the app tree.",
       }),
     ),
     ignore_case: Type.Optional(Type.Boolean({ description: "Case-insensitive match (grep -i). Default false." })),
@@ -313,7 +339,7 @@ const grep = defineTool({
     max_matches: Type.Optional(Type.Number({ description: `Stop after this many output lines (default ${MAX_MATCHES}).` })),
     max_files: Type.Optional(Type.Number({ description: `Walk at most this many files (default ${MAX_FILES}).` })),
   }),
-  execute: async (args, api) => {
+  execute: async (args, api, context) => {
     const toList = (v: unknown): string[] => (v === undefined ? [] : Array.isArray(v) ? v.map(String) : [String(v)]);
     const rawPath = args.path ?? ".";
     const paths = Array.isArray(rawPath) ? rawPath.map(String) : [String(rawPath)];
@@ -324,6 +350,16 @@ const grep = defineTool({
       res = await runGrep({
         pattern: String(args.pattern),
         paths,
+        base: api.env?.cwd,
+        resolvePath: api.env
+          ? async (p: string) => {
+              // The same resolution read/write/edit use: ExecutionEnv.absolutePath, so this tool
+              // follows the conversation's cwd instead of guessing one from the module URL.
+              const resolved = await api.env!.absolutePath(p, context);
+              if (!resolved.ok) throw new Error(resolved.error?.message ?? `cannot resolve ${JSON.stringify(p)}`);
+              return resolved.value;
+            }
+          : undefined,
         ignoreCase: args.ignore_case === true,
         fixedString: args.fixed_string === true,
         wholeWord: args.whole_word === true,

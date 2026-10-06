@@ -5,15 +5,23 @@
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { blockStartKey, messageEndKey, RUN_KEY, toolEndKey, type TimingLookup } from "./timings.ts";
 
 export type Block =
-  | { type: "text"; text: string; /** Rendered markdown, added after the blocks are built. */ html?: string }
-  | { type: "thinking"; text: string }
-  | { type: "toolCall"; id: string; name: string; args: unknown };
+  | { type: "text"; text: string; /** Rendered markdown, added after the blocks are built. */ html?: string; at?: number; ms?: number }
+  | { type: "thinking"; text: string; /** Epoch ms the block started, for a ticking timer while it streams. */ at?: number; /** How long it took, once the next block or the message end is known. */ ms?: number }
+  | { type: "toolCall"; id: string; name: string; args: unknown; at?: number; ms?: number };
 
 export interface ViewMessage {
   id: number;
   role: "user" | "assistant" | "tool";
+  /** Entry to branch at so the new session starts just after this message. Only set where that
+   *  makes a well-formed conversation: an assistant message whose tool calls have all been answered.
+   *  Branching after one with unanswered calls would leave tool calls without results. */
+  branchAfter?: number;
+  /** Entry to branch at so the new session starts just before this message — the retry point that
+   *  replays this prompt from scratch. Undefined on the first entry, which has nothing before it. */
+  branchBefore?: number;
   text?: string;
   blocks?: Block[];
   callId?: string;
@@ -22,6 +30,8 @@ export interface ViewMessage {
   stop?: string;
   error?: string;
   model?: string;
+  /** How long the model took for this message: its first block to the committed message. */
+  ms?: number;
 }
 
 export interface ToolState {
@@ -37,6 +47,8 @@ export interface ChatView {
   live?: { blocks: Block[] };
   tools: ToolState[];
   busy: boolean;
+  /** Epoch ms the current run started, so a run waiting on a slow tool can still show its age. */
+  runStartedAt?: number;
   /** Messages waiting behind the current run. */
   queue: { id: number; text: string; mode: string }[];
   stats: {
@@ -124,6 +136,11 @@ function renderHtml(text: string): string {
   return fallbackMarkdown(text);
 }
 
+/** Markdown -> HTML for callers outside the chat (the Artifacts screen previews .md files with it). */
+export function renderMarkdown(text: string): string {
+  return renderHtml(text);
+}
+
 const htmlFor = (text: string): { html: string } => ({ html: renderHtml(text) });
 
 /** Text blocks that are safe to pre-render: committed content, not the streaming partial. */
@@ -156,31 +173,66 @@ function blocksOf(content: unknown): Block[] {
   return out;
 }
 
-export function buildChatView(view: any, models: { getModel(p: string, id: string): Model<Api> | undefined }): ChatView {
+/**
+ * Attach the wall-clock stamps to a committed assistant message: a block runs until the next
+ * block starts (or the message commits), and a tool call until its result is committed.
+ */
+function withTimings(id: number, blocks: Block[], timing: TimingLookup | undefined): Block[] {
+  if (!timing) return blocks;
+  const starts = blocks.map((_, i) => timing(blockStartKey(id, i)));
+  const end = timing(messageEndKey(id));
+  return blocks.map((block, i) => {
+    const at = starts[i];
+    if (at === undefined) return block;
+    const stop = starts[i + 1] ?? end;
+    const ms = stop !== undefined && stop > at ? stop - at : undefined;
+    // A tool call is not over when the model moves on: it ends when its result is committed.
+    const done = block.type === "toolCall" ? timing(toolEndKey(block.id)) : undefined;
+    return { ...block, at, ms: done !== undefined ? Math.max(0, done - at) : ms };
+  });
+}
+
+export function buildChatView(
+  view: any,
+  models: { getModel(p: string, id: string): Model<Api> | undefined },
+  timing?: TimingLookup,
+  /** Start times of the streaming partial's blocks, so a live thought can show its age. */
+  liveStarts?: number[],
+): ChatView {
   const entries: any[] = Array.isArray(view?.entries) ? view.entries : [];
   const live = view?.docs?.["pi.live"] ?? {};
   const inbox = view?.docs?.["pi.inbox"]?.items ?? [];
 
   const messages: ViewMessage[] = [];
   let lastAssistant: any;
+  let previousEntryId: number | undefined;
   let promptTokens = 0;
   let cacheReadTokens = 0;
   let cost = 0;
 
   for (const entry of entries) {
+    // The entry before this one, whatever its kind: branching before a prompt has to inherit the
+    // tool results and system entries logged ahead of it too.
+    const before = previousEntryId;
+    previousEntryId = entry.id;
     const message = entry?.model?.[0];
     if (!message) continue;
     if (entry.kind === "pi.user") {
-      messages.push({ id: entry.id, role: "user", text: textOf(message.content) });
+      messages.push({ id: entry.id, role: "user", text: textOf(message.content), branchBefore: before });
     } else if (entry.kind === "pi.assistant") {
       const usage = message.usage ?? {};
+      const blocks = withTimings(entry.id, committedBlocks(message.content), timing);
+      const starts = blocks.map((b) => b.at).filter((at): at is number => at !== undefined);
+      const end = timing?.(messageEndKey(entry.id));
       messages.push({
         id: entry.id,
         role: "assistant",
-        blocks: committedBlocks(message.content),
+        blocks,
+        branchAfter: blocks.some((b) => b.type === "toolCall") ? undefined : entry.id,
         stop: message.stopReason,
         error: message.errorMessage,
         model: `${message.provider}/${message.model}`,
+        ms: starts.length && end && end > starts[0] ? end - starts[0] : undefined,
       });
       if (usage.totalTokens > 0 || usage.input > 0) {
         lastAssistant = message;
@@ -201,7 +253,12 @@ export function buildChatView(view: any, models: { getModel(p: string, id: strin
   }
 
   const partial = live?.generation?.message;
-  const liveBlocks = partial ? blocksOf(partial.content) : undefined;
+  const liveBlocks = partial
+    ? blocksOf(partial.content).map((block, i) => {
+        const at = liveStarts?.[i];
+        return block.type === "text" || at === undefined ? block : { ...block, at };
+      })
+    : undefined;
 
   const lastUsage = lastAssistant?.usage;
   const lastPrompt = lastUsage ? (lastUsage.input ?? 0) + (lastUsage.cacheRead ?? 0) + (lastUsage.cacheWrite ?? 0) : 0;
@@ -217,6 +274,7 @@ export function buildChatView(view: any, models: { getModel(p: string, id: strin
       output: slot.output ? clip(String(slot.output)) : undefined,
     })),
     busy: !!live?.run,
+    runStartedAt: timing?.(RUN_KEY),
     queue: (inbox as any[])
       .filter((item) => item.mode !== "write")
       .map((item) => ({ id: item.id, text: clip(textOf(item.content), 200), mode: item.mode })),

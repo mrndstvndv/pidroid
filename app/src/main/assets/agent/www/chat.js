@@ -4,11 +4,14 @@
 const messagesEl = document.getElementById("messages-container");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
-const stopBtn = document.getElementById("stop-btn");
+const sendBtn = document.getElementById("send-btn");
 const queueBar = document.getElementById("queue-bar");
 const ctxLabel = document.getElementById("ctx-label");
 const ctxFill = document.getElementById("ctx-fill");
 const cacheLabel = document.getElementById("cache-label");
+const ctxPct = document.getElementById("ctx-pct");
+const ctxPill = document.getElementById("ctx-pill");
+const costLabel = document.getElementById("cost-label");
 const thinkingSelect = document.getElementById("thinking-select");
 
 // Sections the user opened / closed by hand, keyed by data-key; everything else follows the defaults.
@@ -72,6 +75,47 @@ function fmtTokens(n) {
   return String(n);
 }
 
+/* ---------- durations ----------
+   How long a thought, a tool call or a whole message took. The server stamps each block when it
+   first sees it (see timings.ts) and sends either a finished `ms` or the `at` it started at; a
+   block that is still running ticks locally from `at`, so a slow tool counts up even while the
+   agent is quiet. Nothing here waits on the server clock: the server is this same process. */
+
+function fmtDur(ms) {
+  ms = Math.max(0, ms | 0);
+  if (ms < 950) return `${(ms / 1000).toFixed(1)}s`;
+  const s = Math.round(ms / 1000) % 60;
+  const m = Math.floor(ms / 60000) % 60;
+  const h = Math.floor(ms / 3600000);
+  if (h) return `${h}h ${m}m ${s}s`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+/** A finished duration, or a live one that ticks itself via tickDurations(). */
+function durHtml(ms, at) {
+  if (ms !== undefined && ms !== null) return `<span class="dur">${fmtDur(ms)}</span>`;
+  if (at) return `<span class="dur dur-live" data-since="${at}">${fmtDur(Date.now() - at)}</span>`;
+  return "";
+}
+
+/** Only the running spans are touched, and only while something is running. */
+function tickDurations() {
+  const now = Date.now();
+  let live = false;
+  messagesEl.querySelectorAll(".dur-live[data-since]").forEach((el) => {
+    el.textContent = fmtDur(now - Number(el.dataset.since));
+    live = true;
+  });
+  if (live !== ticking) {
+    ticking = live;
+    clearInterval(durTimer);
+    if (live) durTimer = setInterval(tickDurations, 1000);
+  }
+}
+let ticking = false;
+let durTimer = 0;
+
 /** Minimal markdown: fenced code, inline code, bold. Everything else stays plain text. */
 function md(text) {
   const parts = String(text).split(/```/);
@@ -86,7 +130,10 @@ function md(text) {
 function toolSummary(name, args) {
   if (args && typeof args === "object") {
     const first = args.command ?? args.path ?? args.file_path ?? Object.values(args)[0];
-    if (first !== undefined) return String(typeof first === "string" ? first : JSON.stringify(first)).replace(/\s+/g, " ").slice(0, 90);
+    if (first !== undefined) {
+      const summary = String(typeof first === "string" ? first : JSON.stringify(first)).replace(/\s+/g, " ");
+      return name === "edit" ? summary : summary.slice(0, 90);
+    }
   }
   return "";
 }
@@ -307,7 +354,7 @@ function hostOf(url) {
 
 /** The expanded body of a tool call: a real preview where there is one, JSON otherwise. */
 function toolBodyHtml(call, args, output) {
-  const outputHtml = output ? toolLabel("output") + `<pre class="code tool-out">${escapeHtml(output)}</pre>` : "";
+  const outputHtml = call.name !== "edit" && output ? toolLabel("output") + `<pre class="code tool-out">${escapeHtml(output)}</pre>` : "";
 
   if (call.name === "web_search" && typeof output === "string") {
     // The cards carry everything the raw text did -- title, host, date, excerpt -- so keeping the
@@ -336,12 +383,13 @@ function isOpen(key, byDefault) {
 
 /* ---------- rendering ---------- */
 
-function thinkingBlock(key, text, streaming) {
+function thinkingBlock(key, block, streaming) {
   const open = isOpen(key, streaming);
-  const body = escapeHtml(text) || "…";
+  const body = escapeHtml(block.text) || "…";
+  const label = streaming ? '<span class="shimmer">Thinking…</span>' : `${icon("brain", 13, "ico-inline")} Thought`;
   return `
     <details class="think" data-key="${key}" ${open ? "open" : ""}>
-      <summary>${streaming ? '<span class="shimmer">Thinking…</span>' : `${icon("brain", 13, "ico-inline")} Thought`}</summary>
+      <summary>${label}${durHtml(block.ms, streaming ? block.at : undefined)}</summary>
       <div class="think-body">${body}</div>
     </details>`;
 }
@@ -355,23 +403,24 @@ function toolBlock(key, call, state, result) {
   const args = call.args && typeof call.args === "object" ? call.args : {};
   const output = result ? result.text : state?.output;
   return `
-    <details class="tool${failed ? " failed" : ""}" data-key="${key}" ${isOpen(key, false) ? "open" : ""}>
+    <details class="tool${failed ? " failed" : ""}${call.name === "edit" ? " edit-tool" : ""}" data-key="${key}" ${isOpen(key, call.name === "web_search" || call.name === "edit") ? "open" : ""}>
       <summary>
         <span class="tool-ico">${icon(toolIcon(call.name), 14)}</span>
         <span class="tool-name">${escapeHtml(call.name)}</span>
         <span class="tool-sum">${escapeHtml(toolSummary(call.name, args))}</span>
+        ${running ? durHtml(undefined, call.at) : durHtml(call.ms, undefined)}
         ${status}
       </summary>
       <div class="tool-body">${toolBodyHtml(call, args, output)}</div>
     </details>`;
 }
 
-function assistantHtml(idKey, blocks, live, results, tools, error) {
+function assistantHtml(idKey, blocks, live, results, tools, error, ms, branchAfter) {
   const body = blocks.map((b, i) => {
     const key = `${idKey}-${i}`;
     if (b.type === "thinking") {
       // Streaming thinking stays open only while it is the block being written.
-      return thinkingBlock(key, b.text, live && i === blocks.length - 1);
+      return thinkingBlock(key, b, live && i === blocks.length - 1);
     }
     if (b.type === "toolCall") return toolBlock(`t-${b.id}`, b, tools.get(b.id), results.get(b.id));
     // Committed text arrives pre-rendered from the server (chatview.ts); the streaming
@@ -381,7 +430,13 @@ function assistantHtml(idKey, blocks, live, results, tools, error) {
     return `<div class="message assistant"><div class="message-content">${html}</div></div>`;
   }).join("");
   const err = error ? `<div class="message assistant error"><div class="message-content">${escapeHtml(error)}</div></div>` : "";
-  return `<div class="turn">${body}${err}</div>`;
+  // One dim line per assistant message: how long the model took to think it through and write
+  // it. Tool calls carry their own durations on their rows.
+  const meta = live || ms === undefined ? "" : `<div class="message-meta">${iconTag("clock", 12, "dim")} Worked ${fmtDur(ms)}</div>`;
+  // data-branch-after is the entry to branch at for a session starting just after this answer. It is
+  // only set when the server marked the message as a valid branch point (no unanswered tool calls).
+  const fork = branchAfter === undefined ? "" : ` data-branch-after="${branchAfter}"`;
+  return `<div class="turn"${fork}>${body}${err}${meta}</div>`;
 }
 
 function stampAnimPhase() {
@@ -398,14 +453,20 @@ function renderMessages(view) {
 
   for (const m of view.messages) {
     if (m.role === "user") {
-      html.push(`<div class="message user"><div class="message-content">${escapeHtml(m.text)}</div></div>`);
+      // data-branch-before points at the entry ahead of this prompt, so a new session can start there
+      // and replay it. Absent on the first message of a conversation, which has nothing before it.
+      const fork = m.branchBefore === undefined ? "" : ` data-branch-before="${m.branchBefore}"`;
+      html.push(`<div class="message user"${fork}><div class="message-content">${escapeHtml(m.text)}</div></div>`);
     } else if (m.role === "assistant") {
       const error = m.stop === "error" || m.stop === "aborted" ? (m.error || (m.stop === "aborted" ? "Stopped" : "")) : "";
-      html.push(assistantHtml(`m${m.id}`, m.blocks || [], false, results, tools, error));
+      html.push(assistantHtml(`m${m.id}`, m.blocks || [], false, results, tools, error, m.ms, m.branchAfter));
     }
   }
   if (view.live?.blocks?.length) html.push(assistantHtml("live", view.live.blocks, true, results, tools, ""));
-  else if (view.busy) html.push('<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span></div></div>');
+  else if (view.busy) {
+    const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
+    html.push(`<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>`);
+  }
 
   for (const q of view.queue) {
     html.push(`<div class="message user queued"><div class="message-content">${escapeHtml(q.text)}</div><div class="message-meta">${iconTag("clock", 12, "dim")} queued · sends after the current step</div></div>`);
@@ -423,27 +484,45 @@ function renderMessages(view) {
     // must stay fully readable.
     if (el.classList.contains("think-body")) el.classList.toggle("overflowing", el.scrollHeight - el.clientHeight > 2);
   });
+  tickDurations();
 }
 
 function renderStats(view) {
   const s = view.stats;
   if (s.contextWindow > 0) {
     const pct = Math.min(100, Math.round((s.contextTokens / s.contextWindow) * 100));
-    ctxLabel.textContent = `Ctx ${fmtTokens(s.contextTokens)}/${fmtTokens(s.contextWindow)} · ${pct}%`;
+    ctxLabel.textContent = `${fmtTokens(s.contextTokens)}/${fmtTokens(s.contextWindow)}`;
+    ctxPct.textContent = `${pct}%`;
+    ctxPct.hidden = false;
+    ctxPill.title = `Context: ${s.contextTokens.toLocaleString()} of ${s.contextWindow.toLocaleString()} tokens used (${pct}%)`;
+    ctxPill.classList.toggle("hot", pct >= 90);
+    ctxPill.classList.toggle("warm", pct >= 70 && pct < 90);
     ctxFill.style.width = `${pct}%`;
     ctxFill.className = `meter-fill ${pct >= 90 ? "hot" : pct >= 70 ? "warm" : ""}`;
   } else {
-    ctxLabel.textContent = "Ctx –";
+    ctxLabel.textContent = "–";
+    ctxPct.hidden = true;
+    ctxPill.classList.remove("hot", "warm");
+    ctxPill.title = "Context window usage";
     ctxFill.style.width = "0";
+    ctxFill.className = "meter-fill";
   }
   cacheLabel.textContent = s.cacheLast === undefined ? "Cache –" : `Cache ${s.cacheLast}%`;
   cacheLabel.title = s.cacheSession === undefined ? "Prompt cache hit rate"
-    : `Prompt cache hit rate: ${s.cacheLast}% last request, ${s.cacheSession}% over this conversation${s.cost ? ` · $${s.cost.toFixed(4)} spent` : ""}`;
+    : `Prompt cache hit rate: ${s.cacheLast}% last request, ${s.cacheSession}% over this conversation`;
+
+  if (typeof s.cost === "number") {
+    costLabel.textContent = `$${s.cost > 0 && s.cost < 0.01 ? s.cost.toFixed(4) : s.cost.toFixed(2)}`;
+    costLabel.title = `${s.cost.toFixed(4)} spent in this session`;
+    costLabel.hidden = false;
+  } else {
+    costLabel.hidden = true;
+  }
 }
 
 function renderControls(data) {
   const view = data.view;
-  stopBtn.hidden = !view.busy;
+  updateComposerAction();
   if (view.queue.length) {
     queueBar.hidden = false;
     queueBar.innerHTML = `${iconTag("clock", 13)} ${view.queue.length} message${view.queue.length > 1 ? "s" : ""} queued`;
@@ -488,6 +567,20 @@ window.scrollChatToBottom = () => (messagesEl.scrollTop = messagesEl.scrollHeigh
 /* ---------- interaction ---------- */
 
 // Remember what the user opens or closes so streaming re-renders don't undo it.
+function updateComposerAction() {
+  const hasDraft = Boolean(chatInput.value.trim() || pendingImages.length);
+  const stopping = Boolean(payload?.view?.busy && !hasDraft);
+  const action = stopping ? "stop" : "send";
+  if (sendBtn.dataset.action !== action) {
+    sendBtn.dataset.action = action;
+    sendBtn.innerHTML = icon(stopping ? "square" : "send", stopping ? 16 : 19);
+  }
+  sendBtn.classList.toggle("stop-btn", stopping);
+  sendBtn.title = stopping ? "Stop the current run" : "Send (queues while the agent is busy)";
+  sendBtn.setAttribute("aria-label", stopping ? "Stop current run" : "Send message");
+  sendBtn.disabled = attachmentUploadInProgress && !stopping;
+}
+
 messagesEl.addEventListener("click", (e) => {
   const summary = e.target.closest("summary");
   const details = summary?.parentElement;
@@ -497,35 +590,134 @@ messagesEl.addEventListener("click", (e) => {
   else { userClosed.delete(key); userOpen.add(key); }              // about to open
 });
 
+// Enter is a newline in the textarea (that is the point of it); a hardware keyboard
+// still needs a way to send without the finger, so Ctrl/Cmd+Enter submits the form.
+chatInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.isComposing) {
+    e.preventDefault();
+    chatForm.requestSubmit ? chatForm.requestSubmit() : chatForm.dispatchEvent(new Event("submit", { cancelable: true }));
+  }
+});
+
 chatForm.addEventListener("submit", (e) => {
   e.preventDefault();
+  if (payload?.view?.busy && !chatInput.value.trim() && !pendingImages.length) {
+    fetch("/api/abort", { method: "POST" }).catch(() => {});
+    return;
+  }
+  if (attachmentUploadInProgress) return;
   const text = chatInput.value.trim();
-  if (!text) return;
+  const images = pendingImages.map(({ path, number, name }) => ({ path, label: `Image #${number}`, name }));
+  if (!text && !images.length) return;
   chatInput.value = "";
-  sendText(text);
+  autoSizeChatInput();
+  for (const image of pendingImages) URL.revokeObjectURL(image.previewUrl);
+  pendingImages.length = 0;
+  nextImageNumber = 1;
+  renderAttachmentTray();
+  updateComposerAction();
+  sendText(text, images);
 });
 
 // The reply arrives through the live view; this request only reports immediate failures.
-function sendText(text) {
+function sendText(text, attachments = []) {
   return fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: text }),
+    body: JSON.stringify({ message: text, attachments }),
   }).then(r => r.json()).then(d => { if (d.error) alert(d.error); }).catch(() => {});
 }
 
 /* ---------- attachments ----------
-   The file picker is the only way a file from this phone can reach the agent: Android hands
-   the WebView a content:// URI for it, so the bytes can be read without any storage
-   permission, and the server stores them under uploads/ itself. That matters because shared
-   storage is readable only for files this app created -- a screenshot or download made by
-   another app comes back EACCES no matter what its permissions say.
-
-   The upload is not a message of its own: it only drops the saved paths into the composer and
-   waits. The user still decides what to ask about them, and can delete a path or add a question
-   before sending, instead of a turn landing on its own with "read this from the workspace". */
+   Android gives the WebView a content:// URI for picked files; upload the bytes here, then
+   keep image paths as structured request metadata while the composer shows removable previews
+   and stable [Image #N] references. Non-image attachments retain the path-in-prompt workflow. */
 const attachBtn = document.getElementById("attach-btn");
 const attachInput = document.getElementById("attach-input");
+const attachmentTray = document.getElementById("attachment-tray");
+const pendingImages = [];
+let nextImageNumber = 1;
+let attachmentUploadInProgress = false;
+
+/* ---------- composer field sizing ----------
+   A textarea instead of a single-line input, so Enter on the soft keyboard types a newline
+   (and long text wraps rather than scrolling sideways). The box then has to grow with the
+   draft, up to a cap: past the cap it scrolls vertically like any other text field, which
+   is why .tall flips touch-action so a vertical drag scrolls the field instead of being
+   swallowed by the chrome touch guard. The cap is a share of the *visual* viewport, so it
+   shrinks sensibly once the keyboard is up (CSS vh is the layout viewport and ignores it). */
+function autoSizeChatInput() {
+  const line = parseFloat(getComputedStyle(chatInput).lineHeight) || 20;
+  const viewportH = window.visualViewport?.height || window.innerHeight || 640;
+  const max = Math.max(line * 3, Math.round(viewportH * 0.3));
+  chatInput.style.height = "auto";
+  // scrollHeight is the content height even while the box is clamped, so it still tells
+  // us whether the field overflows.
+  const overflowing = chatInput.scrollHeight > max + 1;
+  chatInput.style.maxHeight = `${max}px`;
+  chatInput.style.height = `${overflowing ? max : chatInput.scrollHeight}px`;
+  chatInput.classList.toggle("tall", overflowing);
+}
+
+chatInput.addEventListener("input", () => {
+  autoSizeChatInput();
+  updateComposerAction();
+});
+// The keyboard opening or closing changes the cap.
+window.visualViewport?.addEventListener("resize", autoSizeChatInput);
+window.addEventListener("resize", autoSizeChatInput);
+autoSizeChatInput(); // settle the empty field to exactly one line
+updateComposerAction();
+
+function isSupportedImage(file) {
+  return /^image\/(png|jpe?g|gif|webp|bmp)$/i.test(file.type || "") || /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name || "");
+}
+
+function renderAttachmentTray() {
+  if (!attachmentTray) return;
+  attachmentTray.replaceChildren();
+  for (const image of pendingImages) {
+    const card = document.createElement("div");
+    card.className = "attachment-preview";
+    card.setAttribute("role", "listitem");
+    card.title = `Image #${image.number}: ${image.name}`;
+
+    const preview = document.createElement("img");
+    preview.src = image.previewUrl;
+    preview.alt = `Image #${image.number}: ${image.name}`;
+    card.append(preview);
+
+    const label = document.createElement("span");
+    label.className = "attachment-number";
+    label.textContent = `Image #${image.number}`;
+    card.append(label);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attachment-remove";
+    remove.textContent = "×";
+    remove.title = `Remove Image #${image.number}`;
+    remove.setAttribute("aria-label", `Remove Image #${image.number}`);
+    remove.addEventListener("click", () => {
+      const index = pendingImages.indexOf(image);
+      if (index < 0) return;
+      pendingImages.splice(index, 1);
+      URL.revokeObjectURL(image.previewUrl);
+      removeImageReference(image.number);
+      renderAttachmentTray();
+    });
+    card.append(remove);
+    attachmentTray.append(card);
+  }
+  attachmentTray.hidden = pendingImages.length === 0;
+  if (!attachmentUploadInProgress) updateComposerAction();
+}
+
+function removeImageReference(number) {
+  const marker = `[Image #${number}]`;
+  chatInput.value = chatInput.value.split(marker).join("").replace(/ {2,}/g, " ").trim();
+  autoSizeChatInput();
+}
 
 if (attachBtn && attachInput) {
   attachBtn.addEventListener("click", () => attachInput.click());
@@ -535,34 +727,50 @@ if (attachBtn && attachInput) {
     attachInput.value = ""; // so picking the same file again still fires change
     if (!files.length) return;
     attachBtn.disabled = true;
-    const saved = [];
+    attachmentUploadInProgress = true;
+    updateComposerAction();
+    const savedPaths = [];
+    const addedMarkers = [];
     try {
       for (const file of files) {
+        const imageFile = isSupportedImage(file);
+        if (imageFile && file.size > 8 * 1024 * 1024) { alert(`${file.name} is larger than 8 MB.`); break; }
+        if (imageFile && pendingImages.length >= 8) { alert("Attach no more than 8 images in one message."); break; }
+        const queuedBytes = pendingImages.reduce((total, image) => total + image.size, 0);
+        if (imageFile && queuedBytes + file.size > 32 * 1024 * 1024) { alert("Attached images must total 32 MB or less."); break; }
         const res = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
         const data = await res.json();
         if (data.error) { alert(data.error); break; }
-        saved.push(data.path);
+        if (isSupportedImage(file)) {
+          const number = nextImageNumber++;
+          pendingImages.push({ path: data.path, name: file.name, size: file.size, number, previewUrl: URL.createObjectURL(file) });
+          addedMarkers.push(`[Image #${number}]`);
+          renderAttachmentTray();
+        } else {
+          savedPaths.push(data.path);
+        }
       }
     } catch (err) {
       alert(`Upload failed: ${err}`);
     } finally {
       attachBtn.disabled = false;
+      attachmentUploadInProgress = false;
+      updateComposerAction();
     }
-    if (saved.length) appendToComposer(saved.join("\n"));
+    if (savedPaths.length) appendToComposer(savedPaths.join("\n"));
+    if (addedMarkers.length) appendToComposer(addedMarkers.join(" "));
   });
 }
 
-/* Put text at the end of the composer, on its own line when the user already wrote something,
-   and leave the caret there -- so the next thing typed continues the same thought and nothing
-   is sent until the user hits send. */
+/* Put a reference at the end of the composer and leave the caret there. */
 function appendToComposer(text) {
   const current = chatInput.value.trim();
-  chatInput.value = current ? `${current}\n${text}` : text;
+  chatInput.value = current ? `${current} ${text}` : text;
+  autoSizeChatInput();
+  updateComposerAction();
   chatInput.focus();
   chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
 }
-
-stopBtn.addEventListener("click", () => fetch("/api/abort", { method: "POST" }).catch(() => {}));
 
 thinkingSelect.addEventListener("change", async () => {
   try {
@@ -577,3 +785,127 @@ thinkingSelect.addEventListener("change", async () => {
     alert(err.message);
   }
 });
+
+/* ---------- branching ----------
+   A branch is a whole session, so the affordance hangs off a message: a long press (or a right click
+   on desktop) opens a small menu at that message listing the branch points the server marked on it.
+   The gesture is deliberately provisional — it is the one thing here worth judging on the device.
+
+   The menu is a fixed element on <body>, for the same reason the session row menu is: it has to
+   escape the message list's stacking context and be clamped to the viewport on a narrow phone. */
+const LONG_PRESS_MS = 480;
+let branchMenu = null;
+let pressTimer = 0;
+let press = null;
+
+function closeBranchMenu() {
+  if (!branchMenu || branchMenu.hidden) return;
+  branchMenu.hidden = true;
+  branchMenu.innerHTML = "";
+}
+
+/* What can be branched from this element, in the order they should be offered. */
+function branchItemsFor(el) {
+  const items = [];
+  if (el.dataset.branchAfter)
+    items.push({ at: Number(el.dataset.branchAfter), icon: "git-compare", label: "Branch from here", hint: "keeps everything up to this answer" });
+  if (el.dataset.branchBefore)
+    items.push({ at: Number(el.dataset.branchBefore), icon: "rotate-ccw", label: "Branch before this", hint: "starts again from the message above" });
+  return items;
+}
+
+function openBranchMenu(anchor) {
+  const items = branchItemsFor(anchor);
+  if (!items.length) return;
+  if (!branchMenu) {
+    branchMenu = document.createElement("div");
+    branchMenu.className = "branch-menu";
+    branchMenu.setAttribute("role", "menu");
+    branchMenu.hidden = true;
+    document.body.appendChild(branchMenu);
+  }
+  branchMenu.innerHTML = items.map(it => `
+    <button type="button" class="branch-menu-item" role="menuitem" data-at="${it.at}">
+      ${icon(it.icon, 16)}<span class="branch-label">${escapeHtml(it.label)}</span><span class="branch-hint">${escapeHtml(it.hint)}</span>
+    </button>`).join("");
+  branchMenu.hidden = false;
+
+  // Sit beside the message: clamped inside the viewport, and centred on it when it is wide enough that
+  // an edge-aligned menu would fall off a phone screen.
+  const r = anchor.getBoundingClientRect();
+  const m = branchMenu.getBoundingClientRect();
+  const pad = 8;
+  const left = Math.max(pad, Math.min(r.left + r.width / 2 - m.width / 2, window.innerWidth - m.width - pad));
+  const below = r.bottom + 6;
+  const top = below + m.height > window.innerHeight - pad ? Math.max(pad, r.top - m.height - 6) : below;
+  branchMenu.style.left = `${left}px`;
+  branchMenu.style.top = `${top}px`;
+  navigator.vibrate?.(12);
+  branchMenu.querySelector("button")?.focus({ preventScroll: true });
+}
+
+function cancelPress() {
+  if (pressTimer) clearTimeout(pressTimer);
+  pressTimer = 0;
+  press = null;
+}
+
+messagesEl.addEventListener("pointerdown", (e) => {
+  // Inside a summary, a scrollable body, a link or the queued-message row a tap already means
+  // something else, so a long press there must not turn into a menu.
+  if (e.target.closest("summary, .think-body, .tool-body, .tool-out, a, button")) return;
+  const el = e.target.closest("[data-branch-after], [data-branch-before]");
+  if (!el) return;
+  press = { x: e.clientX, y: e.clientY, el };
+  pressTimer = setTimeout(() => {
+    pressTimer = 0;
+    const held = press;
+    press = null;
+    if (held) openBranchMenu(held.el);
+  }, LONG_PRESS_MS);
+});
+// A finger that moves is a scroll or a selection, not a long press.
+messagesEl.addEventListener("pointermove", (e) => {
+  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) cancelPress();
+}, { passive: true });
+messagesEl.addEventListener("pointerup", cancelPress);
+messagesEl.addEventListener("pointercancel", cancelPress);
+messagesEl.addEventListener("scroll", closeBranchMenu, { passive: true });
+messagesEl.addEventListener("contextmenu", (e) => {
+  const el = e.target.closest("[data-branch-after], [data-branch-before]");
+  if (!el) return;
+  e.preventDefault();
+  openBranchMenu(el);
+});
+
+// The server answers with the new session already switched to, so the pushed view and the session
+// list update on their own.
+async function branchAt(at) {
+  const id = payload?.session?.id;
+  if (id === undefined) return;
+  try {
+    await sessionsApi("/api/sessions/fork", "POST", { id, at });
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const item = e.target.closest(".branch-menu-item");
+  if (!item || !branchMenu || branchMenu.hidden) return;
+  const at = Number(item.dataset.at);
+  closeBranchMenu();
+  branchAt(at);
+});
+// Dismiss on a tap anywhere else, on Escape, and on a resize.
+document.addEventListener("pointerdown", (e) => {
+  if (!branchMenu || branchMenu.hidden) return;
+  if (branchMenu.contains(e.target)) return;
+  closeBranchMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeBranchMenu();
+});
+window.addEventListener("resize", closeBranchMenu);
+// The menu is a layer of its own: Android back closes it before anything else.
+registerBackLayer(95, () => branchMenu && !branchMenu.hidden, closeBranchMenu);

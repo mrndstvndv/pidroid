@@ -10,7 +10,7 @@
  * Every source file goes in. There is no "changed only" mode: the point of the archive is to be a
  * complete, self-contained copy of the work, and a partial one that silently omits a file the agent
  * forgot to touch is worse than a slightly larger tarball. Credentials, session databases, .git,
- * scratch directories and generated bundles are still left out.
+ * scratch directories, generated bundles and the uploads/ directory are still left out.
  *
  * Each file is labelled against `.shipped_manifest.json`, the app's map of path -> sha256 for its
  * shipped files, so the archive says which files are the agent's work ("modified"), which are app
@@ -20,7 +20,7 @@
  * baseline: it gains files whenever the app updates, and changes.ts commits it every turn.
  *
  * Secrets are never included: auth.json (API keys), the sqlite databases, the local .git, and
- * the generated bundle directories are excluded — the same list changes.ts keeps out of its
+ * the generated bundle directories and uploads/ are excluded — the same list changes.ts keeps out of its
  * commits.
  *
  * tar runs as a child process and is awaited, so the server's event loop is not blocked.
@@ -39,8 +39,27 @@ const AGENT_DIR = decodeURIComponent(new URL("../", import.meta.url).pathname).r
 /** Where archives land. */
 const DOWNLOAD_DIR = "/storage/emulated/0/Download";
 
-/** Directories never included: VCS internals, deps, generated bundles, scratch. */
-const SKIP_DIRS = new Set([".git", "node_modules", "vendor", "fallback", ".bun", ".tmp", ".bundle-staging"]);
+/**
+ * Directories never included: VCS internals, deps, generated bundles, scratch.
+ *
+ * `uploads` holds the images and screenshots attached to chat sessions. They are conversation
+ * input, not the agent's work, and a session that attached a few dozen screenshots would
+ * otherwise dominate the archive (PNG barely compresses): a bundle of ~85 source files went from
+ * 0.6 MB to 4.7 MB because of this one directory. The files stay on the phone for the app to
+ * read; they are just not part of a source snapshot. Because the name is in SKIP_DIRS, the
+ * deleted-file pass also treats uploads/ as excluded by design rather than as a shipped file
+ * that has gone missing.
+ */
+const SKIP_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "vendor",
+  "fallback",
+  ".bun",
+  ".tmp",
+  ".bundle-staging",
+  "uploads",
+]);
 
 /** Files never included: credentials, installed-state markers, the shipped hash map. */
 const SKIP_FILES = new Set(["auth.json", "auth.json.tmp", ".installed_version", ".shipped_manifest.json"]);
@@ -91,7 +110,8 @@ const saveBundle = defineTool({
     "the local commit journal is a per-turn log with no remote. The archive is always the complete " +
     "tree -- there is no partial mode -- and carries a MANIFEST.json labelling each file against the " +
     "app's shipped baseline (.shipped_manifest.json). Credentials (auth.json), session databases, " +
-    "the local .git, scratch directories and generated bundles are always excluded.",
+    "the local .git, scratch directories, generated bundles and the uploads/ directory of attached " +
+    "images are always excluded.",
   parameters: Type.Object({
     name: Type.Optional(
       Type.String({ description: "Filename prefix (default 'pidroid-agent-changes'); a UTC timestamp is appended" }),
@@ -167,7 +187,7 @@ const saveBundle = defineTool({
             agentDir: AGENT_DIR,
             baseline: ".shipped_manifest.json (sha256 map of the app's shipped files)",
             counts: { included: selected.length, modified, notShipped: added, deleted },
-            note: "Full source snapshot of the agent's files.",
+            note: "Full source snapshot of the agent's files, without the uploads/ directory.",
             statusLegend: {
               modified: "hash differs from the shipped baseline",
               "not-shipped": "not in the shipped manifest (app asset, or a file added since install)",
@@ -181,6 +201,7 @@ const saveBundle = defineTool({
               "node_modules",
               ".tmp (scratch)",
               "generated bundles",
+              "uploads/ (images attached to chat sessions)",
             ],
             files: selected.sort((a, b) => a.path.localeCompare(b.path)),
             unstableDuringCopy: unstable,

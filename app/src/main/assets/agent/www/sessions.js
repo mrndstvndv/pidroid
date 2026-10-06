@@ -2,9 +2,12 @@
 // The list lives in the sidebar; switching happens straight from there.
 
 const sidebarList = document.getElementById("sidebar-session-list");
+const sidebarSearch = document.getElementById("sidebar-search");
 const sessionTitle = document.getElementById("session-title");
 
 let sessionData = { current: 0, sessions: [] };
+/* Lower-cased filter text from the sidebar search box; empty means "show everything". */
+let sessionQuery = "";
 
 async function sessionsApi(path, method = "GET", body) {
   const res = await fetch(path, method === "GET" ? {} : {
@@ -27,19 +30,103 @@ function sessionAgo(ts) {
 
 function renderSessions() {
   if (!sidebarList) return;
-  sidebarList.innerHTML = sessionData.sessions.map(s => `
-    <div class="session-row${s.id === sessionData.current ? " selected" : ""}" data-id="${s.id}">
+  // Client-side filter: the whole list is already in memory, and the box should stay
+  // responsive while a name is still being typed. Filtering flattens the tree, so a branch can
+  // show without the session it came from — the indent then reads as nesting that isn't there,
+  // which is the lesser evil compared to hiding a session that matched.
+  const shown = sessionData.sessions.filter(s => !sessionQuery || s.title.toLowerCase().includes(sessionQuery));
+  // A session that was working reads "running" until its run ends, then "done" until it is opened again.
+  const mark = (s) => s.busy
+    ? `${icon("circle-dot", 11, "ico-inline")} running`
+    : s.done ? `${icon("check", 11, "ico-inline")} done` : "";
+  sidebarList.innerHTML = shown.map(s => `
+    <div class="session-row${s.id === sessionData.current ? " selected" : ""}${s.depth ? " child" : ""}" data-id="${s.id}" style="--depth:${s.depth || 0}">
       <button type="button" class="model-row" data-act="switch">
-        <span class="model-name">${escapeHtml(s.title)}</span>
-        <span class="provider-meta">${sessionAgo(s.updatedAt)}${s.busy ? ` · <span class="busy-dot">${icon("circle-dot", 11, "ico-inline")} running</span>` : ""}${s.model ? " · " + escapeHtml(s.model.split("/").slice(1).join("/") || s.model) : ""}</span>
+        <span class="model-name">${s.depth ? `<span class="branch-glyph" aria-label="branch">${icon("git-compare", 12, "ico-inline")}</span>` : ""}${escapeHtml(s.title)}</span>
+        <span class="session-meta">
+          <span class="busy-dot${s.done && !s.busy ? " done" : ""}">${mark(s)}</span>
+          <span class="session-ago">${sessionAgo(s.updatedAt)}</span>
+        </span>
       </button>
-      <button type="button" class="icon-btn" data-act="rename" title="Rename" aria-label="Rename session">${icon("pencil", 15)}</button>
-      <button type="button" class="icon-btn danger" data-act="delete" title="Delete" aria-label="Delete session">${icon("trash-2", 15)}</button>
-    </div>`).join("") || '<p class="description">No sessions.</p>';
+      <button type="button" class="icon-btn session-more-btn" data-act="menu" title="Session actions" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false">${icon("ellipsis", 16)}</button>
+    </div>`).join("")
+    || (sessionQuery ? `<p class="description">No sessions match "${escapeHtml(sessionQuery)}".</p>` : '<p class="description">No sessions.</p>');
+}
+
+// Search box: re-render the rows on every keystroke, and clear it on Escape.
+sidebarSearch?.addEventListener("input", () => {
+  sessionQuery = sidebarSearch.value.trim().toLowerCase();
+  closeSessionMenu();
+  renderSessions();
+});
+sidebarSearch?.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !sidebarSearch.value) return;
+  e.stopPropagation(); // don't let the sidebar's own Escape handler close it
+  sidebarSearch.value = "";
+  sessionQuery = "";
+  renderSessions();
+});
+// Closing the sidebar drops the filter, so the next open starts from the full list
+// instead of a stale query that hides sessions the user never asked to hide.
+function clearSessionSearch() {
+  if (!sidebarSearch || !sidebarSearch.value) return;
+  sidebarSearch.value = "";
+  sessionQuery = "";
+  renderSessions();
+}
+window.onSidebarClosed = clearSessionSearch;
+
+/* ---------- row menu ----------
+   Rename and delete live behind one ⋮ button: two always-visible icons ate the title's width
+   on a narrow sidebar, and the destructive one sat a stray tap away from every session.
+   The menu is a single fixed-positioned element parked on <body> (so it escapes the sidebar's
+   stacking context) and is placed under the button that opened it. */
+let sessionMenu = null;
+let menuSessionId = null;
+
+function closeSessionMenu() {
+  if (!sessionMenu || sessionMenu.hidden) return;
+  sessionMenu.hidden = true;
+  sessionMenu.innerHTML = "";
+  document.querySelectorAll('.session-more-btn[aria-expanded="true"]')
+    .forEach(b => b.setAttribute("aria-expanded", "false"));
+  menuSessionId = null;
+}
+
+function openSessionMenu(btn, id) {
+  if (!sessionMenu) {
+    sessionMenu = document.createElement("div");
+    sessionMenu.className = "session-menu";
+    sessionMenu.setAttribute("role", "menu");
+    sessionMenu.hidden = true;
+    document.body.appendChild(sessionMenu);
+  }
+  if (!sessionMenu.hidden && menuSessionId === id) return closeSessionMenu();
+  menuSessionId = id;
+  sessionMenu.innerHTML = `
+    <button type="button" class="session-menu-item" role="menuitem" data-menu="rename">${icon("square-pen", 16)}<span>Rename</span></button>
+    <button type="button" class="session-menu-item danger" role="menuitem" data-menu="delete">${icon("trash-2", 16)}<span>Delete</span></button>`;
+  sessionMenu.hidden = false;
+  document.querySelectorAll('.session-more-btn[aria-expanded="true"]')
+    .forEach(b => b.setAttribute("aria-expanded", "false"));
+  btn.setAttribute("aria-expanded", "true");
+
+  // Anchor under the button's right edge, then keep it on screen: flip above the button
+  // when there is no room below, and clamp horizontally inside the viewport.
+  const r = btn.getBoundingClientRect();
+  const m = sessionMenu.getBoundingClientRect();
+  const pad = 8;
+  const left = Math.max(pad, Math.min(r.right - m.width, window.innerWidth - m.width - pad));
+  const below = r.bottom + 6;
+  const top = below + m.height > window.innerHeight - pad ? Math.max(pad, r.top - m.height - 6) : below;
+  sessionMenu.style.left = `${left}px`;
+  sessionMenu.style.top = `${top}px`;
+  sessionMenu.querySelector("button")?.focus({ preventScroll: true });
 }
 
 async function loadSessions() {
   try {
+    closeSessionMenu();
     sessionData = await sessionsApi("/api/sessions");
     renderSessions();
   } catch (e) {
@@ -70,16 +157,33 @@ sidebarList?.addEventListener("click", async (e) => {
   const session = sessionData.sessions.find(s => s.id === id);
   try {
     if (btn.dataset.act === "switch") {
+      closeSessionMenu();
       if (id !== sessionData.current) await sessionsApi(`/api/sessions/${id}/switch`, "POST");
       window.closeSidebar?.();
       setTimeout(() => window.scrollChatToBottom?.(), 100);
-    } else if (btn.dataset.act === "rename") {
+    } else if (btn.dataset.act === "menu") {
+      openSessionMenu(btn, id);
+    }
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+// Menu items act on the session the open menu belongs to, captured before it closes.
+document.addEventListener("click", async (e) => {
+  const item = e.target.closest(".session-menu-item");
+  if (!item || !sessionMenu || sessionMenu.hidden) return;
+  const id = menuSessionId;
+  const session = sessionData.sessions.find(s => s.id === id);
+  closeSessionMenu();
+  try {
+    if (item.dataset.menu === "rename") {
       const title = prompt("Rename session", session?.title ?? "");
       if (title !== null) {
         await sessionsApi(`/api/sessions/${id}/rename`, "POST", { title });
         loadSessions();
       }
-    } else if (btn.dataset.act === "delete") {
+    } else if (item.dataset.menu === "delete") {
       if (confirm(`Delete "${session?.title}"? Any run in it is stopped, and it disappears from this list.`)) {
         await sessionsApi(`/api/sessions/${id}/delete`, "POST");
         loadSessions();
@@ -90,6 +194,21 @@ sidebarList?.addEventListener("click", async (e) => {
   }
 });
 
+// Dismiss on a tap anywhere else, on Escape, and on any scroll of the list behind it
+// (the menu is fixed, so it would otherwise hang detached from its row).
+document.addEventListener("pointerdown", (e) => {
+  if (!sessionMenu || sessionMenu.hidden) return;
+  if (sessionMenu.contains(e.target) || e.target.closest(".session-more-btn")) return;
+  closeSessionMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeSessionMenu();
+});
+sidebarList?.addEventListener("scroll", closeSessionMenu, { passive: true });
+window.addEventListener("resize", closeSessionMenu);
+// The menu is a layer of its own: Android back closes it before the sidebar.
+registerBackLayer(90, () => sessionMenu && !sessionMenu.hidden, closeSessionMenu);
+
 // Server-side changes (new / switch / rename / delete, or a title set from the first message).
 window.onSessionsEvent = () => {
   if (sidebar?.classList.contains("open")) loadSessions();
@@ -98,3 +217,6 @@ window.onSessionsEvent = () => {
 window.onSessionInfo = (session) => {
   if (session) sessionTitle.textContent = session.title;
 };
+
+// Closing the sidebar (scrim tap, back gesture) must not leave the row menu floating.
+window.closeSessionMenu = closeSessionMenu;

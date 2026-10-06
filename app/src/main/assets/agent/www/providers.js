@@ -35,22 +35,85 @@ const modelSearch = document.getElementById("model-search");
 const modelList = document.getElementById("model-list");
 const modelCount = document.getElementById("model-count");
 const modelDefault = document.getElementById("model-default");
+const titleModelSelect = document.getElementById("title-model-select");
 const MAX_RESULTS = 80;
+const MAX_RECENTS = 5;
+const RECENTS_KEY = "pidroid.recentModels";
 
-let modelData = { current: "", default: "", models: [] };
+let modelData = { current: "", default: "", titleModel: "", models: [] };
+let lastSeenModel = "";
+
+/* ---------- recently used ----------
+   The chooser is alphabetical-by-provider, so the model you actually run on can be
+   hundreds of rows down. These are the last few you picked, newest first, kept in
+   localStorage (ids only -- they are re-resolved against the catalogue on every open,
+   so a model that disappears from the provider simply drops out). */
+function readRecents() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RECENTS_KEY) || "[]");
+    return Array.isArray(raw) ? raw.filter(x => typeof x === "string").slice(0, MAX_RECENTS) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function noteRecentModel(id) {
+  if (!id) return;
+  const next = [id, ...readRecents().filter(x => x !== id)].slice(0, MAX_RECENTS);
+  try {
+    localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+  } catch (e) {
+    /* private mode: the list just will not persist */
+  }
+}
+
+/* Any path that changes the model ends up here (the dialog, the Providers tab, a
+   restored session), so this is the single place that keeps the recents honest. */
+function trackRecentModel() {
+  const cur = modelData.current;
+  if (cur && cur !== lastSeenModel) {
+    lastSeenModel = cur;
+    noteRecentModel(cur);
+  }
+}
 
 async function loadModels() {
   try {
     modelData = await api("/api/models");
+    trackRecentModel();
+    renderTitleModelOptions();
     const cur = modelData.models.find(m => m.id === modelData.current);
     modelBtnLabel.textContent = cur ? cur.name : modelData.current;
-    modelBtn.title = modelData.current;
+    modelBtn.title = cur ? `${cur.name} · ${modelData.current}` : modelData.current;
     if (!modelModal.hidden) renderModels();
   } catch (e) {
     modelBtnLabel.textContent = "Model unavailable";
   }
 }
 window.loadModels = loadModels;
+
+function renderTitleModelOptions() {
+  if (!titleModelSelect) return;
+  titleModelSelect.innerHTML = `<option value="">None (disabled)</option>` + modelData.models.map(m =>
+    `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)} · ${escapeHtml(m.providerName || m.provider)}</option>`
+  ).join("");
+  titleModelSelect.value = modelData.titleModel || "";
+}
+
+titleModelSelect?.addEventListener("change", async () => {
+  const previous = modelData.titleModel || "";
+  titleModelSelect.disabled = true;
+  try {
+    const result = await api("/api/title-model", { model: titleModelSelect.value });
+    modelData.titleModel = result.model || "";
+    renderTitleModelOptions();
+  } catch (err) {
+    alert(err.message);
+    titleModelSelect.value = previous;
+  } finally {
+    titleModelSelect.disabled = false;
+  }
+});
 
 function renderModels() {
   // Every whitespace-separated term must match the id, name or provider name.
@@ -68,18 +131,43 @@ function renderModels() {
     groups.get(key).push(m);
   }
 
-  modelList.innerHTML = [...groups].map(([name, items]) => `
-    <div class="model-group">${escapeHtml(name)}</div>
-    ${items.map(m => `
+  const providerOf = m => m.providerName || m.provider || "";
+  // Capability line: "<provider> · thinking · vision · 1000K". The provider leads even
+  // though the sticky group header already names it -- that header is the only thing
+  // saying where a row comes from inside the recents block, and a row that quietly
+  // loses its provider when you search should still say which one it is.
+  const metaOf = m => {
+    const bits = [];
+    if (m.reasoning) bits.push("thinking");
+    if (m.image) bits.push("vision");
+    bits.push(`${Math.round(m.contextWindow / 1000)}K`);
+    return bits.join(" · ");
+  };
+
+  const rowHtml = m => `
       <div class="model-item">
         <button type="button" class="model-row${m.id === modelData.current ? " selected" : ""}" data-id="${escapeHtml(m.id)}">
           <span class="model-name">${escapeHtml(m.name)}</span>
-          <span class="provider-meta">${m.reasoning ? "thinking · " : ""}${m.image ? "vision · " : ""}${Math.round(m.contextWindow / 1000)}K</span>
+          <span class="provider-meta"><span class="provider-tag">${escapeHtml(providerOf(m))}</span> · ${escapeHtml(metaOf(m))}</span>
         </button>
         <button type="button" class="model-default${m.id === modelData.default ? " active" : ""}" data-id="${escapeHtml(m.id)}"
           title="${m.id === modelData.default ? "Default for new sessions" : "Make this the default for new sessions"}"
           aria-label="Set as default">${m.id === modelData.default ? "★" : "☆"}</button>
-      </div>`).join("")}
+      </div>`;
+
+  // Only while browsing: once you type, this is a filtered list and a shortcut block
+  // of models that may not match would just be noise.
+  const byId = new Map(modelData.models.map(m => [m.id, m]));
+  const recents = terms.length ? [] : readRecents().map(id => byId.get(id)).filter(Boolean);
+  const recentHtml = recents.length ? `
+    <div class="model-group recents-head">Recently used
+      <button type="button" class="link-btn" id="clear-recents" title="Forget the recently used list">clear</button>
+    </div>
+    ${recents.map(rowHtml).join("")}` : "";
+
+  modelList.innerHTML = recentHtml + [...groups].map(([name, items]) => `
+    <div class="model-group">${escapeHtml(name)}</div>
+    ${items.map(rowHtml).join("")}
   `).join("") || `<p class="description">No models match. Sign in to more providers in the Providers tab.</p>`;
 
   const def = modelData.models.find(m => m.id === modelData.default);
@@ -104,6 +192,13 @@ modelModal.addEventListener("click", (e) => {
 modelSearch.addEventListener("input", renderModels);
 
 modelList.addEventListener("click", async (e) => {
+  if (e.target.closest("#clear-recents")) {
+    try {
+      localStorage.removeItem(RECENTS_KEY);
+    } catch (err) { /* nothing to clear */ }
+    renderModels();
+    return;
+  }
   // The star sets the default for *new* sessions and leaves this one alone, so the dialog stays
   // open and you can keep browsing; tapping the row itself switches the session and closes.
   const star = e.target.closest(".model-default");
@@ -124,6 +219,7 @@ modelList.addEventListener("click", async (e) => {
   if (!row) return;
   try {
     await api("/api/model", { model: row.dataset.id });
+    noteRecentModel(row.dataset.id);
     modelModal.hidden = true;
     loadModels();
   } catch (err) {

@@ -30,6 +30,12 @@ function syncViewport() {
   const pan = vv.offsetTop || 0;
   appEl.style.height = `${vv.height}px`;
   appEl.style.transform = pan ? `translateY(${-pan}px)` : "";
+  // The same rectangle in app-local coordinates: -pan (the app's own transform) plus
+  // pan lands on 0, the top of the visual viewport. Overlays (the model chooser) size
+  // themselves from these, so they cover exactly the visible area and nothing hides
+  // behind the soft keyboard, whatever the WebView did to the layout viewport.
+  appEl.style.setProperty("--vv-top", `${pan}px`);
+  appEl.style.setProperty("--vv-h", `${vv.height}px`);
 }
 
 function fieldFocused() {
@@ -61,10 +67,10 @@ if (appEl && window.visualViewport) {
    WebView can still turn a drag on the focused input into a visual-viewport pan or a
    focus scroll, which slides the whole shell -- topbar and composer included -- with
    the finger. So kill vertical pans at the source with a non-passive touchmove guard.
-   Only vertical-dominant moves are cancelled, so horizontal caret sliding in the
-   single-line field (and horizontal tab swipes) keep working, and taps are untouched.
-   There is no scroller inside the guarded chrome, so cancelling the move cannot trap
-   any legitimate scroll. */
+   Only vertical-dominant moves are cancelled, so horizontal caret sliding and tab
+   swipes keep working, and taps are untouched. The exception is the composer textarea
+   that has grown past its cap (.tall): it scrolls internally, so cancelling there would
+   trap the caret in the middle of a long draft. */
 const guardRoots = ".composer, .topbar, .settings-head, .settings-tabs";
 let guardStart = null;
 
@@ -74,11 +80,13 @@ document.addEventListener("touchstart", (e) => {
     x: t.clientX,
     y: t.clientY,
     chrome: !!(e.target?.closest?.(guardRoots)),
+    // A capped, scrollable composer field owns its own vertical drag.
+    scroller: !!e.target?.closest?.(".chat-input-bar textarea.tall"),
   } : null;
 }, { passive: true });
 
 document.addEventListener("touchmove", (e) => {
-  if (!guardStart?.chrome || e.touches.length !== 1) return;
+  if (!guardStart?.chrome || guardStart.scroller || e.touches.length !== 1) return;
   const t = e.touches[0];
   const dx = t.clientX - guardStart.x;
   const dy = t.clientY - guardStart.y;
@@ -263,6 +271,8 @@ function closeSidebar() {
   sidebar.classList.remove("open");
   scrim.hidden = true;
   burger.setAttribute("aria-expanded", "false");
+  window.closeSessionMenu?.();
+  window.onSidebarClosed?.();
 }
 
 window.openSidebar = openSidebar;

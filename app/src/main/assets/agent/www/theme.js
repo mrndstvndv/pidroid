@@ -7,8 +7,8 @@
 
   const LIGHT_DEFAULTS = {
     "--bg-primary": "#ffffff",
-    "--bg-secondary": "#f5f5f7",
-    "--bg-card": "#f0f0f3",
+    "--bg-secondary": "#ffffff",
+    "--bg-card": "#ffffff",
     "--accent": "#4f46e5",
     "--accent-hover": "#4338ca",
     "--text-primary": "#111827",
@@ -21,7 +21,7 @@
   const DEFAULTS = {
     "--bg-primary": "#000000",
     "--bg-secondary": "#000000",
-    "--bg-card": "#0d0d0d",
+    "--bg-card": "#000000",
     "--accent": "#6366f1",
     "--accent-hover": "#4f46e5",
     "--text-primary": "#f3f4f6",
@@ -45,58 +45,64 @@
 
   // Full light palettes, shown instead of PRESETS while the light mode is active.
   const LIGHT_PRESETS = {
-    "Daylight": {},
+    // Every preset below uses one flat colour for page, bars, cards and bubbles.
+    "Daylight": { "--bg-primary": "#ffffff", "--bg-secondary": "#ffffff", "--bg-card": "#ffffff" },
     "Paper": {
-      "--bg-primary": "#fbf7f0", "--bg-secondary": "#f3ede2", "--bg-card": "#ece4d6", "--border": "#d9cfbd",
+      "--bg-primary": "#fbf7f0", "--bg-secondary": "#fbf7f0", "--bg-card": "#fbf7f0", "--border": "#d9cfbd",
       "--text-primary": "#2b2118", "--text-secondary": "#7a6b58", "--accent": "#b45309", "--accent-hover": "#92400e",
       "--success": "#4d7c0f",
     },
     "Mint": {
-      "--bg-primary": "#f6fbf8", "--bg-secondary": "#ecf5f0", "--bg-card": "#e2efe8", "--border": "#cbddd2",
+      "--bg-primary": "#f6fbf8", "--bg-secondary": "#f6fbf8", "--bg-card": "#f6fbf8", "--border": "#cbddd2",
       "--text-primary": "#10261c", "--text-secondary": "#55705f", "--accent": "#059669", "--accent-hover": "#047857",
       "--success": "#059669",
     },
     "Sky": {
-      "--bg-primary": "#f7faff", "--bg-secondary": "#edf3fc", "--bg-card": "#e3ecf9", "--border": "#cfdaec",
+      "--bg-primary": "#f7faff", "--bg-secondary": "#f7faff", "--bg-card": "#f7faff", "--border": "#cfdaec",
       "--text-primary": "#0f1c33", "--text-secondary": "#5a6b88", "--accent": "#2563eb", "--accent-hover": "#1d4ed8",
       "--success": "#16a34a",
     },
     "Rose": {
-      "--bg-primary": "#fff8f9", "--bg-secondary": "#fbeef0", "--bg-card": "#f6e3e6", "--border": "#e8cdd2",
+      "--bg-primary": "#fff8f9", "--bg-secondary": "#fff8f9", "--bg-card": "#fff8f9", "--border": "#e8cdd2",
       "--text-primary": "#2a1418", "--text-secondary": "#85616a", "--accent": "#e11d48", "--accent-hover": "#be123c",
       "--success": "#16a34a",
     },
   };
 
   const PRESETS = {
-    "AMOLED Indigo": {},
+    "AMOLED Indigo": { "--bg-primary": "#000000", "--bg-secondary": "#000000", "--bg-card": "#000000" },
     "Ember": {
-      "--accent": "#f97316", "--accent-hover": "#ea580c", "--bg-card": "#140d08",
+      "--accent": "#f97316", "--accent-hover": "#ea580c",
+      "--bg-primary": "#140d08", "--bg-secondary": "#140d08", "--bg-card": "#140d08",
       "--border": "#2e1c10", "--success": "#84cc16",
     },
     "Nord": {
-      "--accent": "#88c0d0", "--accent-hover": "#81a1c1", "--bg-card": "#101820",
+      "--accent": "#88c0d0", "--accent-hover": "#81a1c1",
+      "--bg-primary": "#101820", "--bg-secondary": "#101820", "--bg-card": "#101820",
       "--border": "#2b3540", "--text-primary": "#eceff4", "--text-secondary": "#8fa0b3",
       "--success": "#a3be8c",
     },
     "Solarized": {
-      "--accent": "#b58900", "--accent-hover": "#9a7100", "--bg-card": "#0f1418",
+      "--accent": "#b58900", "--accent-hover": "#9a7100",
+      "--bg-primary": "#0f1418", "--bg-secondary": "#0f1418", "--bg-card": "#0f1418",
       "--border": "#243038", "--text-primary": "#eee8d5", "--text-secondary": "#93a1a1",
       "--success": "#859900",
     },
     "Gruvbox": {
-      "--accent": "#fabd2f", "--accent-hover": "#d5a021", "--bg-card": "#161512",
+      "--accent": "#fabd2f", "--accent-hover": "#d5a021",
+      "--bg-primary": "#161512", "--bg-secondary": "#161512", "--bg-card": "#161512",
       "--border": "#3a352c", "--text-primary": "#ebdbb2", "--text-secondary": "#a89984",
       "--success": "#b8bb26",
     },
     "Matrix": {
-      "--accent": "#22c55e", "--accent-hover": "#16a34a", "--bg-card": "#04140a",
+      "--accent": "#22c55e", "--accent-hover": "#16a34a",
+      "--bg-primary": "#04140a", "--bg-secondary": "#04140a", "--bg-card": "#04140a",
       "--border": "#0f2e1a", "--text-primary": "#d1fae5", "--text-secondary": "#4d9c6b",
       "--success": "#22c55e",
     },
     "Paper": {
-      "--accent": "#4f46e5", "--accent-hover": "#4338ca", "--bg-primary": "#12100e",
-      "--bg-secondary": "#1a1714", "--bg-card": "#241f1a", "--border": "#3a332b",
+      "--accent": "#4f46e5", "--accent-hover": "#4338ca",
+      "--bg-primary": "#241f1a", "--bg-secondary": "#241f1a", "--bg-card": "#241f1a", "--border": "#3a332b",
       "--text-primary": "#efe9e1", "--text-secondary": "#9a9086",
     },
   };

@@ -6,6 +6,7 @@
        opens instead of panning it, so the topbar is not pushed off the top of the screen. -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
   <title>Pidroid Agent</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css" id="main-stylesheet">
   <script>
     // Resolve light/dark and apply the saved theme before first paint, so there is no flash of the wrong
@@ -48,35 +49,43 @@
       <div class="chat-messages" id="messages-container"></div>
 
       <div class="composer">
+        <div class="attachment-tray" id="attachment-tray" role="list" aria-label="Attached images" hidden></div>
         <div class="queue-bar" id="queue-bar" hidden></div>
+        <!-- Row 1: context on the left, model on the right. Row 2: cache on the
+             left, thinking effort on the right. One nowrap line holding all four
+             is what used to ellipsise "Ctx", "Cache" and the model name. -->
         <div class="composer-meta">
-          <div class="meta-stats" id="meta-stats">
-            <span class="stat-pill" id="ctx-pill" title="Context window usage">
+          <div class="meta-row">
+            <span class="ctx-group" id="ctx-pill" title="Context window usage">
               <span class="conn-dot" id="conn-dot" title="Connection"></span>
-              <span id="ctx-label">Ctx –</span>
               <span class="meter"><span class="meter-fill" id="ctx-fill"></span></span>
+              <span class="stat-num" id="ctx-label">–</span>
+              <span class="stat-pct" id="ctx-pct" hidden>0%</span>
             </span>
-            <span class="stat-pill" id="cache-label" title="Prompt cache hit rate">Cache –</span>
-          </div>
-          <div class="meta-controls">
-            <select id="thinking-select" class="think-select" title="Thinking effort"></select>
             <button type="button" class="model-btn" id="model-btn" title="Choose model">
               <span data-icon="cpu" data-size="13"></span>
               <span id="model-btn-label">Loading model...</span>
               <span data-icon="chevron-down" data-size="14"></span>
             </button>
           </div>
+          <div class="meta-row">
+            <span class="stat-tail">
+              <span id="cache-label" title="Prompt cache hit rate">Cache –</span>
+              <span id="cost-label" class="cost-pill" hidden title="Tokens spent in this session"></span>
+            </span>
+            <select id="thinking-select" class="think-select" title="Thinking effort"></select>
+          </div>
         </div>
         <form class="chat-input-bar" id="chat-form">
-          <button type="button" class="attach-btn" id="attach-btn" title="Attach a file: it is uploaded and its path is put in the message for you to send">
+          <button type="button" class="attach-btn" id="attach-btn" title="Attach files or images">
             <span data-icon="paperclip" data-size="18"></span>
           </button>
-          <input type="text" id="chat-input" placeholder="Give the agent a task..." autocomplete="off" />
-          <button type="submit" id="send-btn" title="Send (queues while the agent is busy)">
+          <!-- Multiline: Enter (soft keyboard) inserts a newline, the button sends.
+               Ctrl/Cmd+Enter is the keyboard shortcut for sending. -->
+          <textarea id="chat-input" rows="1" placeholder="Give the agent a task..." autocomplete="off"
+                    autocapitalize="sentences" spellcheck="false"></textarea>
+          <button type="submit" id="send-btn" title="Send (queues while the agent is busy)" aria-label="Send message">
             <span data-icon="send" data-size="19"></span>
-          </button>
-          <button type="button" id="stop-btn" class="stop-btn" title="Stop the current run" hidden>
-            <span data-icon="square" data-size="16"></span>
           </button>
         </form>
         <!-- Outside the form: picking a file must never look like a submit. -->
@@ -109,6 +118,15 @@
           </button>
         </div>
         <p class="description">Pick the active model from the chat composer. Refresh re-fetches the OpenCode free and Command Code catalogs.</p>
+
+        <div class="editor-header">
+          <h2>Automatic session titles</h2>
+        </div>
+        <label for="title-model-select" class="provider-meta">Title generation model</label>
+        <select id="title-model-select" class="field" aria-label="Title generation model">
+          <option value="">None (disabled)</option>
+        </select>
+        <p class="description">When selected, this model generates a title from the first message in a new session. None disables automatic title generation.</p>
 
         <div class="editor-header">
           <h2>Providers</h2>
@@ -259,6 +277,12 @@
         <button type="button" class="icon-btn" id="sidebar-close" aria-label="Close">
           <span data-icon="x" data-size="18"></span>
         </button>
+      </div>
+      <div class="sidebar-filter">
+        <div class="field-wrap">
+          <span data-icon="search" data-size="15" class="field-icon"></span>
+          <input type="search" id="sidebar-search" class="field" placeholder="Search sessions..." autocomplete="off" aria-label="Search sessions" />
+        </div>
       </div>
       <div class="sidebar-list" id="sidebar-session-list"></div>
       <div class="sidebar-foot">

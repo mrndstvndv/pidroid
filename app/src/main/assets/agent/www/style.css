@@ -1,7 +1,7 @@
 :root {
   --bg-primary: #000000;
   --bg-secondary: #000000;
-  --bg-card: #0d0d0d;
+  --bg-card: #000000;
   --accent: #6366f1;
   --accent-hover: #4f46e5;
   --text-primary: #f3f4f6;
@@ -17,8 +17,9 @@
   --accent-text: #a5b4fc;
   --accent-text-strong: #c7d2fe;
   --accent-edge: #2b2b52;
-  --danger-text: var(--danger-text);
-  --warn: var(--warn);
+  /* On black these have to be lighter than the light-mode pair, or they vanish. */
+  --danger-text: #f87171;
+  --warn: #fbbf24;
   --text-muted: #6b7280;
   --scrim: rgba(0, 0, 0, 0.45);
   --modal-scrim: rgba(0, 0, 0, 0.8);
@@ -28,8 +29,8 @@
    Inline overrides from the Theme tab sit on top of this, per mode. */
 html[data-mode="light"] {
   --bg-primary: #ffffff;
-  --bg-secondary: #f5f5f7;
-  --bg-card: #f0f0f3;
+  --bg-secondary: #ffffff;
+  --bg-card: #ffffff;
   --accent: #4f46e5;
   --accent-hover: #4338ca;
   --text-primary: #111827;
@@ -318,6 +319,17 @@ body {
   padding: 8px;
 }
 
+/* Session filter: pinned above the list so it stays put while the sessions scroll. */
+.sidebar-filter {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+/* The toolbar variant above kills the field's own bottom margin; same here, or the
+   filter block grows a stray gap under the input. */
+.sidebar-filter .field {
+  margin: 0;
+}
+
 .sidebar-foot {
   border-top: 1px solid var(--border);
   padding: 10px 12px max(10px, env(safe-area-inset-bottom, 0px));
@@ -454,20 +466,66 @@ body {
 
 .chat-input-bar {
   display: flex;
+  align-items: flex-end;
   padding: 12px;
   background-color: var(--bg-secondary);
   border-top: 1px solid var(--border);
   gap: 8px;
   /* A drag starting on the bar must not become a scroll of the message list above
-     (or a visual-viewport pan). pan-x keeps single-line caret/text movement working:
-     touch-action is intersected up the ancestor chain, so `none` here would also
-     strip the input's own pan-x below. */
+     (or a visual-viewport pan). pan-x keeps caret/text movement working: touch-action
+     is intersected up the ancestor chain, so `none` here would also strip the field's
+     own panning below. The textarea re-enables pan-y once it is tall enough to scroll
+     (see .chat-input-bar textarea.tall). */
   touch-action: pan-x;
   overscroll-behavior: none;
 }
 
+/* The composer field is a growing textarea, not a single-line input: Enter types a
+   newline (so a soft keyboard shows a return key), the text wraps instead of
+   scrolling sideways, and the box grows with the draft until JS caps it -- past the
+   cap it scrolls vertically like any other text field. */
+.chat-input-bar textarea {
+  flex: 1;
+  min-width: 0;
+  /* Beats the generic `textarea` rule further down (monospace, resizable, full width). */
+  width: auto;
+  margin-top: 0;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 10px 16px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  max-height: 32vh; /* safety net for the first paint; JS drives the real cap */
+  /* Wrap everything, including one long unbroken word / URL. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  /* Single field: horizontal pan keeps caret movement, but a vertical drag starting on
+     the field must not pan the page / message list. */
+  touch-action: pan-x;
+  overscroll-behavior: none;
+  scrollbar-width: thin;
+}
+
+/* At the height cap the field has to scroll, so let a vertical drag scroll *it*
+   instead of being swallowed by the chrome touch guard. */
+.chat-input-bar textarea.tall {
+  touch-action: pan-y;
+}
+
+.chat-input-bar textarea:focus {
+  border-color: var(--accent);
+}
+
 .chat-input-bar input {
   flex: 1;
+  min-width: 0;
   background-color: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 20px;
@@ -475,14 +533,8 @@ body {
   color: var(--text-primary);
   font-size: 0.9rem;
   outline: none;
-  /* Single-line field: horizontal pan keeps long-text caret movement, but a
-     vertical drag starting on the field must not pan the page / message list. */
   touch-action: pan-x;
   overscroll-behavior: none;
-}
-
-.chat-input-bar input:focus {
-  border-color: var(--accent);
 }
 
 .chat-input-bar button {
@@ -974,12 +1026,27 @@ textarea {
 
 .modal {
   position: fixed;
-  inset: 0;
+  left: 0;
+  right: 0;
+  /* Sized to the *visual* viewport (app.js publishes --vv-top/--vv-h), not to the
+     layout viewport: with the soft keyboard up those differ, and a dialog centred in
+     the layout viewport sank half of itself behind the keyboard. The fallback is the
+     pre-JS state, where the two are the same anyway. */
+  top: var(--vv-top, 0px);
+  bottom: auto;
+  height: 100vh; /* pre-JS / no dvh */
+  height: var(--vv-h, 100dvh);
+  /* Breathing room shrinks as the visible area does: 16px on a full screen, down to
+     4px once the keyboard has eaten half of it, so the card can use that space for
+     rows instead of margins. (--vv-h is a live pixel value, so this cannot be a media
+     query -- the layout viewport never changes height.) */
+  --modal-pad: clamp(4px, calc((var(--vv-h, 100dvh) - 520px) / 8 + 8px), 16px);
   background-color: var(--modal-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: var(--modal-pad);
+  padding-top: max(var(--modal-pad), env(safe-area-inset-top));
   z-index: 10;
 }
 
@@ -991,6 +1058,7 @@ textarea {
   width: 100%;
   max-width: 420px;
   max-height: 90vh;
+  max-height: calc(var(--vv-h, 100dvh) - 2 * var(--modal-pad, 16px));
   overflow-y: auto;
   background-color: var(--bg-card);
   border: 1px solid var(--border);
@@ -1065,8 +1133,13 @@ textarea {
 .modal-card.square {
   display: flex;
   flex-direction: column;
-  width: min(92vw, 92vh, 440px);
-  height: min(92vw, 92vh, 440px);
+  width: min(94vw, 520px);
+  /* Tall, not square: the list is the point of this dialog and every row is two lines
+     (name + provider/capabilities), so height buys far more than width does. The one
+     hard limit is the visible area -- vh is a share of the layout viewport, which
+     ignores the soft keyboard and let the list run off under it. */
+  height: min(92vh, 548px);
+  height: min(calc(var(--vv-h, 100dvh) - 2 * var(--modal-pad, 16px)), 548px);
   max-height: none;
   overflow: hidden;
 }
@@ -1078,16 +1151,72 @@ textarea {
   padding: 0 4px;
 }
 
+/* Sticky section label. Three things keep it legible while rows scroll under it:
+   z-index (the rows are static, but anything positioned later in the list would
+   otherwise paint over a z-index:auto sticky box), a full-bleed background (the
+   list's 4px side padding would otherwise let a sliver of the row show past the
+   label), and a blur under the colour so the header stays readable even if a theme
+   ever gives --bg-card an alpha. */
 .model-group {
   position: sticky;
   top: 0;
+  z-index: 3;
   background-color: var(--bg-card);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
   color: var(--text-secondary);
   font-size: 0.7rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  padding: 8px 4px 4px;
+  margin: 0 -4px;
+  /* The gap above each label is padding, not margin, so the opaque background covers
+     it -- a margin would leave the strip the rows scroll through wide open. */
+  padding: 2px 8px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.model-list > .model-group:first-child {
+  padding-top: 2px;
+}
+
+/* The recents header is the same sticky label plus a "clear" affordance on the right.
+   It is the one header you can act on, so it gets a divider under it to separate the
+   shortcut block from the alphabetical catalogue. */
+.recents-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+}
+
+/* Keep the divider with the heading, while leaving space before the first recent model. */
+.recents-head + .model-item {
+  margin-top: 16px;
+}
+
+.recents-head .link-btn {
+  background: none;
+  border: none;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.recents-head .link-btn:active { color: var(--text-primary); }
+
+/* The provider name reads as provenance, not as another capability: a shade
+   brighter than the "thinking · vision · 1000K" text beside it. */
+.model-row .provider-tag {
+  color: var(--text-primary);
+  opacity: 0.7;
 }
 
 .model-row {
@@ -1310,58 +1439,125 @@ html[data-mode="light"] .shimmer {
   padding-top: 6px;
 }
 
-.composer-meta {
+.attachment-tray {
   display: flex;
-  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
   padding: 10px 12px 2px;
+  touch-action: pan-x;
+}
+
+.attachment-tray::-webkit-scrollbar { display: none; }
+.attachment-tray[hidden] { display: none; }
+
+.attachment-preview {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  flex: 0 0 72px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-card);
+}
+
+.attachment-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.attachment-number {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  max-width: calc(100% - 8px);
+  padding: 2px 5px;
+  border-radius: 7px;
+  color: #fff;
+  background: rgb(0 0 0 / 72%);
+  font-size: 0.62rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.attachment-remove {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 55%);
+  border-radius: 50%;
+  color: #fff;
+  background: rgb(0 0 0 / 72%);
+  font-size: 19px;
+  line-height: 1;
+  touch-action: manipulation;
+}
+
+.attachment-remove:active { transform: scale(0.92); }
+
+/* Row 1 pairs context (left) with the model (right); row 2 pairs cache/cost
+   (left) with thinking effort (right). Pairs sit at opposite ends of the same
+   line, so each side reads as one group. Outlined pills are reserved for the
+   two things you can actually tap; the read-only numbers are plain dim text. */
+.composer-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px 4px;
   font-size: 0.7rem;
   color: var(--text-secondary);
   touch-action: pan-x;
   overscroll-behavior: none;
 }
 
-.meta-stats {
+.meta-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex: 1 1 auto;
+  justify-content: space-between;
+  gap: 10px;
   min-width: 0;
-  overflow: hidden;
 }
 
-.stat-pill {
+.ctx-group,
+.stat-tail {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
-  max-width: 100%;
-  padding: 5px 9px;
-  background-color: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.stat-pill span:not(.meter):not(.conn-dot) {
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#cache-label {
-  flex-shrink: 0;
-}
+.stat-tail { gap: 8px; overflow: hidden; }
 
-.meta-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.stat-num, .stat-pct, #cache-label, .cost-pill {
   flex: 0 0 auto;
-  min-width: 0;
+  font-variant-numeric: tabular-nums;
 }
+
+.stat-pct {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ctx-group.hot .stat-pct { color: #ef4444; }
+.ctx-group.warm .stat-pct { color: var(--warn); }
+
+.cost-pill:not([hidden])::before {
+  content: "· ";
+}
+
+/* Cost is the quietest of the three; it rides along after the cache rate. */
+.cost-pill { opacity: 0.75; }
 
 .conn-dot {
   width: 7px;
@@ -1374,7 +1570,7 @@ html[data-mode="light"] .shimmer {
 .conn-dot.online { background-color: var(--success); }
 
 .meter {
-  width: 36px;
+  width: 40px;
   height: 4px;
   border-radius: 2px;
   background-color: var(--border);
@@ -1400,27 +1596,43 @@ html[data-mode="light"] .shimmer {
   padding: 6px 6px;
   font-size: 0.72rem;
   font-weight: 600;
-  max-width: 96px;
-  flex-shrink: 0;
+  max-width: 104px;
+  flex: 0 0 auto;
   touch-action: manipulation;
 }
 
 .think-select:disabled { color: var(--text-secondary); opacity: 0.6; }
 
+/* The model name is the only label that may ellipsise; it gets the right half of
+   row 1 and its full id is in the tooltip and in the picker. */
 .composer .model-btn {
+  flex: 0 1 auto;
   min-width: 0;
-  max-width: 148px;
+  max-width: 62%;
   padding: 6px 10px;
   font-size: 0.72rem;
   font-weight: 600;
   border-radius: 999px;
-  flex-shrink: 1;
 }
 
 .composer .model-btn #model-btn-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Wide enough for both rows side by side again (tablet, landscape). */
+@media (min-width: 560px) {
+  .composer-meta { flex-direction: row; align-items: center; gap: 16px; }
+  .meta-row { flex: 1 1 0; }
+  .composer .model-btn { max-width: 52%; }
+}
+
+/* Very narrow: drop the token counts, then the cost, before anything starts to
+   ellipsise. A missing number beats four truncated stubs. */
+@media (max-width: 340px) {
+  .stat-num { display: none; }
+  .cost-pill { display: none !important; }
 }
 
 .composer .model-btn .ico-slot {
@@ -1441,8 +1653,6 @@ html[data-mode="light"] .shimmer {
 .stop-btn {
   background-color: #ef4444 !important;
 }
-
-.stop-btn[hidden] { display: none; }
 
 /* Messages: turns, thinking, tool calls */
 .turn {
@@ -1625,7 +1835,40 @@ details summary::-webkit-details-marker { display: none; }
   font-size: inherit;
 }
 
+/* Edit paths are useful context, so show the whole path on wrapped lines instead of an ellipsis. */
+.tool.edit-tool > summary { align-items: flex-start; }
+.tool.edit-tool .tool-sum {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
 .tool-status { font-size: inherit; flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px; }
+
+/* In flight: the spinner (and the ticking duration) wear the accent, so a running call is
+   the only coloured row in the transcript. A failed one keeps the red below instead. */
+details.tool:not(.failed) .tool-status,
+details.tool:not(.failed) .dur-live { color: var(--accent); }
+
+/* How long a thought or a tool call took: quiet, monospaced enough not to compete with the
+   summary, and pinned to the end of the row. A live one ticks (chat.js). */
+.dur {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  white-space: nowrap;
+}
+
+.dur-live { opacity: 1; }
+
+/* The waiting row carries the run age inline after the word. */
+.message.thinking .message-content .dur { margin-left: 6px; padding-left: 0; }
 
 /* A failed call turns red: icon, tool name and argument preview. */
 details.tool.failed .tool-ico,
@@ -1638,7 +1881,11 @@ details.tool.failed .tool-sum { color: var(--danger-text); }
 
 /* Tool previews (edit diff, written content). Same diff colours as the Changes tab, but a
    little taller: the body has room for it and an edit is usually short. */
-.tool-diff { max-height: 320px; }
+.tool-diff {
+  max-height: 320px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .diff-stat { margin-left: 6px; font-family: monospace; letter-spacing: 0; text-transform: none; }
 .tool-note { margin: 4px 0 0; color: var(--text-secondary); font-style: italic; }
 
@@ -1773,6 +2020,19 @@ p.empty { padding: 24px 8px; text-align: center; }
   border: 1px solid var(--accent);
 }
 
+/* A branch sits under the session it came from, indented by its depth. The nesting is carried by the
+   indent and the glyph rather than a rule down the left edge, which would fight the selected row's
+   own border; --depth is set per row by sessions.js from the server's tree order. */
+.session-row.child {
+  margin-left: calc(var(--depth, 1) * 14px);
+  width: calc(100% - var(--depth, 1) * 14px);
+}
+.branch-glyph {
+  color: var(--text-secondary);
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+
 .session-row .model-row {
   flex: 1;
   min-width: 0;
@@ -1797,7 +2057,105 @@ p.empty { padding: 24px 8px; text-align: center; }
 
 .icon-btn:active { background-color: var(--bg-primary); }
 .icon-btn.danger { color: var(--danger-text); }
-.busy-dot { color: var(--warn); }
+
+/* ---------- session row menu ----------
+   One fixed element on <body>, placed under the ⋮ button that opened it. It is a sheet of
+   --bg-card rather than a tint, because --bg-card is opaque in both modes: over the
+   translucent frosted sidebar a translucent menu would show the rows sliding underneath. */
+.session-menu {
+  position: fixed;
+  z-index: 60; /* above the sidebar (50) and its scrim (40) */
+  min-width: 150px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+.session-menu[hidden] { display: none; }
+
+.session-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.session-menu-item:hover,
+.session-menu-item:focus-visible { background-color: var(--press); outline: none; }
+.session-menu-item.danger { color: var(--danger-text); }
+
+/* ---------- branch menu ----------
+   Placed exactly like the session row menu (fixed on <body>, flipped above and clamped by the
+   script), but each item carries a second line saying what the branch point keeps, because "branch
+   from here" and "branch before this" are otherwise easy to confuse. */
+.branch-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 212px;
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+.branch-menu[hidden] { display: none; }
+
+.branch-menu-item {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  grid-template-areas: "ico label" ". hint";
+  align-items: center;
+  gap: 1px 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+.branch-menu-item:hover,
+.branch-menu-item:focus-visible { background-color: var(--press); outline: none; }
+.branch-menu-item svg { grid-area: ico; }
+.branch-label { grid-area: label; font-size: 0.85rem; }
+.branch-hint { grid-area: hint; font-size: 0.68rem; color: var(--text-secondary); line-height: 1.3; }
+/* Under the title: the running indicator sits left, the age is pushed to the right edge. */
+.session-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+.session-meta .session-ago { margin-left: auto; }
+.busy-dot { color: var(--warn); display: inline-flex; align-items: center; gap: 3px; }
+/* When the session is idle the dot is empty; hide it so its gap doesn't offset the age. */
+.session-meta .busy-dot:empty { display: none; }
+/* The dot breathes so a busy session reads as alive even at a glance. */
+.busy-dot .ico-inline { animation: busy-pulse 1.6s ease-in-out infinite; }
+/* The "done" mark is a settled result, not live work: steady, and green rather than the amber of "running". */
+.busy-dot.done { color: var(--success); }
+.busy-dot.done .ico-inline { animation: none; }
+@keyframes busy-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
 
 /* Theme editor */
 .preset-grid {
@@ -1939,14 +2297,17 @@ p.empty { padding: 24px 8px; text-align: center; }
    The topbar and the composer float over the scrolling message list, so the list is
    what shows through them. The ::before sheet carries both the backdrop-filter and the
    translucent tint (a pseudo-element rather than an rgba() background, so it works for
-   whatever colour format the theme writes into --bg-primary / --bg-secondary). It reaches
-   past the bar by --fade and a mask fades it out there, so the blur dissolves into the
-   messages instead of ending on a hard edge that slices through a bubble. The bar's own
-   content is not masked. -webkit- prefix included: old Android WebViews need it, and a
-   wrong prefix simply means no blur, not a broken bar. */
+   whatever colour format the theme writes into --bg-primary / --bg-secondary). It stops
+   exactly at the bar's own edge and a hairline border marks that edge, so the sheet is a
+   clean pane of glass instead of bleeding into the messages. -webkit- prefix included:
+   old Android WebViews need it, and a wrong prefix simply means no blur, not a broken bar. */
 .topbar,
 .composer {
-  --fade: 22px;
+  /* How much tint sits over the blur. Low on purpose: on AMOLED black the bar should read
+     as a pane of glass, not a grey slab, and messages stay legible scrolling under it.
+     Raise --chrome-tint to tighten it. */
+  --chrome-tint: 55%;
+  --chrome-blur: blur(26px) saturate(180%);
   isolation: isolate; /* keep the tint from blending with whatever is behind */
 }
 
@@ -1958,29 +2319,25 @@ p.empty { padding: 24px 8px; text-align: center; }
   right: 0;
   z-index: -1;
   pointer-events: none;
-  -webkit-backdrop-filter: blur(18px) saturate(160%);
-  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: var(--chrome-blur);
+  backdrop-filter: var(--chrome-blur);
 }
 
 .topbar::before {
   top: 0;
-  bottom: calc(-1 * var(--fade));
-  background-color: color-mix(in srgb, var(--bg-primary) 72%, transparent);
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--fade)), transparent);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--fade)), transparent);
+  bottom: 0;
+  background-color: color-mix(in srgb, var(--bg-primary) var(--chrome-tint), transparent);
 }
 
 .composer::before {
   bottom: 0;
-  top: calc(-1 * var(--fade));
-  background-color: color-mix(in srgb, var(--bg-secondary) 78%, transparent);
-  -webkit-mask-image: linear-gradient(to top, #000 calc(100% - var(--fade)), transparent);
-  mask-image: linear-gradient(to top, #000 calc(100% - var(--fade)), transparent);
+  top: 0;
+  background-color: color-mix(in srgb, var(--bg-secondary) var(--chrome-tint), transparent);
 }
 
-/* The fade replaces the hairline borders. */
-.topbar { border-bottom: none; }
-.composer { border-top: none; }
+/* The edge of the glass: one hairline where the sheet meets the messages. */
+.topbar { border-bottom: 1px solid var(--hairline); }
+.composer { border-top: 1px solid var(--hairline); }
 
 /* Without a blur the tint alone would just look like a flat wash, so keep the chrome
    opaque where backdrop-filter is unavailable. */
@@ -2087,6 +2444,9 @@ html[data-blur="off"] .sidebar-scrim {
 .artifact-size { flex: none; font-size: 0.72rem; color: var(--text-secondary); }
 .artifacts-viewer { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
 .artifact-frame { flex: 1; width: 100%; border: none; background: #fff; }
+/* The markdown viewer paints itself with the app's own colours (it is handed the theme variables),
+   so the white preview background would only show as a flash before the document loads. */
+.artifact-md-frame { background: var(--bg-primary); }
 .artifact-image { flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 12px; }
 .artifact-image img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .artifact-source {
