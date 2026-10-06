@@ -47,6 +47,20 @@ html[data-mode="light"] {
   --modal-scrim: rgba(0, 0, 0, 0.45);
 }
 
+/* Selection is off app-wide: this is a tap-first UI, and a stray drag across the topbar,
+   sidebar or a settings page otherwise paints a highlight over chrome. The chat transcript
+   (.chat-messages) and anything the user types turn it back on below. */
+html, body {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+input, textarea, [contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 html {
   background-color: var(--bg-primary);
   color-scheme: dark; /* overridden by html[data-mode="light"] below */
@@ -342,9 +356,11 @@ body {
 
 .sidebar-actions { display: flex; gap: 8px; }
 .sidebar-actions .sidebar-settings { flex: 1; width: auto; }
-/* Restart sits right of Settings in the sidebar footer. */
+/* Stop and restart sit to the right of Settings in the sidebar footer. */
+.sidebar-actions .sidebar-stop,
 .sidebar-actions .sidebar-restart { flex: 0 0 auto; padding: 10px 12px; }
-#restart-btn:disabled { opacity: 0.5; cursor: default; }
+.sidebar-actions .sidebar-stop { color: var(--danger-text); }
+#stop-btn:disabled, #restart-btn:disabled { opacity: 0.5; cursor: default; }
 
 .sidebar-settings {
   display: flex;
@@ -430,6 +446,46 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* The one place text stays selectable: the transcript is content worth copying out. */
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
+/* JS updates the live tail independently; flatten both holders so their messages remain direct
+   flex items with the transcript's existing spacing and scroll behavior. */
+.chat-message-history,
+.chat-message-live {
+  display: contents;
+}
+
+.chat-jump-bottom {
+  position: absolute;
+  right: 18px;
+  bottom: calc(var(--chrome-bottom, 0px) + 16px);
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-card);
+  color: var(--accent-text);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  touch-action: none;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+.chat-jump-bottom[hidden] {
+  display: none;
+}
+
+.chat-jump-bottom:active {
+  background: var(--press);
+  transform: scale(0.94);
 }
 
 .message {
@@ -1318,6 +1374,31 @@ html[data-mode="light"] .shimmer {
   to { background-position: -50% 0; }
 }
 
+/* ---------- arrival ----------
+   A row that has just appeared (a tool call, a thought, a sent prompt) fades up into place
+   once. chat.js stamps the delay from the moment its key was first seen, so each re-rendered
+   copy resumes that animation instead of restarting it — the same trick --anim-phase plays for
+   the shimmer, and for the same reason. */
+@keyframes block-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: none; }
+}
+
+[data-key].fresh {
+  animation: block-in 0.26s ease-out both;
+}
+
+/* The thinking and output boxes own their scroll position outright (chat.js glides it and
+   restores the reader's place), so the browser must not adjust it behind our back. */
+.think-body,
+.tool-out {
+  overflow-anchor: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-key].fresh { animation: none; }
+}
+
 /* Changes */
 .change-item {
   background-color: var(--bg-card);
@@ -1889,6 +1970,47 @@ details.tool.failed .tool-sum { color: var(--danger-text); }
 .diff-stat { margin-left: 6px; font-family: monospace; letter-spacing: 0; text-transform: none; }
 .tool-note { margin: 4px 0 0; color: var(--text-secondary); font-style: italic; }
 
+/* A plotted curve (extensions/plot.ts). The graph is the body, so it takes the full width of the
+   row and scales with it; the drawing is pure SVG strokes in the theme's own colours, which is
+   what keeps it legible on black without a second palette. */
+.plot {
+  margin-top: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--bg-inset);
+  padding: 6px 6px 4px;
+}
+.plot svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+.plot-grid { stroke: var(--hairline); stroke-width: 1; }
+.plot-axis { stroke: var(--text-muted); stroke-width: 1.5; }
+.plot-tick { fill: var(--text-muted); font-size: 11px; font-family: monospace; }
+.plot-curve {
+  fill: none;
+  stroke: var(--accent-text);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* A curve drawn for a phone screen: joins are rounded so a dense polyline reads as one line. */
+  vector-effect: non-scaling-stroke;
+}
+.plot-cap {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 4px 0;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+.plot-range { font-family: monospace; color: var(--text-muted); }
+/* The travelling dot (plot.animate). Filled rather than stroked so it stays solid over the curve,
+   and ringed in the background colour so it does not disappear into the line it is riding. */
+.plot-dot { fill: var(--accent-text-strong); stroke: var(--bg-card); stroke-width: 1.5; }
+/* Someone who has asked the system for less motion gets the graph without the dot: the curve is
+   the content, the movement is decoration on top of it. */
+@media (prefers-reduced-motion: reduce) {
+  .plot-dot { display: none; }
+}
+
 /* web_search results, as cards. A numbered text dump is unreadable on a phone: the eye needs the
    title and the host to judge a result, and the excerpt is only worth two lines. Backgrounds stay
    at #000/#0a0a0a so the list does not glow against the AMOLED black. */
@@ -2013,6 +2135,9 @@ p.empty { padding: 24px 8px; text-align: center; }
   gap: 6px;
   border-radius: 8px;
   padding: 2px 4px;
+  /* Selection is already off app-wide (see the html/body rule); this row is a tap
+     target, so a long press must not summon the copy bubble over the title either. */
+  -webkit-touch-callout: none;
 }
 
 .session-row.selected {

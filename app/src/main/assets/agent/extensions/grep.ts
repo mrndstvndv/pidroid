@@ -295,6 +295,9 @@ export async function runGrep(opts: GrepOptions): Promise<GrepResult> {
 
 const grep = defineTool({
   name: "grep",
+  // The chat view reads this (see extensions.ts): the summary line wants the pattern, but the
+  // generic guess would pick `path` first and label every call with the directory searched.
+  view: { summaryArg: "pattern" },
   description:
     "Search file contents by regular expression and return matching lines prefixed file:line, the way " +
     "grep does. Prefer this over running grep through bash: the grep on this device is toybox grep, " +

@@ -42,9 +42,11 @@ export class Timings {
   #mem = new Map<string, number>();
   /** Every entry id of the current view, used to prune the table and to spot new log lines. */
   #live = new Set<string>();
-  /** Entry ids already folded in. Keyed by id rather than by position: the view is rebuilt from
-   *  a scan, so two pushes may present the same log with different positions. */
+  /** Entry ids already folded in. The log is append-only; this set is only reconciled when its
+   *  prefix changes, rather than scanned on every streaming update. */
   #seen = new Set<string>();
+  #entryCount = 0;
+  #lastEntryId: string | undefined;
   /** Start times of the blocks of the message currently streaming, in order. */
   #staged: number[] | undefined;
   #dirty = false;
@@ -65,8 +67,9 @@ export class Timings {
   }
 
   /**
-   * Fold one view push into the stamps. Cheap enough to run on every commit: the log walk only
-   * reads the entries that have not been seen yet, apart from the pruning pass.
+   * Fold one view push into the stamps. `pi-durable` appends committed entries and puts streaming
+   * partials in `pi.live`, so the normal push only needs to inspect the new log suffix. If the
+   * prefix changes (a replacement or a trimmed view), rebuild the live-key set and reconcile ids.
    */
   stamp(value: unknown, now = Date.now()) {
     const view = value as any;
@@ -77,33 +80,57 @@ export class Timings {
       : undefined;
 
     const running = !!live?.run || !!content;
+    const prefixMatches = entries.length >= this.#entryCount && (
+      this.#entryCount === 0 || String(entries[this.#entryCount - 1]?.id) === this.#lastEntryId
+    );
+    const start = prefixMatches ? this.#entryCount : 0;
+    const present = prefixMatches ? undefined : new Set<string>();
+    if (!prefixMatches) this.#live.clear();
 
-    // 1. Fold in the log entries that are new since the last push, in order.
-    const present = new Set<string>();
-    for (const entry of entries) {
+    // 1. Fold new entries, in order, while adding their keys to the live set. On ordinary stream
+    // updates this is an empty loop; no full-log scan or fresh Set allocation is needed.
+    for (let i = start; i < entries.length; i++) {
+      const entry = entries[i];
       const id = String(entry?.id);
-      present.add(id);
-      if (this.#seen.has(id)) continue;
-      this.#seen.add(id);
+      present?.add(id);
       const kind = entry?.kind;
-      if (kind === "pi.assistant") {
-        const n = blockCount(entry?.model?.[0]?.content);
-        for (let b = 0; b < n; b++) {
-          const start = this.#staged?.shift();
-          // No staged start means this block was already finished when we first looked at the
-          // run (a reload mid-turn); better to show nothing than a wrong 0s.
-          if (start !== undefined) this.#set(blockStartKey(entry.id, b), start);
+      if (!this.#seen.has(id)) {
+        this.#seen.add(id);
+        if (kind === "pi.assistant") {
+          const n = blockCount(entry?.model?.[0]?.content);
+          for (let b = 0; b < n; b++) {
+            const blockStart = this.#staged?.shift();
+            // No staged start means this block was already finished when we first looked at the
+            // run (a reload mid-turn); better to show nothing than a wrong 0s.
+            if (blockStart !== undefined) this.#set(blockStartKey(entry.id, b), blockStart);
+          }
+          this.#set(messageEndKey(entry.id), now);
+        } else if (kind === "pi.tool-result") {
+          const callId = entry?.model?.[0]?.toolCallId;
+          if (callId) this.#set(toolEndKey(callId), now);
+        } else if (kind === "pi.user") {
+          // A new prompt closes the previous run: its partial is gone and nothing staged applies.
+          this.#staged = undefined;
+          this.#mem.delete(RUN_KEY);
+          this.#dirty = true;
         }
-        this.#set(messageEndKey(entry.id), now);
+      }
+
+      if (kind === "pi.assistant") {
+        this.#live.add(messageEndKey(entry.id));
+        for (let b = 0, n = blockCount(entry?.model?.[0]?.content); b < n; b++) {
+          this.#live.add(blockStartKey(entry.id, b));
+        }
       } else if (kind === "pi.tool-result") {
         const callId = entry?.model?.[0]?.toolCallId;
-        if (callId) this.#set(toolEndKey(callId), now);
-      } else if (kind === "pi.user") {
-        // A new prompt closes the previous run: its partial is gone and nothing staged applies.
-        this.#staged = undefined;
-        this.#mem.delete(RUN_KEY);
-        this.#dirty = true;
+        if (callId) this.#live.add(toolEndKey(callId));
       }
+    }
+
+    // On a changed prefix, the entries currently present are the authority for pruning. New
+    // append-only pushes do not need this pass: every earlier id is still present by definition.
+    if (present) {
+      for (const id of [...this.#seen]) if (!present.has(id)) this.#seen.delete(id);
     }
 
     // After the log pass, which clears the previous run on a new prompt: a run that is already
@@ -116,26 +143,10 @@ export class Timings {
       for (let i = this.#staged.length; i < content.length; i++) this.#staged.push(now);
     }
 
-    // 2. Which stamps the current view still points at. Everything else is history the chat
-    // view will never render again (the log is trimmed at 150 messages), so it can go.
-    this.#live.clear();
-    for (const entry of entries) {
-      const kind = entry?.kind;
-      if (kind === "pi.assistant") {
-        this.#live.add(messageEndKey(entry.id));
-        for (let b = 0, n = blockCount(entry?.model?.[0]?.content); b < n; b++) {
-          this.#live.add(blockStartKey(entry.id, b));
-        }
-      } else if (kind === "pi.tool-result") {
-        const callId = entry?.model?.[0]?.toolCallId;
-        if (callId) this.#live.add(toolEndKey(callId));
-      }
-    }
     if (running) this.#live.add(RUN_KEY);
-    // Entries the log no longer carries stop counting as seen, so a re-scan of a trimmed log
-    // cannot re-stamp them.
-    for (const id of [...this.#seen]) if (!present.has(id)) this.#seen.delete(id);
-
+    else this.#live.delete(RUN_KEY);
+    this.#entryCount = entries.length;
+    this.#lastEntryId = entries.length ? String(entries[entries.length - 1]?.id) : undefined;
     this.#scheduleFlush();
   }
 

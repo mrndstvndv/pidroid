@@ -1,7 +1,15 @@
 // Chat: renders the live agent view (streaming thinking, tool calls, queue, context + cache stats).
-// The server pushes a compact view over the WebSocket after every committed change.
+// The server sends a full snapshot for commits and a compact live-tail patch while streaming.
 
 const messagesEl = document.getElementById("messages-container");
+const jumpBottomBtn = document.getElementById("chat-jump-bottom");
+// Keep the committed transcript and the streaming tail in separate flattened flex groups. A
+// token update can then replace the tail without tearing down or reparsing the history.
+const historyEl = document.createElement("div");
+historyEl.className = "chat-message-history";
+const dynamicEl = document.createElement("div");
+dynamicEl.className = "chat-message-live";
+messagesEl.replaceChildren(historyEl, dynamicEl);
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const sendBtn = document.getElementById("send-btn");
@@ -19,11 +27,17 @@ const userOpen = new Set();
 const userClosed = new Set();
 
 let payload = null;
-let lastRendered = "";
 let lastModel = "";
+let lastQueueCount = -1;
 let frame = 0;
+let renderedSessionId = null;
+let lastHistoryKey = null;
+let historyHasContent = false;
+let statsDirty = true;
+let controlsDirty = true;
+let lastSessionInfo = "";
 
-// renderMessages() replaces the whole list, so the shimmer text and the tool spinner are
+// The live tail is refreshed during streaming, so the shimmer text and tool spinner are
 // new elements each time and their CSS animation would restart from 0 — with a streaming
 // update arriving many times a second the cycle never completes and the animation looks
 // frozen. The phase below is stamped on the container (which survives the re-render) and
@@ -34,21 +48,190 @@ const ANIM_PHASE_STEP = 0.05; // s; anything well under a frame looks continuous
 let lastPhase = "";
 
 /* ---------- streaming text ----------
-   Streamed text renders in one piece, at full opacity: the list is rebuilt every frame, so
+   Streamed text renders in one piece, at full opacity: the live tail is rebuilt each frame, so
    anything that tracked a character's age would need per-character inline styles on every
    pass. A long thought instead fades at the edges of its box (`.think-body.overflowing`
    in style.css), which survives the re-render because it is plain CSS on the container.
    Rendering in one piece also means a markdown construct written across several frames is
    no longer cut in half mid-parse. */
 
+/* ---------- smooth scrolling ----------
+   Streaming rewrites this list several times a second, and pinning scrollTop to the new
+   bottom on every one of those passes reads as a string of jolts rather than as motion.
+   These helpers glide instead, with one filter for every case: a critically damped spring
+   (SmoothDamp's closed form). Two properties are what make it read as smooth.
+
+   It starts at rest and eases in. An exponential follow — the obvious first choice — has
+   infinite acceleration at t=0: the instant a new bit of text lands, the view jumps
+   straight to full speed. A damped spring ramps into motion instead, and settles without
+   ever overshooting, so there is no "arrived, correct, overshot, come back" at the end.
+
+   It carries velocity between passes. This is the one that matters here, and it is why the
+   state is keyed by block key rather than by node: the live tail is rebuilt from innerHTML on
+   every stream update, so a thinking body is a *different element* each time. Keyed by node, the
+   filter restarted from rest on every pass and the view moved in a visible stutter several
+   times a second — position survived the rebuild, velocity did not, and velocity is what
+   motion is. Keyed by `data-key`, the new node inherits the one its predecessor had, and a
+   burst of streamed text is a single continuous glide instead of a series of restarts.
+
+   Finally, the target itself is low-passed. Tokens arrive in bursts, so the tail is a
+   staircase, and a spring chasing a staircase accelerates and brakes once per step — fast,
+   slow, fast, slow, at the burst rate, which is its own kind of jump. Chasing a smoothed aim
+   instead turns that into a ramp: measured over five stream shapes, frame-to-frame speed
+   variation drops from ~35% to ~9% and the worst speed change between two frames by roughly
+   3x, for about one extra line of lag behind the writing. A deliberate jump skips the low-pass
+   and aims straight at its target: there is no staircase to smooth when you asked to be there.
+
+   Anything the user drives — a finger, a wheel, a key — cancels the glide at once. Fighting
+   the finger is worse than the snap it replaces. */
+const glides = new Map(); // block key -> {el, target, aim, aimTau, vel, omega}
+const LIST_KEY = "#list"; // the message list has no block key of its own
+let glideFrame = 0;
+let glidePrev = 0;
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+/** Seconds. FOLLOW_TAU is the position spring (how fast the box closes a gap it is already
+ *  chasing); AIM_TAU is the low-pass on the target (how much of the staircase is smoothed
+ *  away); MOVE_TAU covers a gap big enough that it is an arrival rather than a correction —
+ *  softer, and capped so switching sessions is a glide rather than a slow crawl. */
+const FOLLOW_TAU = 0.055;
+const AIM_TAU = 0.05;
+const MOVE_TAU = 0.13;
+
+/** Deferral, for the streaming follow only (a deliberate jump still goes straight there).
+ *  A box will not chase faster than CHASE_SCREENS screens a second, so text arriving quicker
+ *  than that piles up below the fold and is then scrolled through at an even rate instead of
+ *  the view lurching along with every burst. DEFER_GAIN is how much extra chase each pixel of
+ *  backlog buys: the allowance grows with the backlog rather than being dropped at a limit,
+ *  so the speed stays continuous however fast the stream runs. A hard bound — cap until the
+ *  backlog is N pixels, then let go — measured much worse: the view lurched the moment it hit
+ *  the bound (speed variation 202%), because dropping a cap is a step change in velocity.
+ *  Set CHASE_SCREENS to 0 to turn deferral off and go back to tracking the tail outright. */
+const CHASE_SCREENS = 3;
+const DEFER_GAIN = 2.5;
+
+const clampScroll = (el, v) => Math.max(0, Math.min(v, el.scrollHeight - el.clientHeight));
+
+function glideKey(el) {
+  return el === messagesEl ? LIST_KEY : bodyKey(el) || el;
+}
+
+function glideStep(now) {
+  glideFrame = 0;
+  // A backgrounded tab hands back one enormous dt on return; clamping keeps a single frame
+  // from teleporting the list.
+  const dt = Math.min(0.064, (now - glidePrev) / 1000 || 0.016);
+  glidePrev = now;
+  for (const [key, g] of glides) {
+    const el = g.el;
+    if (!el.isConnected) { glides.delete(key); continue; } // the block itself is gone
+    const target = clampScroll(el, g.target);
+    if (g.aimTau) g.aim += (target - g.aim) * (1 - Math.exp(-dt / g.aimTau));
+    else g.aim = target;
+    const aim = clampScroll(el, g.aim);
+    // SmoothDamp: critically damped, so the closed form below never overshoots on its own.
+    // The rational approximation of the exponential is what keeps it stable at any dt.
+    const omega = g.omega;
+    const x = omega * dt;
+    const decay = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+    const change = el.scrollTop - aim;
+    const temp = (g.vel + omega * change) * dt;
+    g.vel = (g.vel - omega * temp) * decay;
+    let next = aim + (change + temp) * decay;
+    // The tail grew again while we were catching up, and the filter can carry past the new
+    // aim. Land on it and drop the velocity rather than swing back. (Crossing *to* the far
+    // side is the overshoot; not reaching it yet is the normal case.)
+    if (aim > el.scrollTop ? next > aim : next < aim) { next = aim; g.vel = 0; }
+    let step = next - el.scrollTop;
+    // The follow rate limit: see CHASE_SCREENS. A big gap buys more speed, which is what stops
+    // the backlog growing without bound while still never letting go of the tail entirely.
+    if (g.aimTau && CHASE_SCREENS > 0) {
+      const allowed = (CHASE_SCREENS * el.clientHeight + DEFER_GAIN * Math.abs(target - el.scrollTop)) * dt;
+      if (Math.abs(step) > allowed) step = Math.sign(step) * allowed;
+    }
+    el.scrollTop += step;
+    // Arrived: snap the sub-pixel remainder and stop, rather than letting the damped tail
+    // keep a rAF alive for a third of a second to close a gap nobody can see.
+    if (Math.abs(target - el.scrollTop) < 0.5) { el.scrollTop = target; glides.delete(key); }
+  }
+  if (glides.size) glideFrame = requestAnimationFrame(glideStep);
+}
+
+function stopGlide(el) {
+  const key = glideKey(el);
+  if (glides.delete(key) && !glides.size && glideFrame) {
+    cancelAnimationFrame(glideFrame);
+    glideFrame = 0;
+  }
+}
+
+/** Aim `el` at `target`, keeping any velocity already in flight toward it.
+ *
+ *  The spring constant is chosen once, when the glide starts, and then held: recomputing it
+ *  from the remaining distance every pass would let a lagging view pick a softer spring the
+ *  more it lagged, and lag into a standstill. A pass that lands mid-glide simply re-aims, and
+ *  an explicit tau (a deliberate jump) overrides whatever was in flight. */
+function glideTo(el, target, tau) {
+  target = clampScroll(el, target);
+  const key = glideKey(el);
+  const g = glides.get(key);
+  if (reduceMotion.matches) {
+    stopGlide(el);
+    el.scrollTop = target;
+    return;
+  }
+  const distance = Math.abs(target - el.scrollTop);
+  if (distance < 0.5 && !g) return; // already there, and nothing in flight
+  // The spring constant is picked once, when the glide starts, and then held: recomputing it
+  // from the remaining distance on every pass would let a lagging view choose a softer spring
+  // the more it lagged, and lag itself into a standstill. A pass that lands mid-glide simply
+  // re-aims, and an explicit tau (a deliberate jump) overrides whatever was in flight.
+  const omega = tau ? 2 / tau : g ? g.omega : 2 / Math.min(MOVE_TAU, Math.max(FOLLOW_TAU, distance / 4000));
+  // A new glide starts aimed at its target, so opening a box that is already full length is a
+  // glide rather than a ramp up to one.
+  glides.set(key, { el, target, aim: g?.aim ?? target, aimTau: tau ? 0 : AIM_TAU, vel: g?.vel || 0, omega });
+  if (!glideFrame) {
+    glidePrev = performance.now();
+    glideFrame = requestAnimationFrame(glideStep);
+  }
+}
+
+/* The finger wins, always. pointerdown covers touch on every engine that ships pointer
+   events; wheel is the mouse equivalent. Keys only count when they are scroll keys — typing a
+   follow-up must not be read as the reader leaving. */
+function cancelGlides(e) {
+  const inner = e.target?.closest?.(".think-body, .tool-out");
+  if (inner) stopGlide(inner);
+  stopGlide(messagesEl);
+}
+for (const ev of ["pointerdown", "wheel", "touchstart"]) {
+  messagesEl.addEventListener(ev, cancelGlides, { passive: true, capture: true });
+}
+const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
+window.addEventListener("keydown", (e) => {
+  if (SCROLL_KEYS.has(e.key)) stopGlide(messagesEl);
+}, { passive: true });
+
 /* ---------- sticky inner scroll ----------
    Thinking bodies and tool outputs scroll on their own. Re-rendering resets scrollTop to
    0, which left a streaming block frozen at its first line, so open bodies are pushed
    back to the bottom — unless the user scrolled up inside one, in which case that
    position is remembered and restored instead (otherwise reading back is impossible while
-   the agent keeps writing). */
+   the agent keeps writing). The offset survives the node: the body is rebuilt every render,
+   so its position is read off the outgoing one first (see harvestBodyScroll), which is also
+   what turns the follow into a glide rather than a fresh jump from the top. */
 const unpinnedBodies = new Set();
 const bodyScrollTop = new Map();
+
+function updateJumpBottom() {
+  jumpBottomBtn.hidden = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <= 120;
+}
+
+messagesEl.addEventListener("scroll", updateJumpBottom, { passive: true });
+jumpBottomBtn.addEventListener("click", () => {
+  stopGlide(messagesEl);
+  glideTo(messagesEl, messagesEl.scrollHeight, MOVE_TAU);
+});
 
 function bodyKey(el) {
   return el.closest("details[data-key]")?.dataset.key;
@@ -58,13 +241,10 @@ messagesEl.addEventListener("scroll", (e) => {
   const body = e.target?.closest?.(".think-body, .tool-out");
   const key = body && bodyKey(body);
   if (!key) return;
-  if (body.scrollHeight - body.scrollTop - body.clientHeight < 24) {
-    unpinnedBodies.delete(key);
-    bodyScrollTop.delete(key);
-  } else {
-    unpinnedBodies.add(key);
-    bodyScrollTop.set(key, body.scrollTop);
-  }
+  if (glides.has(glideKey(body))) return; // our own writes, not the user leaving
+  bodyScrollTop.set(key, body.scrollTop);
+  if (body.scrollHeight - body.scrollTop - body.clientHeight < 24) unpinnedBodies.delete(key);
+  else unpinnedBodies.add(key);
 }, true); // scroll does not bubble; capture catches it from the bodies
 
 /* ---------- helpers ---------- */
@@ -99,18 +279,24 @@ function durHtml(ms, at) {
   return "";
 }
 
-/** Only the running spans are touched, and only while something is running. */
-function tickDurations() {
+/** Only the running spans are touched, and only while something is running. During a stream
+ *  inspect the changed tail; the one-second timer may scan the whole history when needed. */
+function tickDurations(root = messagesEl) {
   const now = Date.now();
   let live = false;
-  messagesEl.querySelectorAll(".dur-live[data-since]").forEach((el) => {
+  root.querySelectorAll(".dur-live[data-since]").forEach((el) => {
     el.textContent = fmtDur(now - Number(el.dataset.since));
     live = true;
   });
-  if (live !== ticking) {
-    ticking = live;
-    clearInterval(durTimer);
-    if (live) durTimer = setInterval(tickDurations, 1000);
+  if (root === messagesEl) {
+    if (live !== ticking) {
+      ticking = live;
+      clearInterval(durTimer);
+      if (live) durTimer = setInterval(tickDurations, 1000);
+    }
+  } else if (live && !ticking) {
+    ticking = true;
+    durTimer = setInterval(tickDurations, 1000);
   }
 }
 let ticking = false;
@@ -127,9 +313,32 @@ function md(text) {
   }).join("");
 }
 
+/* ---------- tool views ----------
+   An extension can say how its own tool should read: an icon, which argument to put on the
+   collapsed row, what the expanded body shows (see extensions.ts). The specs ride along with the
+   chat view, keyed by tool name, and are consulted before the name-based guesses below. A tool
+   with no spec -- or a spec this page does not know -- renders exactly as it always did. */
+
+let toolViews = {};
+
+function toolView(name) {
+  return toolViews[name] || null;
+}
+
+/** The body a tool gets when nothing declared one: the previews that exist, keyed by tool name. */
+function defaultBody(name) {
+  if (name === "web_search") return "cards";
+  if (name === "edit") return "diff";
+  if (name === "write") return "file";
+  if (name === "bash") return "command";
+  return "json";
+}
+
 function toolSummary(name, args) {
   if (args && typeof args === "object") {
-    const first = args.command ?? args.path ?? args.file_path ?? Object.values(args)[0];
+    const guess = args.command ?? args.path ?? args.file_path ?? Object.values(args)[0];
+    // A view may name the argument to show; if it names one the call does not have, the guess stands.
+    const first = toolView(name)?.summaryArg ? args[toolView(name).summaryArg] ?? guess : guess;
     if (first !== undefined) {
       const summary = String(typeof first === "string" ? first : JSON.stringify(first)).replace(/\s+/g, " ");
       return name === "edit" ? summary : summary.slice(0, 90);
@@ -352,11 +561,204 @@ function hostOf(url) {
   }
 }
 
-/** The expanded body of a tool call: a real preview where there is one, JSON otherwise. */
-function toolBodyHtml(call, args, output) {
-  const outputHtml = call.name !== "edit" && output ? toolLabel("output") + `<pre class="code tool-out">${escapeHtml(output)}</pre>` : "";
+/* ---------- plots ----------
+   A curve, drawn from a {"plot":...} payload that the tool left as the last line of its own
+   output (extensions/plot.ts), the same way web_search leaves text its cards are parsed back out
+   of. Nothing here evaluates the expression: the extension sampled the curve server-side and only
+   numbers crossed the wire, so this is a mapping from samples to pixels and nothing more. The
+   x values are not even sent -- xStep and xMin rebuild them -- which halves the payload and makes
+   it impossible for the two to disagree.
 
-  if (call.name === "web_search" && typeof output === "string") {
+   Anything that does not parse, or parses into something implausible, returns "" and the caller
+   falls back to the raw output: a malformed payload can cost the drawing, never the record. */
+
+const PLOT_W = 640;
+const PLOT_H = 300;
+const PLOT_PAD = { left: 48, right: 16, top: 16, bottom: 30 };
+/** More points than this and the DOM, not the maths, is the bottleneck. */
+const PLOT_MAX_POINTS = 1600;
+/** How fast the animated dot travels, in graph units (the 640-wide viewBox) per second. */
+const PLOT_SPEED = 70;
+/** Makes the path ids unique: two graphs on one page would otherwise share #plot-s0, and an
+ *  <mpath> would send the second one's dot along the first one's curve. */
+let plotSeq = 0;
+
+const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+
+/** A round-ish step (1, 2, 5 x 10^n) that lands near `target` intervals across [lo, hi]. */
+function niceStep(span, target) {
+  const raw = Math.abs(span) / Math.max(1, target);
+  if (!isNum(raw) || raw <= 0) return 1;
+  const exp = Math.floor(Math.log10(raw));
+  const pow = 10 ** exp;
+  for (const f of [1, 2, 5, 10]) if (raw <= f * pow) return f * pow;
+  return 10 * pow;
+}
+
+/** Tick labels: exact enough to read, short enough to fit under the axis. */
+function fmtTick(v) {
+  if (v === 0) return "0";
+  const a = Math.abs(v);
+  if (a >= 1e6 || a < 1e-3) return v.toExponential(0).replace("e+", "e");
+  return String(Number(v.toPrecision(4)));
+}
+
+function plotTicks(lo, hi, target) {
+  const step = niceStep(hi - lo, target);
+  if (!isNum(step) || step <= 0) return [];
+  const out = [];
+  // A step that is a rounding error against the window would loop forever; the guard is the cap.
+  for (let v = Math.ceil(lo / step) * step, i = 0; v <= hi + step * 1e-6 && i < 24; v += step, i++) {
+    out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  }
+  return out;
+}
+
+function plotPreview(output, live = false) {
+  const lines = String(output).split("\n");
+  let line = "";
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].startsWith('{"plot":')) { line = lines[i]; break; }
+  }
+  if (!line) return "";
+
+  let p;
+  try { p = JSON.parse(line).plot; } catch { return ""; }
+  if (!p || typeof p !== "object") return "";
+  if (!isNum(p.xMin) || !isNum(p.xStep) || p.xStep === 0 || !isNum(p.yMin) || !isNum(p.yMax)) return "";
+  if (!Array.isArray(p.y) || p.y.length < 2 || p.yMax <= p.yMin) return "";
+  const expr = typeof p.expr === "string" ? p.expr : "";
+  if (p.y.some((v) => v !== null && !isNum(v))) return "";
+  const breaks = Array.isArray(p.breaks) ? p.breaks.filter((i) => Number.isInteger(i) && i > 0 && i < p.y.length) : [];
+
+  let ys = p.y;
+  let brk = breaks;
+  if (ys.length > PLOT_MAX_POINTS) {
+    // Thin rather than truncate: the whole window matters more than the last sample.
+    const keep = (i) => i % 2 === 0 || i === ys.length - 1;
+    ys = ys.filter((_, i) => keep(i));
+    brk = brk.filter((i) => keep(i)).map((i) => Math.floor(i / 2));
+  }
+
+  const left = PLOT_PAD.left;
+  const top = PLOT_PAD.top;
+  const width = PLOT_W - PLOT_PAD.left - PLOT_PAD.right;
+  const height = PLOT_H - PLOT_PAD.top - PLOT_PAD.bottom;
+  const last = ys.length - 1;
+  const px = (i) => left + (i / last) * width;
+  const py = (v) => top + (1 - (v - p.yMin) / (p.yMax - p.yMin)) * height;
+  const r1 = (n) => Math.round(n * 10) / 10;
+  const xOf = (i) => p.xMin + i * p.xStep;
+
+  const grid = [];
+  for (const t of plotTicks(p.xMin, xOf(last), 5)) {
+    const x = r1(px((t - p.xMin) / p.xStep));
+    grid.push(`<line class="plot-grid" x1="${x}" y1="${top}" x2="${x}" y2="${top + height}" />`);
+    grid.push(`<text class="plot-tick" x="${x}" y="${top + height + 14}" text-anchor="middle">${escapeHtml(fmtTick(t))}</text>`);
+  }
+  for (const t of plotTicks(p.yMin, p.yMax, 4)) {
+    const y = r1(py(t));
+    grid.push(`<line class="plot-grid" x1="${left}" y1="${y}" x2="${left + width}" y2="${y}" />`);
+    grid.push(`<text class="plot-tick" x="${left - 6}" y="${y + 3}" text-anchor="end">${escapeHtml(fmtTick(t))}</text>`);
+  }
+
+  // The axes are drawn only where they fall inside the window, and heavier than the grid.
+  const axes = [];
+  if (p.yMin < 0 && p.yMax > 0) {
+    const y = r1(py(0));
+    axes.push(`<line class="plot-axis" x1="${left}" y1="${y}" x2="${left + width}" y2="${y}" />`);
+  }
+  if (p.xMin < 0 && xOf(last) > 0) {
+    const x = r1(px((0 - p.xMin) / p.xStep));
+    axes.push(`<line class="plot-axis" x1="${x}" y1="${top}" x2="${x}" y2="${top + height}" />`);
+  }
+
+  // One stroke per continuous run of the curve, kept as point lists until the markup is built:
+  // a null sample, a sample outside the window and a marked break all end a stroke, so a pole is a
+  // gap reaching the edge of the graph rather than a line up its side. The points are needed as
+  // numbers first because the animation measures each stroke's arc length before drawing it.
+  const stops = new Set(brk);
+  const segments = [];
+  let seg = [];
+  const flush = () => {
+    if (seg.length > 1) segments.push(seg);
+    seg = [];
+  };
+  for (let i = 0; i < ys.length; i++) {
+    const v = ys[i];
+    if (v === null || v < p.yMin || v > p.yMax || stops.has(i)) { flush(); continue; }
+    seg.push([r1(px(i)), r1(py(v))]);
+  }
+  flush();
+
+  const d = (pts) => pts.map(([x, y], k) => `${k ? "L" : "M"}${x} ${y}`).join(" ");
+  const uid = `plot${++plotSeq}`;
+  const paths = segments.map((pts, i) => `<path id="${uid}-s${i}" class="plot-curve" d="${d(pts)}" />`);
+
+  /* ---------- animation ----------
+     p.animate runs a single dot along the curve, from the left of the window to the right.
+
+     SMIL rather than CSS, deliberately. The dot has to follow the curve in the SVG's own user
+     units, so it stays glued to the line whatever width the graph is drawn at; CSS offset-path
+     would be working in CSS pixels on an SVG element, which is unevenly supported and drifts off
+     the curve as the graph scales. SMIL moves along a path in user units natively.
+
+     One dot per stroke, each offset to start at its share of the arc length, so the dot keeps one
+     steady speed across strokes instead of racing through a short branch and crawling along a long
+     one. Each repeats, so it loops for as long as the row is open. Where the curve leaves the
+     window the dot jumps to the next stroke -- the same jump the curve makes, rather than one
+     smoothed over a gap the graph is trying to show.
+
+     Nothing animates while the call is still running (live): the list is rebuilt on every push of
+     a streaming run, and SMIL starts over each time, which would look frozen rather than animated.
+     It begins once the result is committed and the view settles. */
+  let motion = "";
+  if (p.animate && !live && segments.length) {
+    const lengths = segments.map((pts) =>
+      pts.slice(1).reduce((sum, q, i) => sum + Math.hypot(q[0] - pts[i][0], q[1] - pts[i][1]), 0),
+    );
+    const total = lengths.reduce((a, b) => a + b, 0);
+    const dur = Math.min(14, Math.max(2.5, total / PLOT_SPEED)).toFixed(2);
+    const bits = [];
+    let passed = 0;
+    segments.forEach((pts, i) => {
+      const begin = total && passed ? ` begin="-${((passed / total) * Number(dur)).toFixed(2)}s"` : "";
+      passed += lengths[i];
+      bits.push(
+        `<circle class="plot-dot" r="3.5">` +
+          `<animateMotion dur="${dur}s"${begin} repeatCount="indefinite" rotate="auto">` +
+          `<mpath href="#${uid}-s${i}" xlink:href="#${uid}-s${i}" />` +
+          `</animateMotion>` +
+          `</circle>`,
+      );
+    });
+    motion = bits.join("");
+  }
+
+  const caption = expr ? `y = ${escapeHtml(expr)}` : "graph";
+  const alt = `${caption}, x from ${fmtTick(p.xMin)} to ${fmtTick(xOf(last))}, y from ${fmtTick(p.yMin)} to ${fmtTick(p.yMax)}`;
+  return (
+    `<div class="plot">` +
+    `<svg viewBox="0 0 ${PLOT_W} ${PLOT_H}" role="img" aria-label="${escapeHtml(alt)}" preserveAspectRatio="xMidYMid meet">` +
+    grid.join("") + axes.join("") + paths.join("") + motion +
+    `</svg>` +
+    `<div class="plot-cap">${caption}<span class="plot-range">${escapeHtml(fmtTick(p.xMin))} … ${escapeHtml(fmtTick(xOf(last)))}</span></div>` +
+    `</div>`
+  );
+}
+
+/** The expanded body of a tool call: a real preview where there is one, JSON otherwise.
+ *  `live` is true while the call is still running, which is what stops a plot from animating. */
+function toolBodyHtml(call, args, output, live = false) {
+  const view = toolView(call.name);
+  const body = view?.body ?? defaultBody(call.name);
+  // The result text is the tool's own account of what happened, so it rides along unless the view
+  // drops it -- or unless the body is made of it, which would show it twice.
+  const outputHtml = output && !view?.hideOutput && body !== "output" && body !== "diff"
+    ? toolLabel("output") + `<pre class="code tool-out">${escapeHtml(output)}</pre>`
+    : "";
+
+  if (body === "cards" && typeof output === "string") {
     // The cards carry everything the raw text did -- title, host, date, excerpt -- so keeping the
     // dump underneath would just be the same results twice. Only when the cards cannot be built (a
     // provider error, or output from before this renderer existed) does the text stay, because then
@@ -365,14 +767,30 @@ function toolBodyHtml(call, args, output) {
     if (results) return results;
   }
 
+  if (body === "plot") {
+    // The curve is the whole point of the call, so it replaces the text; a payload that will not
+    // parse leaves the text below, which is then the only copy of what was plotted.
+    const plot = plotPreview(output, live);
+    if (plot) return plot;
+  }
+
+  // Nothing to show for the result yet (a call still streaming): fall through to the arguments, so
+  // the body is not blank while it runs.
+  if (body === "output" && output) {
+    return toolLabel("output") + `<pre class="code tool-out">${escapeHtml(output)}</pre>`;
+  }
+
+  if (body === "command" && typeof args.command === "string") {
+    return toolLabel(view?.label ?? "command") + `<pre class="code">${escapeHtml(args.command)}</pre>` + outputHtml;
+  }
+
   let preview = "";
-  if (call.name === "edit") preview = editPreview(args);
-  else if (call.name === "write" && typeof args.content === "string") preview = writePreview(args);
+  if (body === "diff") preview = editPreview(args);
+  else if (body === "file" && typeof args.content === "string") preview = writePreview(args);
   if (preview) return preview + outputHtml;
 
-  const isBash = call.name === "bash" && typeof args.command === "string";
-  const argsText = isBash ? args.command : JSON.stringify(args, null, 2);
-  return toolLabel(isBash ? "command" : "arguments") + `<pre class="code">${escapeHtml(argsText)}</pre>` + outputHtml;
+  const argsText = JSON.stringify(args, null, 2);
+  return toolLabel(view?.label ?? "arguments") + `<pre class="code">${escapeHtml(argsText)}</pre>` + outputHtml;
 }
 
 function isOpen(key, byDefault) {
@@ -402,20 +820,24 @@ function toolBlock(key, call, state, result) {
   const status = running ? `<span class="tool-status">${icon("loader-circle", 12, "spin")}</span>` : "";
   const args = call.args && typeof call.args === "object" ? call.args : {};
   const output = result ? result.text : state?.output;
+  const view = toolView(call.name);
+  // web_search and edit are open by default because their body is the point of the call; anything
+  // else stays closed until asked. A view can decide for its own tool either way.
+  const openByDefault = view?.open ?? (call.name === "web_search" || call.name === "edit");
   return `
-    <details class="tool${failed ? " failed" : ""}${call.name === "edit" ? " edit-tool" : ""}" data-key="${key}" ${isOpen(key, call.name === "web_search" || call.name === "edit") ? "open" : ""}>
+    <details class="tool${failed ? " failed" : ""}${call.name === "edit" ? " edit-tool" : ""}" data-key="${key}" ${isOpen(key, openByDefault) ? "open" : ""}>
       <summary>
-        <span class="tool-ico">${icon(toolIcon(call.name), 14)}</span>
+        <span class="tool-ico">${icon(view?.icon ?? toolIcon(call.name), 14)}</span>
         <span class="tool-name">${escapeHtml(call.name)}</span>
         <span class="tool-sum">${escapeHtml(toolSummary(call.name, args))}</span>
         ${running ? durHtml(undefined, call.at) : durHtml(call.ms, undefined)}
         ${status}
       </summary>
-      <div class="tool-body">${toolBodyHtml(call, args, output)}</div>
+      <div class="tool-body">${toolBodyHtml(call, args, output, running)}</div>
     </details>`;
 }
 
-function assistantHtml(idKey, blocks, live, results, tools, error, ms, branchAfter) {
+function assistantHtml(idKey, blocks, live, results, tools, error, ms, branchAfter, messageId) {
   const body = blocks.map((b, i) => {
     const key = `${idKey}-${i}`;
     if (b.type === "thinking") {
@@ -436,7 +858,8 @@ function assistantHtml(idKey, blocks, live, results, tools, error, ms, branchAft
   // data-branch-after is the entry to branch at for a session starting just after this answer. It is
   // only set when the server marked the message as a valid branch point (no unanswered tool calls).
   const fork = branchAfter === undefined ? "" : ` data-branch-after="${branchAfter}"`;
-  return `<div class="turn"${fork}>${body}${err}${meta}</div>`;
+  const identity = messageId === undefined ? "" : ` data-message-id="${messageId}"`;
+  return `<div class="turn"${fork}${identity}>${body}${err}${meta}</div>`;
 }
 
 function stampAnimPhase() {
@@ -446,45 +869,177 @@ function stampAnimPhase() {
   messagesEl.style.setProperty("--anim-phase", `${phase}s`);
 }
 
-function renderMessages(view) {
-  const results = new Map(view.messages.filter(m => m.role === "tool").map(m => [m.callId, m]));
-  const tools = new Map(view.tools.map(t => [t.callId, t]));
-  const html = [];
-
-  for (const m of view.messages) {
-    if (m.role === "user") {
-      // data-branch-before points at the entry ahead of this prompt, so a new session can start there
-      // and replay it. Absent on the first message of a conversation, which has nothing before it.
-      const fork = m.branchBefore === undefined ? "" : ` data-branch-before="${m.branchBefore}"`;
-      html.push(`<div class="message user"${fork}><div class="message-content">${escapeHtml(m.text)}</div></div>`);
-    } else if (m.role === "assistant") {
-      const error = m.stop === "error" || m.stop === "aborted" ? (m.error || (m.stop === "aborted" ? "Stopped" : "")) : "";
-      html.push(assistantHtml(`m${m.id}`, m.blocks || [], false, results, tools, error, m.ms, m.branchAfter));
-    }
-  }
-  if (view.live?.blocks?.length) html.push(assistantHtml("live", view.live.blocks, true, results, tools, ""));
-  else if (view.busy) {
-    const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
-    html.push(`<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>`);
-  }
-
-  for (const q of view.queue) {
-    html.push(`<div class="message user queued"><div class="message-content">${escapeHtml(q.text)}</div><div class="message-meta">${iconTag("clock", 12, "dim")} queued · sends after the current step</div></div>`);
-  }
-  if (!html.length) html.push('<p class="description empty">Give the agent a task. It can read, write and edit its own UI and files, and run commands.</p>');
-
-  stampAnimPhase();
-  const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 120;
-  messagesEl.innerHTML = html.join("");
-  if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
-  messagesEl.querySelectorAll("details[data-key] .think-body, details[data-key] .tool-out").forEach((el) => {
+/** The bodies about to be replaced hold the only live copy of their offsets — including a
+ *  glide caught mid-flight — so read them before touching that region. */
+function harvestBodyScroll(root = messagesEl) {
+  root.querySelectorAll("details[data-key] .think-body, details[data-key] .tool-out").forEach((el) => {
     const key = bodyKey(el);
-    el.scrollTop = key && unpinnedBodies.has(key) ? (bodyScrollTop.get(key) ?? 0) : el.scrollHeight;
-    // The edge fade only means something when there is text past the edge; a short thought
-    // must stay fully readable.
+    if (key) bodyScrollTop.set(key, el.scrollTop);
+  });
+}
+
+function restoreBodyScroll(root) {
+  root.querySelectorAll("details[data-key] .think-body, details[data-key] .tool-out").forEach((el) => {
+    const key = bodyKey(el);
+    // Start where this body was: the outgoing node's offset is what makes the glide a continuation.
+    el.scrollTop = (key && bodyScrollTop.get(key)) || 0;
+    if (!key || !unpinnedBodies.has(key)) glideTo(el, el.scrollHeight);
     if (el.classList.contains("think-body")) el.classList.toggle("overflowing", el.scrollHeight - el.clientHeight > 2);
   });
-  tickDurations();
+}
+
+/* ---------- block entrance ----------
+   A tool row or a thought that arrives while the list is already settled would otherwise pop
+   in between two static blocks. One short fade-and-rise marks it as new without moving
+   anything the eye is reading. These nodes are rebuilt on every render, so — like the shimmer
+   — the animation is stamped from when the key was first seen: the fresh copy resumes where
+   its predecessor was instead of restarting, and streaming never stalls it. */
+const BLOCK_IN_MS = 260;
+const firstSeen = new Map();
+
+/** `m12-0` -> `live-0`: the same block before and after a run is committed. */
+const liveAlias = (key) => key.replace(/^m\d+-/, "live-");
+
+function markFreshBlocks(root = messagesEl) {
+  const now = performance.now();
+  const rows = [];
+  root.querySelectorAll("[data-key]").forEach((el) => {
+    const key = el.dataset.key;
+    let t = firstSeen.get(key);
+    if (t === undefined) t = firstSeen.get(liveAlias(key));
+    if (t === undefined) { t = now; firstSeen.set(key, t); }
+    rows.push({ el, age: now - t });
+  });
+
+  // A whole history showing up at once (session switch, reload) is not an arrival, and fading
+  // every row in together would only flash the screen. A couple of new rows between settled
+  // ones is what actually turns up mid-read, and that is what gets the animation.
+  const arriving = rows.filter((r) => r.age < BLOCK_IN_MS);
+  const animate = arriving.length <= 3;
+  for (const { el, age } of rows) {
+    const live = animate && age < BLOCK_IN_MS;
+    if (live) {
+      el.classList.add("fresh");
+      el.style.animationDelay = `${-(age / 1000).toFixed(3)}s`;
+    } else if (el.classList.contains("fresh")) {
+      el.classList.remove("fresh");
+      el.style.animationDelay = "";
+    }
+    // A bulk load must not still look brand new on the next render, or the first real
+    // arrival after it would be counted as part of the crowd and skipped too.
+    if (!live && age < BLOCK_IN_MS) firstSeen.set(el.dataset.key, now - BLOCK_IN_MS);
+  }
+}
+
+function pruneFreshBlocks() {
+  const visible = new Set();
+  for (const root of [historyEl, dynamicEl]) {
+    root.querySelectorAll("[data-key]").forEach((el) => visible.add(el.dataset.key));
+  }
+  // Keys for blocks that are gone (a branch switch, another session) would otherwise keep
+  // their offsets and first-seen times for the life of the page.
+  for (const key of firstSeen.keys()) {
+    if (visible.has(key)) continue;
+    firstSeen.delete(key);
+    bodyScrollTop.delete(key);
+    unpinnedBodies.delete(key);
+  }
+}
+
+function lastPendingToolMessage(messages, results, busy) {
+  if (!busy) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === "tool") continue;
+    if (message.role !== "assistant") return null;
+    return (message.blocks || []).some((block) => block.type === "toolCall" && !results.has(block.id))
+      ? message
+      : null;
+  }
+  return null;
+}
+
+function toolViewSignature(views) {
+  return Object.keys(views).sort().map((name) => `${name}:${JSON.stringify(views[name])}`).join("|");
+}
+
+function renderMessages(view, sessionId) {
+  const messages = Array.isArray(view.messages) ? view.messages : [];
+  const results = new Map(messages.filter((m) => m.role === "tool").map((m) => [m.callId, m]));
+  const tools = new Map((view.tools || []).map((t) => [t.callId, t]));
+  const active = lastPendingToolMessage(messages, results, view.busy);
+  toolViews = view.toolViews || {};
+
+  // The transcript is append-only. Its small id signature detects new commits / trims without
+  // serializing the entire payload; the stream-only WebSocket patch leaves history untouched.
+  const first = messages[0]?.id ?? "";
+  const last = messages[messages.length - 1]?.id ?? "";
+  const signature = `${sessionId ?? ""}|${messages.length}|${first}|${last}|${active?.id ?? ""}|${toolViewSignature(toolViews)}`;
+  const historyChanged = signature !== lastHistoryKey;
+
+  stampAnimPhase();
+  // Following the tail: near enough to the bottom that streaming should keep pushing. A glide
+  // already heading for the bottom counts too — a long arrival settles over a moment, and a
+  // render landing in the middle of it must not read that as the user having walked away.
+  const bottom = clampScroll(messagesEl, Infinity);
+  const glide = glides.get(LIST_KEY);
+  const following = bottom - messagesEl.scrollTop < 120 || (!!glide && glide.target >= bottom - 1);
+  if (historyChanged) harvestBodyScroll(messagesEl);
+  else harvestBodyScroll(dynamicEl);
+
+  if (historyChanged) {
+    const historyHtml = [];
+    historyHasContent = false;
+    for (const m of messages) {
+      if (m.role === "user") {
+        // data-branch-before points at the entry ahead of this prompt, so a new session can start there
+        // and replay it. Absent on the first message of a conversation, which has nothing before it.
+        const fork = m.branchBefore === undefined ? "" : ` data-branch-before="${m.branchBefore}"`;
+        historyHtml.push(`<div class="message user" data-key="u${m.id}"${fork}><div class="message-content">${escapeHtml(m.text)}</div></div>`);
+        historyHasContent = true;
+      } else if (m.role === "assistant" && m.id !== active?.id) {
+        const error = m.stop === "error" || m.stop === "aborted" ? (m.error || (m.stop === "aborted" ? "Stopped" : "")) : "";
+        historyHtml.push(assistantHtml(`m${m.id}`, m.blocks || [], false, results, tools, error, m.ms, m.branchAfter, m.id));
+        historyHasContent = true;
+      }
+    }
+    historyEl.innerHTML = historyHtml.join("");
+    lastHistoryKey = signature;
+  }
+
+  // The only committed message whose tool state can still change is the pending tail. Keep it
+  // beside the streaming partial so status/output updates do not force a transcript repaint.
+  const tailHtml = [];
+  if (active) {
+    const error = active.stop === "error" || active.stop === "aborted" ? (active.error || (active.stop === "aborted" ? "Stopped" : "")) : "";
+    tailHtml.push(assistantHtml(`m${active.id}`, active.blocks || [], false, results, tools, error, active.ms, active.branchAfter, active.id));
+  }
+  if (view.live?.blocks?.length) tailHtml.push(assistantHtml("live", view.live.blocks, true, results, tools, ""));
+  else if (view.busy) {
+    const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
+    tailHtml.push(`<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>`);
+  }
+
+  for (const q of view.queue || []) {
+    tailHtml.push(`<div class="message user queued"><div class="message-content">${escapeHtml(q.text)}</div><div class="message-meta">${iconTag("clock", 12, "dim")} queued · sends after the current step</div></div>`);
+  }
+  if (!historyHasContent && !tailHtml.length) {
+    tailHtml.push('<p class="description empty">Give the agent a task. It can read, write and edit its own UI and files, and run commands.</p>');
+  }
+  dynamicEl.innerHTML = tailHtml.join("");
+
+  if (following) glideTo(messagesEl, messagesEl.scrollHeight);
+  updateJumpBottom();
+  if (historyChanged) restoreBodyScroll(historyEl);
+  restoreBodyScroll(dynamicEl);
+  if (historyChanged) {
+    markFreshBlocks(messagesEl);
+    pruneFreshBlocks();
+    tickDurations(messagesEl);
+  } else {
+    markFreshBlocks(dynamicEl);
+    tickDurations(dynamicEl);
+  }
 }
 
 function renderStats(view) {
@@ -523,11 +1078,16 @@ function renderStats(view) {
 function renderControls(data) {
   const view = data.view;
   updateComposerAction();
-  if (view.queue.length) {
+  const queueCount = view.queue.length;
+  if (queueCount) {
     queueBar.hidden = false;
-    queueBar.innerHTML = `${iconTag("clock", 13)} ${view.queue.length} message${view.queue.length > 1 ? "s" : ""} queued`;
+    if (queueCount !== lastQueueCount) {
+      queueBar.innerHTML = `${iconTag("clock", 13)} ${queueCount} message${queueCount > 1 ? "s" : ""} queued`;
+      lastQueueCount = queueCount;
+    }
   } else {
     queueBar.hidden = true;
+    lastQueueCount = 0;
   }
 
   const { levels, current } = data.thinking;
@@ -549,20 +1109,65 @@ function renderControls(data) {
 function render() {
   frame = 0;
   if (!payload) return;
-  const text = JSON.stringify(payload);
-  if (text === lastRendered) return;
-  lastRendered = text;
-  renderMessages(payload.view);
-  renderStats(payload.view);
-  renderControls(payload);
-  window.onSessionInfo?.(payload.session);
+  const sessionId = payload.session?.id ?? null;
+  if (sessionId !== renderedSessionId) {
+    renderedSessionId = sessionId;
+    lastHistoryKey = null;
+    historyHasContent = false;
+    historyEl.replaceChildren();
+    dynamicEl.replaceChildren();
+    firstSeen.clear();
+    bodyScrollTop.clear();
+    unpinnedBodies.clear();
+    userOpen.clear();
+    userClosed.clear();
+    glides.clear();
+    if (glideFrame) {
+      cancelAnimationFrame(glideFrame);
+      glideFrame = 0;
+    }
+  }
+
+  renderMessages(payload.view, sessionId);
+  if (statsDirty) {
+    renderStats(payload.view);
+    statsDirty = false;
+  }
+  if (controlsDirty) {
+    renderControls(payload);
+    controlsDirty = false;
+  }
+  const sessionInfo = JSON.stringify(payload.session || null);
+  if (sessionInfo !== lastSessionInfo) {
+    lastSessionInfo = sessionInfo;
+    window.onSessionInfo?.(payload.session);
+  }
 }
 
 window.onAgentView = (data) => {
   payload = data;
+  statsDirty = true;
+  controlsDirty = true;
   if (!frame) frame = requestAnimationFrame(render);
 };
-window.scrollChatToBottom = () => (messagesEl.scrollTop = messagesEl.scrollHeight);
+
+window.onAgentUpdate = (data) => {
+  if (!payload || !data?.view) return; // a full snapshot arrives first on each connection
+  const current = payload.view;
+  const update = data.view;
+  current.live = update.live == null ? undefined : update.live;
+  current.tools = Array.isArray(update.tools) ? update.tools : [];
+  current.busy = Boolean(update.busy);
+  current.runStartedAt = update.runStartedAt == null ? undefined : update.runStartedAt;
+  current.queue = Array.isArray(update.queue) ? update.queue : [];
+  if (update.toolViews) current.toolViews = update.toolViews;
+  if (data.thinking) payload.thinking = data.thinking;
+  if (typeof data.model === "string") payload.model = data.model;
+  if (data.session) payload.session = data.session;
+  controlsDirty = true;
+  if (!frame) frame = requestAnimationFrame(render);
+};
+window.scrollChatToBottom = () => glideTo(messagesEl, messagesEl.scrollHeight, MOVE_TAU);
 
 /* ---------- interaction ---------- */
 
@@ -575,10 +1180,13 @@ function updateComposerAction() {
     sendBtn.dataset.action = action;
     sendBtn.innerHTML = icon(stopping ? "square" : "send", stopping ? 16 : 19);
   }
-  sendBtn.classList.toggle("stop-btn", stopping);
-  sendBtn.title = stopping ? "Stop the current run" : "Send (queues while the agent is busy)";
-  sendBtn.setAttribute("aria-label", stopping ? "Stop current run" : "Send message");
-  sendBtn.disabled = attachmentUploadInProgress && !stopping;
+  if (sendBtn.classList.contains("stop-btn") !== stopping) sendBtn.classList.toggle("stop-btn", stopping);
+  if (sendBtn.title !== (stopping ? "Stop the current run" : "Send (queues while the agent is busy)")) {
+    sendBtn.title = stopping ? "Stop the current run" : "Send (queues while the agent is busy)";
+    sendBtn.setAttribute("aria-label", stopping ? "Stop current run" : "Send message");
+  }
+  const disabled = attachmentUploadInProgress && !stopping;
+  if (sendBtn.disabled !== disabled) sendBtn.disabled = disabled;
 }
 
 messagesEl.addEventListener("click", (e) => {

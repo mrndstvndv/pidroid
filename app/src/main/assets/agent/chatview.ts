@@ -6,6 +6,7 @@
 
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { blockStartKey, messageEndKey, RUN_KEY, toolEndKey, type TimingLookup } from "./timings.ts";
+import type { ToolView } from "./extensions.ts";
 
 export type Block =
   | { type: "text"; text: string; /** Rendered markdown, added after the blocks are built. */ html?: string; at?: number; ms?: number }
@@ -46,6 +47,9 @@ export interface ChatView {
   /** The in-flight assistant response, if any. */
   live?: { blocks: Block[] };
   tools: ToolState[];
+  /** Tool name -> presentation, declared by extensions (see extensions.ts). The page has no other way to
+   *  know what an extension's tool is supposed to look like. */
+  toolViews: Record<string, ToolView>;
   busy: boolean;
   /** Epoch ms the current run started, so a run waiting on a slow tool can still show its age. */
   runStartedAt?: number;
@@ -192,101 +196,172 @@ function withTimings(id: number, blocks: Block[], timing: TimingLookup | undefin
   });
 }
 
+function retimeMessage(message: ViewMessage, timing: TimingLookup | undefined): ViewMessage {
+  if (message.role !== "assistant") return message;
+  const blocks = withTimings(message.id, message.blocks ?? [], timing);
+  const starts = blocks.map((block) => block.at).filter((at): at is number => at !== undefined);
+  const end = timing?.(messageEndKey(message.id));
+  return {
+    ...message,
+    blocks,
+    ms: starts.length && end && end > starts[0] ? end - starts[0] : undefined,
+  };
+}
+
+/**
+ * Incremental transcript builder for the harness's hot path. Conversation entries are an
+ * append-only log, so a streaming update normally changes only `pi.live`; parsing and rendering
+ * the preceding 150 committed messages on every token was needless O(history) work. Keep the
+ * derived messages and aggregate usage between pushes, and only visit new entries. A changed
+ * prefix (session replacement, branch or truncation) safely falls back to a full rebuild.
+ */
+export class ChatViewBuilder {
+  #entryCount = 0;
+  #lastEntryId: string | undefined;
+  #previousEntryId: number | undefined;
+  #messages: ViewMessage[] = [];
+  #lastAssistant: any;
+  #promptTokens = 0;
+  #cacheReadTokens = 0;
+  #cost = 0;
+
+  #reset() {
+    this.#entryCount = 0;
+    this.#lastEntryId = undefined;
+    this.#previousEntryId = undefined;
+    this.#messages = [];
+    this.#lastAssistant = undefined;
+    this.#promptTokens = 0;
+    this.#cacheReadTokens = 0;
+    this.#cost = 0;
+  }
+
+  build(
+    view: any,
+    models: { getModel(p: string, id: string): Model<Api> | undefined },
+    timing?: TimingLookup,
+    /** Start times of the streaming partial's blocks, so a live thought can show its age. */
+    liveStarts?: number[],
+    /** Presentation for tools an extension declared, collected by the extension loader. */
+    toolViews?: Record<string, ToolView>,
+  ): ChatView {
+    const entries: any[] = Array.isArray(view?.entries) ? view.entries : [];
+    const live = view?.docs?.["pi.live"] ?? {};
+    const inbox = view?.docs?.["pi.inbox"]?.items ?? [];
+
+    let start = this.#entryCount;
+    if (this.#entryCount > 0 && (
+      entries.length < this.#entryCount ||
+      String(entries[this.#entryCount - 1]?.id) !== this.#lastEntryId
+    )) {
+      this.#reset();
+      start = 0;
+    }
+
+    const added: ViewMessage[] = [];
+    for (let i = start; i < entries.length; i++) {
+      const entry = entries[i];
+      // The entry before this one, whatever its kind: branching before a prompt has to inherit the
+      // tool results and system entries logged ahead of it too.
+      const before = this.#previousEntryId;
+      this.#previousEntryId = entry.id;
+      const message = entry?.model?.[0];
+      if (!message) continue;
+      if (entry.kind === "pi.user") {
+        added.push({ id: entry.id, role: "user", text: textOf(message.content), branchBefore: before });
+      } else if (entry.kind === "pi.assistant") {
+        const usage = message.usage ?? {};
+        const blocks = withTimings(entry.id, committedBlocks(message.content), timing);
+        const starts = blocks.map((block) => block.at).filter((at): at is number => at !== undefined);
+        const end = timing?.(messageEndKey(entry.id));
+        added.push({
+          id: entry.id,
+          role: "assistant",
+          blocks,
+          branchAfter: blocks.some((block) => block.type === "toolCall") ? undefined : entry.id,
+          stop: message.stopReason,
+          error: message.errorMessage,
+          model: `${message.provider}/${message.model}`,
+          ms: starts.length && end && end > starts[0] ? end - starts[0] : undefined,
+        });
+        if (usage.totalTokens > 0 || usage.input > 0) {
+          this.#lastAssistant = message;
+          this.#promptTokens += (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+          this.#cacheReadTokens += usage.cacheRead ?? 0;
+          this.#cost += usage.cost?.total ?? 0;
+        }
+      } else if (entry.kind === "pi.tool-result") {
+        added.push({
+          id: entry.id,
+          role: "tool",
+          callId: message.toolCallId,
+          name: message.toolName,
+          isError: !!message.isError,
+          text: clip(textOf(message.content)),
+        });
+      }
+    }
+
+    // A newly committed tool result (or assistant end stamp) can finish a duration on an older
+    // assistant block. Refresh the small visible window, but only when the log actually advanced.
+    if (start > 0 && entries.length > start && timing) {
+      this.#messages = this.#messages.map((message) => retimeMessage(message, timing));
+    }
+    if (added.length) this.#messages = [...this.#messages, ...added].slice(-MAX_MESSAGES);
+    this.#entryCount = entries.length;
+    this.#lastEntryId = entries.length ? String(entries[entries.length - 1]?.id) : undefined;
+
+    const partial = live?.generation?.message;
+    const liveBlocks = partial
+      ? blocksOf(partial.content).map((block, i) => {
+          const at = liveStarts?.[i];
+          return block.type === "text" || at === undefined ? block : { ...block, at };
+        })
+      : undefined;
+
+    const lastAssistant = this.#lastAssistant;
+    const lastUsage = lastAssistant?.usage;
+    const lastPrompt = lastUsage ? (lastUsage.input ?? 0) + (lastUsage.cacheRead ?? 0) + (lastUsage.cacheWrite ?? 0) : 0;
+    const model = lastAssistant ? models.getModel(lastAssistant.provider, lastAssistant.model) : undefined;
+
+    return {
+      // Keep this exact array object while only the streaming partial changes. The server uses
+      // that identity to send a compact live patch instead of serializing the full transcript.
+      messages: this.#messages,
+      live: liveBlocks ? { blocks: liveBlocks } : undefined,
+      tools: ((live?.tools ?? []) as any[]).map((slot) => ({
+        callId: slot.callId,
+        name: slot.name,
+        status: slot.status,
+        output: slot.output ? clip(String(slot.output)) : undefined,
+      })),
+      toolViews: toolViews ?? {},
+      busy: !!live?.run,
+      runStartedAt: timing?.(RUN_KEY),
+      queue: (inbox as any[])
+        .filter((item) => item.mode !== "write")
+        .map((item) => ({ id: item.id, text: clip(textOf(item.content), 200), mode: item.mode })),
+      stats: {
+        model: lastAssistant ? `${lastAssistant.provider}/${lastAssistant.model}` : undefined,
+        contextTokens: lastUsage ? Math.max(lastUsage.totalTokens ?? 0, lastPrompt + (lastUsage.output ?? 0)) : 0,
+        contextWindow: model?.contextWindow ?? 0,
+        cacheLast: lastPrompt > 0 ? Math.round(((lastUsage.cacheRead ?? 0) / lastPrompt) * 100) : undefined,
+        cacheSession: this.#promptTokens > 0 ? Math.round((this.#cacheReadTokens / this.#promptTokens) * 100) : undefined,
+        cost: this.#cost,
+      },
+    };
+  }
+}
+
+/** One-shot compatibility helper for callers that do not keep a builder between view pushes. */
 export function buildChatView(
   view: any,
   models: { getModel(p: string, id: string): Model<Api> | undefined },
   timing?: TimingLookup,
-  /** Start times of the streaming partial's blocks, so a live thought can show its age. */
   liveStarts?: number[],
+  toolViews?: Record<string, ToolView>,
 ): ChatView {
-  const entries: any[] = Array.isArray(view?.entries) ? view.entries : [];
-  const live = view?.docs?.["pi.live"] ?? {};
-  const inbox = view?.docs?.["pi.inbox"]?.items ?? [];
-
-  const messages: ViewMessage[] = [];
-  let lastAssistant: any;
-  let previousEntryId: number | undefined;
-  let promptTokens = 0;
-  let cacheReadTokens = 0;
-  let cost = 0;
-
-  for (const entry of entries) {
-    // The entry before this one, whatever its kind: branching before a prompt has to inherit the
-    // tool results and system entries logged ahead of it too.
-    const before = previousEntryId;
-    previousEntryId = entry.id;
-    const message = entry?.model?.[0];
-    if (!message) continue;
-    if (entry.kind === "pi.user") {
-      messages.push({ id: entry.id, role: "user", text: textOf(message.content), branchBefore: before });
-    } else if (entry.kind === "pi.assistant") {
-      const usage = message.usage ?? {};
-      const blocks = withTimings(entry.id, committedBlocks(message.content), timing);
-      const starts = blocks.map((b) => b.at).filter((at): at is number => at !== undefined);
-      const end = timing?.(messageEndKey(entry.id));
-      messages.push({
-        id: entry.id,
-        role: "assistant",
-        blocks,
-        branchAfter: blocks.some((b) => b.type === "toolCall") ? undefined : entry.id,
-        stop: message.stopReason,
-        error: message.errorMessage,
-        model: `${message.provider}/${message.model}`,
-        ms: starts.length && end && end > starts[0] ? end - starts[0] : undefined,
-      });
-      if (usage.totalTokens > 0 || usage.input > 0) {
-        lastAssistant = message;
-        promptTokens += (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-        cacheReadTokens += usage.cacheRead ?? 0;
-        cost += usage.cost?.total ?? 0;
-      }
-    } else if (entry.kind === "pi.tool-result") {
-      messages.push({
-        id: entry.id,
-        role: "tool",
-        callId: message.toolCallId,
-        name: message.toolName,
-        isError: !!message.isError,
-        text: clip(textOf(message.content)),
-      });
-    }
-  }
-
-  const partial = live?.generation?.message;
-  const liveBlocks = partial
-    ? blocksOf(partial.content).map((block, i) => {
-        const at = liveStarts?.[i];
-        return block.type === "text" || at === undefined ? block : { ...block, at };
-      })
-    : undefined;
-
-  const lastUsage = lastAssistant?.usage;
-  const lastPrompt = lastUsage ? (lastUsage.input ?? 0) + (lastUsage.cacheRead ?? 0) + (lastUsage.cacheWrite ?? 0) : 0;
-  const model = lastAssistant ? models.getModel(lastAssistant.provider, lastAssistant.model) : undefined;
-
-  return {
-    messages: messages.slice(-MAX_MESSAGES),
-    live: liveBlocks ? { blocks: liveBlocks } : undefined,
-    tools: ((live?.tools ?? []) as any[]).map((slot) => ({
-      callId: slot.callId,
-      name: slot.name,
-      status: slot.status,
-      output: slot.output ? clip(String(slot.output)) : undefined,
-    })),
-    busy: !!live?.run,
-    runStartedAt: timing?.(RUN_KEY),
-    queue: (inbox as any[])
-      .filter((item) => item.mode !== "write")
-      .map((item) => ({ id: item.id, text: clip(textOf(item.content), 200), mode: item.mode })),
-    stats: {
-      model: lastAssistant ? `${lastAssistant.provider}/${lastAssistant.model}` : undefined,
-      contextTokens: lastUsage ? Math.max(lastUsage.totalTokens ?? 0, lastPrompt + (lastUsage.output ?? 0)) : 0,
-      contextWindow: model?.contextWindow ?? 0,
-      cacheLast: lastPrompt > 0 ? Math.round(((lastUsage.cacheRead ?? 0) / lastPrompt) * 100) : undefined,
-      cacheSession: promptTokens > 0 ? Math.round((cacheReadTokens / promptTokens) * 100) : undefined,
-      cost,
-    },
-  };
+  return new ChatViewBuilder().build(view, models, timing, liveStarts, toolViews);
 }
 
 /* ------------------------------------------------------------------ *

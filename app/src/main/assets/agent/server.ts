@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { join, dirname, resolve, extname, sep } from "path";
+import { join, dirname, resolve, extname, sep, basename } from "path";
 import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync, statSync, cpSync, rmSync, mkdirSync, realpathSync } from "fs";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -10,6 +10,7 @@ import { AssistantEntry, createRegistry, defineExtension, defineTool, Harness, h
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools, createReadTool } from "@earendil-works/pi-durable/tools";
+import { conversationDescendants, purgeConversations } from "./purge.ts";
 import WebTools from "./web-tools.ts";
 import { commandCodeProvider, commandCodeUsage, commandCodeUsageData } from "./providers/commandcode.ts";
 import { opencodeProvider } from "./providers/opencode.ts";
@@ -18,7 +19,7 @@ import { FileCredentialStore, LoginManager } from "./auth.ts";
 import { Changes } from "./changes.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
-import { buildChatView, clampLevel, renderMarkdown, supportedLevels, type ChatView } from "./chatview.ts";
+import { ChatViewBuilder, clampLevel, renderMarkdown, supportedLevels, type ChatView } from "./chatview.ts";
 import { Timings } from "./timings.ts";
 
 const PORT = Number(process.env.PORT) || 8765;
@@ -190,6 +191,9 @@ console.log(`[pidroid] Agent runtime initialized. SQLite DB at: ${DB_PATH}`);
 const clients = new Set<any>();
 
 function broadcast(event: string, payload: any) {
+  // No browser can receive this while the app is backgrounded, so don't stringify snapshots just
+  // to discard them. The next WebSocket connection gets a fresh complete state in `open()`.
+  if (!clients.size) return;
   const message = JSON.stringify({ event, payload, timestamp: Date.now() });
   for (const ws of clients) {
     try {
@@ -331,6 +335,28 @@ function scheduleRestart(delayMs: number) {
   setState("planned_restart", String(Date.now()));
   console.log(`[pidroid] planned restart in ${delayMs}ms`);
   setTimeout(() => process.exit(PLANNED_EXIT_CODE), delayMs);
+}
+
+// A user-requested stop exits Bun without the planned-restart code. The Android host currently
+// treats other exit codes as crashes; a host-level stop signal would be needed to avoid that.
+let stopScheduled = false;
+function scheduleStop(delayMs: number) {
+  if (stopScheduled) return;
+  stopScheduled = true;
+  setState("planned_stop", "1");
+  console.log(`[pidroid] server stop requested; exiting in about ${delayMs}ms`);
+  setTimeout(() => {
+    const hardExit = setTimeout(() => process.exit(0), 2500);
+    const aborts = sessions.list().map((row) =>
+      handleFor(row).then((conversation) => conversation.abort(context)).catch((err) => {
+        console.warn(`[pidroid] abort before server stop (session ${row.id}):`, err);
+      }),
+    );
+    void Promise.all(aborts).finally(() => {
+      clearTimeout(hardExit);
+      process.exit(0);
+    });
+  }, delayMs);
 }
 
 /** Bundle server.ts into a temp file: catches syntax errors and unresolved imports before they take the server down. */
@@ -783,13 +809,19 @@ if (getState("workspaces") !== WORKSPACES_DIR) {
 }
 
 // Crash-loop guard: a run that keeps killing the process must not be resumed forever. A planned restart
-// (restart_server) is not a crash: its runs resume, and it doesn't count towards the guard.
+// (restart_server) is not a crash: its runs resume, and it doesn't count towards the guard. A user stop
+// is also intentional, but unfinished runs must be aborted rather than resumed if the host relaunches us.
 {
   const now = Date.now();
   const planned = now - Number(getState("planned_restart") ?? 0) < 60_000;
+  const userStopped = getState("planned_stop") === "1";
   setState("planned_restart", "0");
+  setState("planned_stop", "0");
   const boots: number[] = JSON.parse(getState("boots") ?? "[]").filter((t: number) => now - t < 120_000);
-  if (planned) {
+  if (userStopped) {
+    console.log("[pidroid] previous process was stopped by the user; aborting unfinished runs");
+    for (const row of sessions.list()) await (await handleFor(row)).abort(context);
+  } else if (planned) {
     harness.resume(); // continue every run the previous process left unfinished
   } else {
     setState("boots", JSON.stringify([...boots, now].slice(-6)));
@@ -803,17 +835,36 @@ if (getState("workspaces") !== WORKSPACES_DIR) {
 }
 console.log(`[pidroid] pi-durable agent ready (${AGENT_DB_PATH}), ${sessions.list().length} session(s)`);
 
-// Live chat state for the UI: every commit (including throttled streaming partials) is pushed over the WebSocket.
-let latestView: ChatView = buildChatView(undefined, models);
+// Live chat state for the UI. Committed messages are cached across view pushes; while the
+// model streams, only the small changing tail needs to be rebuilt and sent.
+let chatViewBuilder = new ChatViewBuilder();
+let latestView: ChatView = chatViewBuilder.build(undefined, models, undefined, undefined, loader.views());
 // Wall-clock stamps for the durations the chat view shows ("Thought · 12s", "Worked 1m 30s").
 let timings = new Timings(db, current.id);
 function buildLatestView(value: unknown) {
   timings.stamp(value);
-  return buildChatView(value, models, timings.lookup, timings.liveStarts());
+  return chatViewBuilder.build(value, models, timings.lookup, timings.liveStarts(), loader.views());
 }
 function chatPayload() {
   return {
     view: latestView,
+    thinking: thinkingInfo(),
+    model: `${pickDefaultModel().provider}/${pickDefaultModel().modelId}`,
+    session: { id: current.id, title: current.title },
+  };
+}
+function chatUpdatePayload() {
+  return {
+    // `null` is intentional: JSON omits undefined properties, but the browser must be able to
+    // clear a live partial or run timestamp when the agent becomes idle.
+    view: {
+      live: latestView.live ?? null,
+      tools: latestView.tools,
+      busy: latestView.busy,
+      runStartedAt: latestView.runStartedAt ?? null,
+      queue: latestView.queue,
+      toolViews: latestView.toolViews,
+    },
     thinking: thinkingInfo(),
     model: `${pickDefaultModel().provider}/${pickDefaultModel().modelId}`,
     session: { id: current.id, title: current.title },
@@ -824,7 +875,13 @@ let pendingValue: unknown;
 let detachView: (() => void) | undefined;
 
 async function attachView() {
+  if (pushTimer) {
+    clearTimeout(pushTimer);
+    pushTimer = undefined;
+  }
+  pendingValue = undefined;
   detachView?.();
+  chatViewBuilder = new ChatViewBuilder();
   const view = await root.viewState(context);
   let active = true;
   const refresh = (value: unknown) => {
@@ -833,8 +890,12 @@ async function attachView() {
     if (pushTimer) return;
     pushTimer = setTimeout(() => {
       pushTimer = undefined;
+      const previousMessages = latestView.messages;
       latestView = buildLatestView(pendingValue);
-      broadcast("agent_view", chatPayload());
+      // Entries are immutable and append-only. When the message-array identity is unchanged,
+      // send only the stream/tool/queue tail instead of the whole transcript and its HTML.
+      if (latestView.messages === previousMessages) broadcast("agent_update", chatUpdatePayload());
+      else broadcast("agent_view", chatPayload());
     }, 50);
   };
   // Set the first view synchronously so a request right after a switch never sees the previous session's state.
@@ -929,12 +990,88 @@ busySessions()
   })
   .catch(() => {});
 
+/**
+ * A second connection to pi-durable's own file, opened only when a session is deleted for good.
+ * Its storage object is append-only and has no delete, so the rows are removed here. WAL lets this
+ * write while the harness reads, and it is held open rather than reopened per delete so the
+ * prepared statements are reused.
+ */
+let purgeDb: Database | undefined;
+function durableDb(): Database {
+  if (!purgeDb) {
+    // `readwrite: true`, not `create: false`. Bun builds the sqlite open flags from `readonly` /
+    // `readwrite` only, and an options object that names neither leaves the flags at 0, which
+    // sqlite rejects with SQLITE_MISUSE ("bad parameter or other API misuse") -- so a delete failed
+    // on the open rather than on any SQL. `readwrite` also gives what `create: false` was after:
+    // an existing file is opened for writing, a missing one still fails with CANTOPEN.
+    purgeDb = new Database(AGENT_DB_PATH, { readwrite: true });
+    // A delete can land while the harness is committing the end of the run it was just told to
+    // stop; wait for that write rather than throwing SQLITE_BUSY at the user.
+    purgeDb.exec("PRAGMA busy_timeout = 5000;");
+  }
+  return purgeDb;
+}
+
+/**
+ * Remove a session's workspace directory. `force` covers the ordinary case of nothing being there;
+ * the containment check is the point -- a directory outside WORKSPACES_DIR is never removed, so a
+ * bug in the id that reached here cannot turn a delete into an rm -rf of the app tree.
+ */
+function removeWorkspace(conversationId: number) {
+  const dir = workspaceDir(conversationId);
+  if (dirname(dir) !== WORKSPACES_DIR || !/^\d+$/.test(basename(dir))) {
+    console.warn(`[pidroid] refusing to remove ${dir}: not a workspace directory`);
+    return;
+  }
+  rmSync(dir, { recursive: true, force: true });
+}
+
 async function deleteSession(id: number) {
   const row = sessions.get(id);
   if (!row) throw new Error("No such session");
+
+  // A fork reads the history it inherited straight out of the conversation it was branched from --
+  // pi-durable stores a link, never a copy -- so those entries are part of the branch's transcript
+  // as much as the parent's. Deleting the parent would leave a branch that is still in the sidebar
+  // missing everything before the fork point, and no way to get it back. Refuse instead, and name
+  // the branches, so the user deletes those first and nothing is lost silently.
+  const subtree = conversationDescendants(durableDb(), row.conversationId).filter(c => c !== row.conversationId);
+  const branches = subtree
+    .map(conversationId => sessions.byConversation(conversationId))
+    .filter((s): s is SessionRow & { deleted: boolean } => !!s && !s.deleted);
+  if (branches.length) {
+    const one = branches.length === 1;
+    const names = branches.map(b => `"${b.title}"`).join(", ");
+    throw new Error(
+      `"${row.title}" has ${one ? "a branch" : `${branches.length} branches`}: ${names}. ` +
+        `A branch reads the history before the fork from the session it came from rather than keeping a ` +
+        `copy, so deleting "${row.title}" would empty ${one ? "it" : "them"}. ` +
+        `Delete ${one ? "the branch" : "the branches"} first.`,
+    );
+  }
+
   await (await handleFor(row)).abort(context).catch(() => {});
-  sessions.remove(id);
   handles.delete(row.conversationId);
+  finishedRuns.delete(row.conversationId);
+  // The stamp store for the open session writes its pending rows on a timer. Closing it here --
+  // before the rows below are deleted -- is what stops it re-inserting timings for a session id
+  // that no longer exists a moment later.
+  if (current.id === id) timings.close();
+
+  // Already-hidden branches of this session come out with it: they are gone from the sidebar
+  // already, and their history is only reachable through the transcript being deleted.
+  const purged = purgeConversations(durableDb(), [row.conversationId, ...subtree]);
+  for (const conversationId of [row.conversationId, ...subtree]) {
+    removeWorkspace(conversationId);
+    const owned = sessions.byConversation(conversationId);
+    if (owned) sessions.purge(owned.id);
+  }
+  console.log(
+    `[pidroid] deleted session ${row.id} (conversation ${row.conversationId}): ` +
+      `${purged.conversations} conversations, ${purged.entries} entries, ${purged.tasks} tasks, ` +
+      `${purged.submissions} submissions, ${purged.documents} documents`,
+  );
+
   if (current.id === id) {
     const next = sessions.list()[0] ?? (await createSession());
     await switchTo(next.id);
@@ -1320,6 +1457,11 @@ const server = Bun.serve({
         scheduleRestart(300);
         return Response.json({ success: true });
       }).catch(err => Response.json({ error: String(err) }, { status: 500 }));
+    }
+
+    if (url.pathname === "/api/stop" && req.method === "POST") {
+      scheduleStop(500); // leave time for this response and the UI confirmation to reach the WebView
+      return Response.json({ success: true, stopping: true });
     }
 
     // --- Sessions ---

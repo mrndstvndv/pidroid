@@ -1,7 +1,8 @@
 /**
  * Session registry. pi-durable keeps any number of conversations in one storage but has no notion of titles,
- * recency or deletion, so the app tracks those itself. Deleting a session hides it (and stops its run); the
- * durable transcript stays in storage because pi-durable has no API to remove a conversation.
+ * recency or deletion, so the app tracks those itself. Deleting a session stops its run and drops the row for
+ * good -- pi-durable has no API to remove a conversation, so its transcript is deleted by purge.ts, which
+ * writes the SQL itself.
  *
  * A session forked off another keeps a pointer to it, which is only used to draw the sidebar as a tree.
  * pi-durable holds the real lineage: the child's conversation record has the parent and the entry it
@@ -83,6 +84,16 @@ export class Sessions {
     return raw ? toRow(raw) : undefined;
   }
 
+  /**
+   * The row for a conversation id whether or not it is hidden. A deleted session is only reached
+   * this way -- by the purge removing it, and by the branch scan that has to see a hidden parent to
+   * know whether a visible branch still reads its history through it.
+   */
+  byConversation(conversationId: number): (SessionRow & { deleted: boolean }) | undefined {
+    const raw = this.db.query("SELECT * FROM sessions WHERE conversation_id = ?").get(conversationId) as Raw | null;
+    return raw ? { ...toRow(raw), deleted: raw.deleted === 1 } : undefined;
+  }
+
   create(
     conversationId: number,
     title = DEFAULT_TITLE,
@@ -144,7 +155,16 @@ export class Sessions {
     this.db.query("UPDATE sessions SET updated_at = ? WHERE id = ?").run(Date.now(), id);
   }
 
-  remove(id: number) {
-    this.db.query("UPDATE sessions SET deleted = 1 WHERE id = ?").run(id);
+  /**
+   * Drop the row for good. The transcript and the workspace go with it (purge.ts, and the caller),
+   * which is why there is nothing here to undo: `deleted` survives only as a column, because
+   * installs from before real deletion still carry rows that used it.
+   */
+  purge(id: number) {
+    this.db.transaction(() => {
+      // Timings are keyed by session id, so they are the one other thing this session owns.
+      this.db.query("DELETE FROM timings WHERE session = ?").run(id);
+      this.db.query("DELETE FROM sessions WHERE id = ?").run(id);
+    })();
   }
 }

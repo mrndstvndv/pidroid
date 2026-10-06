@@ -184,7 +184,7 @@ document.addEventListener("click", async (e) => {
         loadSessions();
       }
     } else if (item.dataset.menu === "delete") {
-      if (confirm(`Delete "${session?.title}"? Any run in it is stopped, and it disappears from this list.`)) {
+      if (confirm(`Delete "${session?.title}"? Any run in it is stopped. Its transcript and every file in its workspace are deleted for good -- this cannot be undone.`)) {
         await sessionsApi(`/api/sessions/${id}/delete`, "POST");
         loadSessions();
       }
