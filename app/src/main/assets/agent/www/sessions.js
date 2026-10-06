@@ -60,6 +60,7 @@ async function newSession() {
   }
 }
 
+// New session lives in the topbar of the chat view now.
 document.getElementById("new-session-btn")?.addEventListener("click", newSession);
 
 sidebarList?.addEventListener("click", async (e) => {

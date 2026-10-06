@@ -8,10 +8,19 @@
   <title>Pidroid Agent</title>
   <link rel="stylesheet" href="style.css" id="main-stylesheet">
   <script>
-    // Apply the saved theme before first paint so there is no flash of the default palette.
+    // Resolve light/dark and apply the saved theme before first paint, so there is no flash of the wrong
+    // palette. Mode "system" follows the Android theme (prefers-color-scheme); each mode keeps its own
+    // saved colours. theme.js owns changing any of this afterwards.
     try {
-      const saved = JSON.parse(localStorage.getItem("pidroid.theme") || "{}");
-      for (const [k, v] of Object.entries(saved)) if (v) document.documentElement.style.setProperty(k, v);
+      var mode = localStorage.getItem("pidroid.mode") || "system";
+      // Inside the app, ask the host: a WebView derives prefers-color-scheme from the app's own (dark) theme, not the
+      // Android setting, so matchMedia would always say dark there.
+      var sysLight = window.PidroidHost && PidroidHost.systemIsDark ? !PidroidHost.systemIsDark() : !!(window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches);
+      var light = mode === "system" ? sysLight : mode === "light";
+      document.documentElement.setAttribute("data-mode", light ? "light" : "dark");
+      var saved = JSON.parse(localStorage.getItem(light ? "pidroid.theme.light" : "pidroid.theme") || "{}");
+      for (var k in saved) if (saved[k]) document.documentElement.style.setProperty(k, saved[k]);
+      if (window.PidroidHost && PidroidHost.setBarColor) PidroidHost.setBarColor(getComputedStyle(document.documentElement).getPropertyValue("--bg-primary"));
     } catch (e) {}
   </script>
 </head>
@@ -25,6 +34,12 @@
       </button>
       <button type="button" class="topbar-title" id="session-btn" title="Sessions">
         <span id="session-title">Session</span>
+      </button>
+      <button type="button" class="icon-btn" id="new-session-btn" title="New session" aria-label="New session">
+        <span data-icon="plus" data-size="20"></span>
+      </button>
+      <button type="button" class="icon-btn" id="open-artifacts-btn" title="Artifacts" aria-label="Artifacts">
+        <span data-icon="folder" data-size="19"></span>
       </button>
     </header>
 
@@ -150,7 +165,18 @@
             <span data-icon="rotate-ccw" data-size="15"></span><span class="btn-label">Reset</span>
           </button>
         </div>
-        <p class="description">Presets are all dark to keep the AMOLED black background. Pick one, then fine-tune any color below.</p>
+        <p class="description">Presets follow the active mode: AMOLED-black darks, or light palettes in light mode. Pick one, then fine-tune any color below.</p>
+
+        <div class="editor-header">
+          <h2>Appearance</h2>
+        </div>
+        <div class="mode-seg" id="mode-seg" role="radiogroup" aria-label="Color mode">
+          <button type="button" role="radio" data-mode="system">System</button>
+          <button type="button" role="radio" data-mode="dark">Dark</button>
+          <button type="button" role="radio" data-mode="light">Light</button>
+        </div>
+        <p class="description">System follows your Android light/dark setting. Colors you customize are remembered separately for dark and light.</p>
+        <p class="description" id="mode-detect"></p>
 
         <div class="editor-header">
           <h2>Presets</h2>
@@ -166,6 +192,20 @@
           <h2>Shape</h2>
         </div>
         <div id="theme-shape"></div>
+
+        <div class="editor-header">
+          <h2>Effects</h2>
+        </div>
+        <div class="theme-row">
+          <label class="theme-label" for="theme-blur">Frosted backdrops</label>
+          <div class="theme-value">
+            <label class="ext-switch" title="Blur behind the top bar, composer and sidebar">
+              <input type="checkbox" id="theme-blur" checked />
+              <span class="ext-switch-track"><span class="ext-switch-thumb"></span></span>
+            </label>
+          </div>
+        </div>
+        <p class="description">Turn off to make the top bar, composer and sidebar solid instead of blurred glass. Saves battery on slower devices.</p>
       </section>
 
       <section class="tab-content" id="tab-extensions">
@@ -191,6 +231,26 @@
       </section>
     </section>
 
+    <!-- Screen 3: Artifacts (files in the current session's workspace, with an HTML viewer) -->
+    <section class="screen" id="screen-artifacts">
+      <div class="settings-head">
+        <button type="button" class="icon-btn" id="artifacts-back" aria-label="Back">
+          <span data-icon="arrow-left" data-size="20"></span>
+        </button>
+        <h2 id="artifacts-title">Artifacts</h2>
+        <div class="artifacts-head-actions">
+          <button type="button" class="icon-btn" id="artifacts-source-btn" aria-label="Toggle source" title="Preview / source" hidden>
+            <span data-icon="code" data-size="19"></span>
+          </button>
+          <button type="button" class="icon-btn" id="artifacts-refresh" aria-label="Refresh" title="Refresh">
+            <span data-icon="refresh-cw" data-size="19"></span>
+          </button>
+        </div>
+      </div>
+      <div class="artifacts-list" id="artifacts-list"><p class="description">Loading...</p></div>
+      <div class="artifacts-viewer" id="artifacts-viewer" hidden></div>
+    </section>
+
     <!-- Sidebar: sessions, with settings at the bottom -->
     <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
     <aside class="sidebar" id="sidebar" aria-hidden="true">
@@ -202,13 +262,15 @@
       </div>
       <div class="sidebar-list" id="sidebar-session-list"></div>
       <div class="sidebar-foot">
-        <button type="button" class="btn-primary sidebar-new icon-btn-text" id="new-session-btn">
-          <span data-icon="plus" data-size="16"></span><span class="btn-label">New session</span>
-        </button>
-        <button type="button" class="sidebar-settings" id="open-settings-btn">
-          <span data-icon="settings" data-size="18"></span>
-          <span>Settings</span>
-        </button>
+        <div class="sidebar-actions">
+          <button type="button" class="sidebar-settings" id="open-settings-btn">
+            <span data-icon="settings" data-size="18"></span>
+            <span>Settings</span>
+          </button>
+          <button type="button" class="sidebar-settings sidebar-restart" id="restart-btn" aria-label="Restart agent" title="Restart agent">
+            <span data-icon="rotate-cw" data-size="18"></span>
+          </button>
+        </div>
       </div>
     </aside>
 
@@ -252,6 +314,7 @@
   <script src="icons.js"></script>
   <script src="app.js"></script>
   <script src="files-tab.js"></script>
+  <script src="artifacts.js"></script>
   <script src="theme.js"></script>
   <script src="extensions-tab.js"></script>
   <script src="providers.js"></script>

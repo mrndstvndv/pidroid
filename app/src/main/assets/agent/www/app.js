@@ -85,39 +85,98 @@ document.addEventListener("touchmove", (e) => {
   if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 8) e.preventDefault();
 }, { passive: false });
 
+/* ---------- floating chrome sizing ----------
+   The topbar and the composer are absolutely positioned so the message list scrolls
+   under them and their backdrop-filter has something to blur. That means their heights
+   are no longer reserved by flex layout, so publish them as --chrome-top / --chrome-bottom
+   and let .chat-messages reserve the same space as scroll padding. Measured with a
+   ResizeObserver rather than hardcoded: the topbar grows with a long session title, and
+   the composer changes height with the queue bar, the safe-area inset and the keyboard. */
+const chromeEls = [
+  [".topbar", "--chrome-top"],
+  [".composer", "--chrome-bottom"],
+];
+
+function syncChromeHeights() {
+  for (const [sel, prop] of chromeEls) {
+    const el = document.querySelector(sel);
+    // Hidden chrome (topbar in Settings) measures 0, which is what we want to reserve.
+    const h = el && el.offsetParent !== null ? Math.round(el.getBoundingClientRect().height) : 0;
+    document.documentElement.style.setProperty(prop, `${h}px`);
+  }
+}
+
+if (typeof ResizeObserver !== "undefined") {
+  const ro = new ResizeObserver(syncChromeHeights);
+  for (const [sel] of chromeEls) {
+    const el = document.querySelector(sel);
+    if (el) ro.observe(el);
+  }
+}
+window.addEventListener("resize", syncChromeHeights);
+// Fonts settle after first paint and shift the bars by a pixel or two.
+window.addEventListener("load", syncChromeHeights);
+syncChromeHeights();
+
+/* ---------- edge-to-edge: status bar inset ----------
+   The Android host draws the page under the status bar and reports its height (dp == CSS px).
+   WebView only sometimes fills env(safe-area-inset-top) itself, hence the bridge. */
+function syncSafeTop() {
+  const h = Number(window.PidroidHost?.statusBarHeight?.());
+  if (h > 0) document.documentElement.style.setProperty("--safe-top", `${h}px`);
+  syncChromeHeights();
+}
+window.addEventListener("load", syncSafeTop);
+window.addEventListener("resize", syncSafeTop);
+syncSafeTop();
+
 /* ---------- screens: chat (main) and settings ---------- */
 
 const chatScreen = document.getElementById("screen-chat");
 const settingsScreen = document.getElementById("screen-settings");
+const artifactsScreen = document.getElementById("screen-artifacts");
 const settingsBack = document.getElementById("settings-back");
 const topbar = document.querySelector(".topbar");
 
-let settingsOpen = false;
+// Which full-screen takeover is open ("settings" | "artifacts"), or null for chat.
+let overlay = null;
 
-// Settings is a full-screen takeover: the chat topbar goes away and the settings head
+// Settings and Artifacts are full-screen takeovers: the chat topbar goes away and their head
 // (styled as a topbar) sits at the very top, so nothing of the chat peeks through.
 // Each open pushes a history entry so the Android back button returns here as well.
 function showScreen(name) {
-  const settings = name === "settings";
-  chatScreen.classList.toggle("active", !settings);
-  settingsScreen.classList.toggle("active", settings);
-  if (topbar) topbar.hidden = settings;
+  const next = name === "settings" || name === "artifacts" ? name : null;
+  chatScreen.classList.toggle("active", !next);
+  settingsScreen.classList.toggle("active", next === "settings");
+  artifactsScreen.classList.toggle("active", next === "artifacts");
+  if (topbar) topbar.hidden = !!next;
 
-  if (settings) {
-    settingsOpen = true;
-    history.pushState({ pidroidScreen: "settings" }, "");
+  syncChromeHeights(); // the hidden topbar must stop reserving space
+
+  if (next) {
+    if (!overlay) history.pushState({ pidroidScreen: next }, "");
+    overlay = next;
     // Cheap (~5 kB) and keeps the list honest after a sign-in elsewhere.
-    window.loadProviders?.();
+    if (next === "settings") window.loadProviders?.();
+    if (next === "artifacts") window.loadArtifacts?.();
   } else {
-    settingsOpen = false;
-    if (history.state?.pidroidScreen === "settings") history.back(); // pops our own entry
+    const wasOpen = overlay;
+    overlay = null;
+    if (wasOpen && history.state?.pidroidScreen) history.back(); // pops our own entry
+    window.scrollChatToBottom?.();
   }
-
-  if (!settings) window.scrollChatToBottom?.();
 }
 
 window.addEventListener("popstate", () => {
-  if (settingsOpen) showScreen("chat");
+  if (overlay && window.artifactsHandleBack?.()) {
+    // Back closed an open file viewer, not the screen: keep our history entry.
+    history.pushState({ pidroidScreen: overlay }, "");
+    return;
+  }
+  if (overlay) {
+    overlay = null;
+    showScreen("chat");
+  }
 });
 
 // Tab switching inside Settings
@@ -137,9 +196,33 @@ document.querySelectorAll(".tab-btn").forEach(button => {
 });
 
 settingsBack?.addEventListener("click", () => showScreen("chat"));
+document.getElementById("open-artifacts-btn")?.addEventListener("click", () => {
+  window.closeSidebar?.();
+  showScreen("artifacts");
+});
 document.getElementById("open-settings-btn")?.addEventListener("click", () => {
   window.closeSidebar?.();
   showScreen("settings");
+});
+
+// Restart: the Android host restarts the whole agent process (works with a broken server, leaves safe mode).
+// A plain browser has no host, so fall back to the server's own restart endpoint.
+const restartBtn = document.getElementById("restart-btn");
+restartBtn?.addEventListener("click", async () => {
+  if (!confirm("Restart the agent? Running sessions resume afterwards.")) return;
+  restartBtn.disabled = true;
+  if (window.PidroidHost?.restart) {
+    window.PidroidHost.restart();
+    return;
+  }
+  try {
+    const res = await fetch("/api/restart", { method: "POST" });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    setTimeout(() => location.reload(), 2500);
+  } catch (err) {
+    alert("Restart failed: " + (err instanceof Error ? err.message : err));
+    restartBtn.disabled = false;
+  }
 });
 
 /* ---------- sidebar ---------- */

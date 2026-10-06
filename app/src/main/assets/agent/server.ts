@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { join, dirname, resolve } from "path";
-import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync, statSync, rmSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync, statSync, rmSync, mkdirSync, realpathSync } from "fs";
 import { tmpdir } from "node:os";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
@@ -1100,6 +1100,79 @@ const server = Bun.serve({
           dirs: [...TREE_SKIP_DIRS],
           files: [...TREE_SKIP_FILES],
           suffixes: TREE_SKIP_SUFFIXES,
+        },
+      });
+    }
+
+    // --- Artifacts: browse and serve the files in a session's own workspace ---
+    //
+    // /api/workspace/tree?session=<id> lists the workspace (the current session when omitted).
+    // /workspace/<session id>/<path> serves a file raw with a guessed content type, so an HTML
+    // artifact's relative CSS/JS/images resolve against it. The Content-Security-Policy `sandbox`
+    // header gives every served file an opaque origin (scripts may run, but cannot reach the app's
+    // own API or storage), including if someone navigates straight to the URL. Paths are resolved
+    // through realpath and must stay inside the workspace, so a symlink cannot lead out of it.
+    const workspaceFor = (raw: string | null) => {
+      const row = raw ? sessions.get(Number(raw)) : current;
+      return row ? { row, dir: workspaceDir(row.conversationId) } : null;
+    };
+    const insideWorkspace = (dir: string, rel: string) => {
+      const target = resolve(dir, rel);
+      if (target !== dir && !target.startsWith(dir + "/")) return null;
+      try {
+        const real = realpathSync(target);
+        const realDir = realpathSync(dir);
+        if (real !== realDir && !real.startsWith(realDir + "/")) return null;
+        return real;
+      } catch {
+        return null;
+      }
+    };
+
+    if (url.pathname === "/api/workspace/tree" && req.method === "GET") {
+      const ws = workspaceFor(url.searchParams.get("session"));
+      if (!ws) return Response.json({ error: "No such session" }, { status: 404 });
+      type Node = { name: string; path: string; dir: boolean; size: number; mtime: number; children?: Node[] };
+      let count = 0;
+      let truncated = false;
+      const walk = (abs: string, rel: string, depth: number): Node[] => {
+        let entries;
+        try { entries = readdirSync(abs, { withFileTypes: true }); } catch { return []; }
+        const out: Node[] = [];
+        for (const entry of entries) {
+          if (entry.isDirectory() && TREE_SKIP_DIRS.has(entry.name)) continue;
+          if (count >= 3000) { truncated = true; break; }
+          count++;
+          const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+          const childAbs = join(abs, entry.name);
+          let st;
+          try { st = statSync(childAbs); } catch { continue; }
+          if (st.isDirectory()) {
+            out.push({ name: entry.name, path: childRel, dir: true, size: 0, mtime: st.mtimeMs, children: depth < 8 ? walk(childAbs, childRel, depth + 1) : [] });
+          } else {
+            out.push({ name: entry.name, path: childRel, dir: false, size: st.size, mtime: st.mtimeMs });
+          }
+        }
+        return out.sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
+      };
+      const tree = existsSync(ws.dir) ? walk(ws.dir, "", 0) : [];
+      return Response.json({ session: ws.row.id, title: ws.row.title, tree, truncated });
+    }
+
+    if (url.pathname.startsWith("/workspace/") && (req.method === "GET" || req.method === "HEAD")) {
+      const [, , sid, ...parts] = url.pathname.split("/");
+      const ws = workspaceFor(sid);
+      if (!ws) return new Response("No such session", { status: 404 });
+      let rel = "";
+      try { rel = parts.map(decodeURIComponent).join("/"); } catch { return new Response("Bad path", { status: 400 }); }
+      let real = insideWorkspace(ws.dir, rel);
+      if (real && statSync(real).isDirectory()) real = insideWorkspace(ws.dir, join(rel, "index.html"));
+      if (!real || !statSync(real).isFile()) return new Response("Not found", { status: 404 });
+      return new Response(Bun.file(real), {
+        headers: {
+          "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-modals allow-popups",
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
         },
       });
     }

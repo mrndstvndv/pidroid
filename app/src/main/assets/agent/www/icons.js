@@ -100,7 +100,7 @@ const TOOL_ICONS = [
   ["bash", "terminal"], ["shell", "terminal"], ["exec", "terminal"],
   ["evalruntime", "code"], ["runjs", "code"],
   ["reloadextensions", "refresh-cw"], ["reloadui", "refresh-cw"], ["reload", "refresh-cw"],
-  ["restartserver", "power"],
+  ["restartserver", "rotate-cw"],
   ["thinking", "brain"], ["reason", "brain"],
 ];
 

@@ -30,107 +30,13 @@ let frame = 0;
 const ANIM_PHASE_STEP = 0.05; // s; anything well under a frame looks continuous
 let lastPhase = "";
 
-/* ---------- streaming fade ----------
-   A CSS animation cannot fade streamed characters in: renderMessages() rebuilds the list
-   on every frame, so a fresh element would restart its animation forever and never
-   progress (the trap the shimmer phase above works around). Instead each appended run of
-   characters is stamped with its arrival time, and every render converts that age into an
-   inline opacity. The stamps outlive the re-render, so a character eases from faint to
-   solid over FADE_MS exactly once.
-
-   Text pieces are rendered with `render` (escapeHtml for thinking, md for the answer), so
-   a markdown construct straddling two pieces shows its source markers until it is solid.
-   Inline code and bold are short enough for that to be invisible; a code fence is not —
-   half of it would render as a <pre> and the other half as plain text — so pieces are
-   never cut inside a fence. */
-const FADE_MS = 550;
-const FADE_STEPS = 12;
-
-/** key -> { length, runs: [startIndex, arrivedAt][] }; only blocks that are streaming now. */
-const streamRuns = new Map();
-const liveKeys = new Set();
-
-/** Index of every ``` marker; an odd count before a cut means the cut lands inside a fence. */
-function fencePositions(text) {
-  const out = [];
-  for (let i = text.indexOf("```"); i >= 0; i = text.indexOf("```", i + 3)) out.push(i);
-  return out;
-}
-
-function insideFence(fences, index) {
-  let markers = 0;
-  for (const at of fences) {
-    if (at >= index) break;
-    if (at + 3 > index) return true; // the cut itself lands inside a ``` marker
-    markers++;
-  }
-  return markers % 2 === 1;
-}
-
-function fadeHtml(key, text, render, markdown) {
-  liveKeys.add(key);
-  const now = performance.now();
-  let state = streamRuns.get(key);
-  if (!state || text.length < state.length) state = { length: 0, runs: [] }; // rewound (new turn, edit)
-  if (text.length > state.length) {
-    state.runs.push([state.length, now]);
-    state.length = text.length;
-    // Runs past the fade are solid anyway; keep one divider so the prefix stays plain text.
-    while (state.runs.length > 1 && now - state.runs[0][1] > FADE_MS) state.runs.shift();
-  }
-  streamRuns.set(key, state);
-
-  const fences = markdown ? fencePositions(text) : [];
-  const pieces = []; // [start, end, opacity | null]; null = fully solid
-  for (let i = 0; i < state.runs.length; i++) {
-    const [start, arrivedAt] = state.runs[i];
-    if (start >= text.length) break;
-    const end = i + 1 < state.runs.length ? Math.min(state.runs[i + 1][0], text.length) : text.length;
-    const step = Math.min(FADE_STEPS, Math.floor(((now - arrivedAt) / FADE_MS) * FADE_STEPS));
-    const opacity = step >= FADE_STEPS ? null : 0.12 + 0.88 * ((step + 1) / FADE_STEPS);
-    const previous = pieces[pieces.length - 1];
-    const fenced = insideFence(fences, start);
-    // Two solid pieces can share one render call, which keeps markdown constructs that
-    // were written across several frames from staying split once they have aged out.
-    if (previous && (fenced || (previous[2] === null && opacity === null))) previous[1] = end;
-    // Older than the fade, or holding a fence's opening: render from the prefix, since a
-    // piece boundary in the middle of a construct is what breaks it.
-    else if (fenced || (pieces.length === 0 && opacity === null)) pieces.push([0, end, opacity]);
-    else pieces.push([start, end, opacity]);
-  }
-
-  let html = "";
-  let cursor = 0; // text emitted so far
-  let pending = ""; // rendered characters waiting for a span
-  let pendingOpacity = null;
-  const flush = () => {
-    if (!pending) return;
-    html += pendingOpacity === null ? pending : `<span style="opacity:${pendingOpacity}">${pending}</span>`;
-    pending = "";
-    pendingOpacity = null;
-  };
-
-  for (const [start, end, opacity] of pieces) {
-    if (start > cursor) {
-      flush();
-      html += render(text.slice(cursor, start));
-    }
-    const piece = render(text.slice(start, end));
-    if (opacity === null) {
-      flush();
-      html += piece;
-    } else {
-      const value = opacity.toFixed(2);
-      if (pendingOpacity !== null && pendingOpacity !== value) flush();
-      pendingOpacity = value;
-      pending += piece;
-    }
-    cursor = end;
-  }
-  flush();
-  html += render(text.slice(cursor));
-  return html || "…";
-}
+/* ---------- streaming text ----------
+   Streamed text renders in one piece, at full opacity: the list is rebuilt every frame, so
+   anything that tracked a character's age would need per-character inline styles on every
+   pass. A long thought instead fades at the edges of its box (`.think-body.overflowing`
+   in style.css), which survives the re-render because it is plain CSS on the container.
+   Rendering in one piece also means a markdown construct written across several frames is
+   no longer cut in half mid-parse. */
 
 /* ---------- sticky inner scroll ----------
    Thinking bodies and tool outputs scroll on their own. Re-rendering resets scrollTop to
@@ -432,7 +338,7 @@ function isOpen(key, byDefault) {
 
 function thinkingBlock(key, text, streaming) {
   const open = isOpen(key, streaming);
-  const body = streaming ? fadeHtml(key, text, escapeHtml, false) : escapeHtml(text) || "…";
+  const body = escapeHtml(text) || "…";
   return `
     <details class="think" data-key="${key}" ${open ? "open" : ""}>
       <summary>${streaming ? '<span class="shimmer">Thinking…</span>' : `${icon("brain", 13, "ico-inline")} Thought`}</summary>
@@ -469,10 +375,9 @@ function assistantHtml(idKey, blocks, live, results, tools, error) {
     }
     if (b.type === "toolCall") return toolBlock(`t-${b.id}`, b, tools.get(b.id), results.get(b.id));
     // Committed text arrives pre-rendered from the server (chatview.ts); the streaming
-    // partial has no html yet, so it is rendered here — piece by piece, which is what lets
-    // the characters that just arrived fade in.
+    // partial has no html yet, so it is rendered here.
     if (!b.text.trim()) return "";
-    const html = b.html ?? (live ? fadeHtml(key, b.text, md, true) : md(b.text));
+    const html = b.html ?? md(b.text);
     return `<div class="message assistant"><div class="message-content">${html}</div></div>`;
   }).join("");
   const err = error ? `<div class="message assistant error"><div class="message-content">${escapeHtml(error)}</div></div>` : "";
@@ -514,10 +419,10 @@ function renderMessages(view) {
   messagesEl.querySelectorAll("details[data-key] .think-body, details[data-key] .tool-out").forEach((el) => {
     const key = bodyKey(el);
     el.scrollTop = key && unpinnedBodies.has(key) ? (bodyScrollTop.get(key) ?? 0) : el.scrollHeight;
+    // The edge fade only means something when there is text past the edge; a short thought
+    // must stay fully readable.
+    if (el.classList.contains("think-body")) el.classList.toggle("overflowing", el.scrollHeight - el.clientHeight > 2);
   });
-  // Stamps for blocks that are no longer streaming would only grow the map.
-  for (const key of streamRuns.keys()) if (!liveKeys.has(key)) streamRuns.delete(key);
-  liveKeys.clear();
 }
 
 function renderStats(view) {

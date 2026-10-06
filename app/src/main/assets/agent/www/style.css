@@ -9,11 +9,46 @@
   --border: #222222;
   --success: #10b981;
   --radius: 12px;
+
+  /* Derived / semantic colors that must flip with the mode (not user-editable). */
+  --bg-inset: color-mix(in srgb, var(--bg-card) 60%, var(--bg-primary));
+  --hairline: color-mix(in srgb, var(--border) 55%, var(--bg-primary));
+  --press: color-mix(in srgb, var(--text-primary) 8%, var(--bg-primary));
+  --accent-text: #a5b4fc;
+  --accent-text-strong: #c7d2fe;
+  --accent-edge: #2b2b52;
+  --danger-text: var(--danger-text);
+  --warn: var(--warn);
+  --text-muted: #6b7280;
+  --scrim: rgba(0, 0, 0, 0.45);
+  --modal-scrim: rgba(0, 0, 0, 0.8);
+}
+
+/* Light palette (the head script / theme.js set data-mode from the saved choice or the Android theme).
+   Inline overrides from the Theme tab sit on top of this, per mode. */
+html[data-mode="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f7;
+  --bg-card: #f0f0f3;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --text-primary: #111827;
+  --text-secondary: #5b6472;
+  --border: #dcdce1;
+  --success: #059669;
+  --accent-text: #4338ca;
+  --accent-text-strong: #3730a3;
+  --accent-edge: #c7d2fe;
+  --danger-text: #dc2626;
+  --warn: #b45309;
+  --text-muted: #6b7280;
+  --scrim: rgba(0, 0, 0, 0.3);
+  --modal-scrim: rgba(0, 0, 0, 0.45);
 }
 
 html {
-  background-color: #000;
-  color-scheme: dark;
+  background-color: var(--bg-primary);
+  color-scheme: dark; /* overridden by html[data-mode="light"] below */
   /* The document itself never scrolls: the message list (and the settings tab
      contents) are the only scrollers. Without this a drag starting on fixed chrome
      (composer, topbar) finds the document / visual viewport as its scroll container
@@ -161,6 +196,7 @@ body {
 
 /* Screens: chat is the main one, settings holds the old tabs */
 .screen {
+  position: relative; /* containing block for the floating composer */
   display: none;
   flex: 1;
   min-height: 0;
@@ -173,14 +209,23 @@ body {
   display: flex;
 }
 
-/* Top bar: burger + session name */
+/* Top bar: burger + session name.
+   Floating chrome: it sits ON TOP of the message list (which scrolls underneath) so
+   the frosted backdrop-filter has something to blur. app.js measures the bar and the
+   composer into --chrome-top / --chrome-bottom, and .chat-messages reserves that space
+   as scroll padding, so the first and last messages still clear the glass. */
 .topbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
-  background-color: var(--bg-primary);
+  background-color: transparent;
   flex-shrink: 0;
   /* Fixed chrome: a drag starting here must die, never pan the document / visual
      viewport (which would slide the whole chat view, topbar included). Buttons only
@@ -229,7 +274,9 @@ body {
 .sidebar-scrim {
   position: fixed;
   inset: 0;
-  background-color: rgba(0, 0, 0, 0.6);
+  background-color: var(--scrim);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
   z-index: 40;
 }
 
@@ -239,7 +286,10 @@ body {
   bottom: 0;
   left: 0;
   width: min(84vw, 320px);
-  background-color: var(--bg-secondary);
+  /* Frosted: translucent tint over a blur of the chat and scrim behind it. */
+  background-color: color-mix(in srgb, var(--bg-secondary) 78%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
   border-right: 1px solid var(--border);
   z-index: 50;
   display: flex;
@@ -270,13 +320,19 @@ body {
 
 .sidebar-foot {
   border-top: 1px solid var(--border);
-  padding: 10px 12px;
+  padding: 10px 12px max(10px, env(safe-area-inset-bottom, 0px));
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
 .sidebar-new { width: 100%; }
+
+.sidebar-actions { display: flex; gap: 8px; }
+.sidebar-actions .sidebar-settings { flex: 1; width: auto; }
+/* Restart sits right of Settings in the sidebar footer. */
+.sidebar-actions .sidebar-restart { flex: 0 0 auto; padding: 10px 12px; }
+#restart-btn:disabled { opacity: 0.5; cursor: default; }
 
 .sidebar-settings {
   display: flex;
@@ -356,7 +412,9 @@ body {
   overflow-y: auto;
   overscroll-behavior: contain;
   touch-action: pan-x pan-y;
-  padding: 16px;
+  /* --chrome-* are the measured heights of the floating topbar and composer, so the
+     list starts and ends clear of them while still scrolling under both. */
+  padding: calc(var(--chrome-top, 0px) + 16px) 16px calc(var(--chrome-bottom, 0px) + 16px);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -889,7 +947,7 @@ textarea {
   background-color: var(--success);
 }
 
-.usage-bar > span.warm { background-color: #f59e0b; }
+.usage-bar > span.warm { background-color: var(--warn); }
 .usage-bar > span.hot { background-color: #ef4444; }
 
 .usage-totals {
@@ -914,7 +972,7 @@ textarea {
 .modal {
   position: fixed;
   inset: 0;
-  background-color: rgba(0, 0, 0, 0.8);
+  background-color: var(--modal-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1164,7 +1222,7 @@ textarea {
 }
 
 .change-kind.turn { color: var(--accent); }
-.change-kind.undo { color: #f59e0b; }
+.change-kind.undo { color: var(--warn); }
 
 .parked {
   color: var(--text-secondary);
@@ -1187,15 +1245,15 @@ textarea {
 }
 
 .st-added { color: var(--success); }
-.st-deleted { color: #f87171; }
-.st-modified { color: #f59e0b; }
+.st-deleted { color: var(--danger-text); }
+.st-modified { color: var(--warn); }
 
 .diff {
   margin: 4px 0 0;
   padding: 8px;
   max-height: 260px;
   overflow: auto;
-  background-color: #050505;
+  background-color: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: 8px;
   font-family: monospace;
@@ -1205,7 +1263,7 @@ textarea {
 }
 
 .diff .add { color: var(--success); }
-.diff .del { color: #f87171; }
+.diff .del { color: var(--danger-text); }
 .diff .hunk { color: var(--text-secondary); }
 
 .change-actions {
@@ -1217,8 +1275,14 @@ textarea {
 /* Composer: stats, controls and input live together under the messages.
    Same deal as the bar: kill vertical pans starting here, keep horizontal caret
    movement inside the field. */
+/* Floating, like the topbar: the message list scrolls under it. */
 .composer {
-  background-color: var(--bg-secondary);
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  background-color: transparent;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
   touch-action: pan-x;
@@ -1313,7 +1377,7 @@ textarea {
   background-color: var(--success);
 }
 
-.meter-fill.warm { background-color: #f59e0b; }
+.meter-fill.warm { background-color: var(--warn); }
 .meter-fill.hot { background-color: #ef4444; }
 
 .think-select {
@@ -1354,7 +1418,7 @@ textarea {
 .queue-bar {
   padding: 6px 12px 0;
   font-size: 0.72rem;
-  color: #f59e0b;
+  color: var(--warn);
   display: flex;
   align-items: center;
   gap: 5px;
@@ -1384,7 +1448,7 @@ textarea {
   background-color: transparent;
 }
 
-.message.error { border-color: #ef4444; color: #f87171; }
+.message.error { border-color: #ef4444; color: var(--danger-text); }
 
 /* Anything that is code gets the same monospace face as the diff, wherever it appears --
    not just inside a message, but also in the static tab descriptions and the tool bodies. */
@@ -1418,7 +1482,7 @@ pre.code,
 .message-content pre {
   margin: 4px 0;
   padding: 8px;
-  background-color: #050505;
+  background-color: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow-x: auto;
@@ -1524,6 +1588,15 @@ details summary::-webkit-details-marker { display: none; }
   overflow-y: auto;
 }
 
+/* A thought longer than its box fades out at the top and bottom edges instead of each new
+   character fading in. The mask covers the padding box, so it stays put while the text
+   scrolls underneath — the cut-off line reads as "more above / more below". chat.js adds
+   .overflowing only when the body actually overflows, so a short thought is never dimmed. */
+.think-body.overflowing {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 46px, #000 calc(100% - 46px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 46px, #000 calc(100% - 46px), transparent 100%);
+}
+
 /* A finished tool row reads exactly like a Thought row: same size, weight and
    colour. State is carried by the little icon, not by colour or bold text. */
 .tool-name {
@@ -1545,7 +1618,7 @@ details summary::-webkit-details-marker { display: none; }
 /* A failed call turns red: icon, tool name and argument preview. */
 details.tool.failed .tool-ico,
 details.tool.failed .tool-name,
-details.tool.failed .tool-sum { color: #f87171; }
+details.tool.failed .tool-sum { color: var(--danger-text); }
 
 .tool-body { padding: 0 12px 10px; }
 .tool-label { font-size: 0.65rem; text-transform: uppercase; color: var(--text-secondary); margin-top: 6px; }
@@ -1577,7 +1650,7 @@ details.tool.failed .tool-sum { color: #f87171; }
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
-  background: #0a0a0a;
+  background: var(--bg-inset);
   border-bottom: 1px solid var(--border);
 }
 .ws-q {
@@ -1594,8 +1667,8 @@ details.tool.failed .tool-sum { color: #f87171; }
   font-size: 0.58rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #a5b4fc;
-  border: 1px solid #2b2b52;
+  color: var(--accent-text);
+  border: 1px solid var(--accent-edge);
   border-radius: 5px;
   padding: 1px 5px;
 }
@@ -1603,18 +1676,18 @@ details.tool.failed .tool-sum { color: #f87171; }
   display: flex;
   gap: 9px;
   padding: 9px 10px;
-  border-top: 1px solid #151515;
+  border-top: 1px solid var(--hairline);
   text-decoration: none;
   color: inherit;
 }
 .ws-head + .ws-item { border-top: none; }
-a.ws-item:active { background: #141414; }
+a.ws-item:active { background: var(--press); }
 .ws-rank {
   flex-shrink: 0;
   width: 1.15rem;
   height: 1.15rem;
   border-radius: 5px;
-  background: #171717;
+  background: var(--bg-card);
   color: var(--text-secondary);
   font-size: 0.62rem;
   font-variant-numeric: tabular-nums;
@@ -1629,12 +1702,12 @@ a.ws-item:active { background: #141414; }
   line-height: 1.35;
   color: var(--text-primary);
 }
-a.ws-item .ws-title { color: #c7d2fe; }
+a.ws-item .ws-title { color: var(--accent-text-strong); }
 .ws-meta {
   display: block;
   margin-top: 2px;
   font-size: 0.63rem;
-  color: #6b7280;
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1651,10 +1724,10 @@ a.ws-item .ws-title { color: #c7d2fe; }
 }
 .ws-note {
   padding: 7px 10px;
-  border-top: 1px solid #151515;
+  border-top: 1px solid var(--hairline);
   font-size: 0.63rem;
   font-style: italic;
-  color: #6b7280;
+  color: var(--text-muted);
 }
 
 .spinner {
@@ -1711,8 +1784,8 @@ p.empty { padding: 24px 8px; text-align: center; }
 }
 
 .icon-btn:active { background-color: var(--bg-primary); }
-.icon-btn.danger { color: #f87171; }
-.busy-dot { color: #f59e0b; }
+.icon-btn.danger { color: var(--danger-text); }
+.busy-dot { color: var(--warn); }
 
 /* Theme editor */
 .preset-grid {
@@ -1796,7 +1869,7 @@ p.empty { padding: 24px 8px; text-align: center; }
 }
 
 .theme-hex:focus { border-color: var(--accent); }
-.theme-hex.invalid { border-color: #f87171; }
+.theme-hex.invalid { border-color: var(--danger-text); }
 
 .theme-value input[type="range"] {
   width: 150px;
@@ -1850,3 +1923,185 @@ p.empty { padding: 24px 8px; text-align: center; }
 .icon-btn .ico { display: block; }
 .sidebar-settings .ico-wrap, .sidebar-settings .ico-slot { flex-shrink: 0; }
 
+/* ---------- frosted chrome ----------
+   The topbar and the composer float over the scrolling message list, so the list is
+   what shows through them. The ::before sheet carries both the backdrop-filter and the
+   translucent tint (a pseudo-element rather than an rgba() background, so it works for
+   whatever colour format the theme writes into --bg-primary / --bg-secondary). It reaches
+   past the bar by --fade and a mask fades it out there, so the blur dissolves into the
+   messages instead of ending on a hard edge that slices through a bubble. The bar's own
+   content is not masked. -webkit- prefix included: old Android WebViews need it, and a
+   wrong prefix simply means no blur, not a broken bar. */
+.topbar,
+.composer {
+  --fade: 22px;
+  isolation: isolate; /* keep the tint from blending with whatever is behind */
+}
+
+.topbar::before,
+.composer::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: -1;
+  pointer-events: none;
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
+}
+
+.topbar::before {
+  top: 0;
+  bottom: calc(-1 * var(--fade));
+  background-color: color-mix(in srgb, var(--bg-primary) 72%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--fade)), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--fade)), transparent);
+}
+
+.composer::before {
+  bottom: 0;
+  top: calc(-1 * var(--fade));
+  background-color: color-mix(in srgb, var(--bg-secondary) 78%, transparent);
+  -webkit-mask-image: linear-gradient(to top, #000 calc(100% - var(--fade)), transparent);
+  mask-image: linear-gradient(to top, #000 calc(100% - var(--fade)), transparent);
+}
+
+/* The fade replaces the hairline borders. */
+.topbar { border-bottom: none; }
+.composer { border-top: none; }
+
+/* Without a blur the tint alone would just look like a flat wash, so keep the chrome
+   opaque where backdrop-filter is unavailable. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .topbar { background-color: var(--bg-primary); }
+  .composer { background-color: var(--bg-secondary); }
+  .topbar::before, .composer::before { display: none; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .topbar::before, .composer::before {
+    background-color: var(--bg-primary);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/* Edge-to-edge: the page runs under the status bar. --safe-top is the real status bar
+   height, measured natively and published by app.js (env() as the fallback), plus a little
+   air so the first row never touches the clock and icons. */
+:root { --safe-top: env(safe-area-inset-top, 0px); }
+.topbar,
+.settings-head { padding-top: calc(var(--safe-top) + 10px); }
+.sidebar-head { padding-top: calc(var(--safe-top) + 6px); }
+
+/* The input row sits directly on the frosted sheet. Its standalone opaque background (and a nested
+   backdrop-filter, which would also isolate it from the blur behind) would paint a solid band. */
+.composer .chat-input-bar {
+  background-color: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .sidebar { background-color: var(--bg-secondary); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .sidebar { background-color: var(--bg-secondary); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .sidebar-scrim { -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+
+/* Frosted backdrops off (Theme > Effects): solid chrome, no blur, no fade. */
+html[data-blur="off"] .topbar::before,
+html[data-blur="off"] .composer::before {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  -webkit-mask-image: none;
+  mask-image: none;
+  bottom: 0;
+}
+html[data-blur="off"] .composer::before { top: 0; }
+html[data-blur="off"] .topbar::before { background-color: var(--bg-primary); }
+html[data-blur="off"] .composer::before { background-color: var(--bg-secondary); }
+html[data-blur="off"] .topbar { border-bottom: 1px solid var(--border); }
+html[data-blur="off"] .composer { border-top: 1px solid var(--border); }
+html[data-blur="off"] .sidebar {
+  background-color: var(--bg-secondary);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html[data-blur="off"] .sidebar-scrim {
+  background-color: var(--modal-scrim);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* ---------- Artifacts screen ---------- */
+.artifacts-head-actions { margin-left: auto; display: flex; gap: 2px; }
+#screen-artifacts .settings-head h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifacts-list, .artifacts-viewer {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+}
+.artifacts-viewer[hidden], .artifacts-list[hidden] { display: none; }
+.artifacts-session { padding: 10px 16px 6px; font-size: 0.75rem; color: var(--text-secondary); }
+.artifacts-empty { padding: 16px; }
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 42px;
+  padding: 6px 12px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  font-size: 0.88rem;
+  text-align: left;
+  cursor: pointer;
+}
+.artifact-chev { width: 14px; flex: none; display: inline-flex; color: var(--text-secondary); }
+.artifact-ico { flex: none; display: inline-flex; color: var(--text-secondary); }
+.artifact-row.is-dir .artifact-ico { color: var(--accent); }
+.artifact-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-size { flex: none; font-size: 0.72rem; color: var(--text-secondary); }
+.artifacts-viewer { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
+.artifact-frame { flex: 1; width: 100%; border: none; background: #fff; }
+.artifact-image { flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 12px; }
+.artifact-image img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.artifact-source {
+  flex: 1;
+  margin: 0;
+  padding: 12px 16px max(16px, env(safe-area-inset-bottom, 0px));
+  overflow: auto;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre;
+  tab-size: 2;
+}
+
+html[data-mode="light"] { color-scheme: light; }
+
+/* Mode switch (Theme > Appearance) */
+.mode-seg { flex-shrink: 0; /* .tab-content is a bounded flex column: overflow:hidden would let it collapse to 0 */ display: flex; gap: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.mode-seg button {
+  flex: 1;
+  padding: 9px 0;
+  background: var(--bg-card);
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.mode-seg button + button { border-left: 1px solid var(--border); }
+.mode-seg button.selected { background: var(--accent); color: #fff; }

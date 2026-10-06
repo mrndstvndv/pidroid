@@ -445,7 +445,7 @@ window.onProviderEvent = (data) => {
     loginModal.hidden = true;
     loadProviders();
   } else if (p.kind === "error" || p.kind === "cancelled") {
-    appendBody(`<p style="color:#f87171">${escapeHtml(p.message || "Login cancelled")}</p>`);
+    appendBody(`<p style="color:var(--danger-text)">${escapeHtml(p.message || "Login cancelled")}</p>`);
     activeLogin = null;
   }
 };
