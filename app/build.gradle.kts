@@ -73,13 +73,15 @@ androidComponents {
 android {
     namespace = "com.mrndstvndv.pidroid"
     compileSdk = 36
+    // Pinned so AGP can strip native libs (needs a complete NDK with source.properties).
+    ndkVersion = "29.0.14206865"
     defaultConfig {
         applicationId = "com.mrndstvndv.pidroid"
         minSdk = 24
         targetSdk = 36
         versionCode = (findProperty("versionCode") as String?)?.toInt() ?: 1
         versionName = (findProperty("versionName") as String?) ?: rootProject.version.toString()
-        // Only arm64 ships the full native set (Bun + OpenSSH); the x86_64 libbun.so is dropped from the APK.
+        // Only arm64 ships the full native set (Bun + OpenSSH); no x86_64 libs are kept.
         ndk { abiFilters += "arm64-v8a" }
     }
 
