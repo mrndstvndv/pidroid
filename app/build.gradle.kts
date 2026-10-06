@@ -79,6 +79,8 @@ android {
         targetSdk = 36
         versionCode = (findProperty("versionCode") as String?)?.toInt() ?: 1
         versionName = (findProperty("versionName") as String?) ?: rootProject.version.toString()
+        // Only arm64 ships the full native set (Bun + OpenSSH); the x86_64 libbun.so is dropped from the APK.
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     signingConfigs {
@@ -98,7 +100,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             if (rootProject.file("keystore.properties").exists()) {
                 signingConfig = signingConfigs.getByName("release")
             }

@@ -16,14 +16,15 @@ test -f keystore.properties
 # versionCode must grow with every release, prereleases included; the run number does.
 ./gradlew assembleRelease --no-daemon "-PversionCode=${GITHUB_RUN_NUMBER:?must run in CI}"
 
-APK_DIR=app/build/outputs/apk/release
-APK="$(ls "$APK_DIR"/*.apk | head -n 1)"
+APK="$(ls app/build/outputs/apk/release/*.apk | head -n 1)"
 
 # The APK embeds the agent and its native runtime; a missing piece means a silently broken app.
 LISTING="$(unzip -l "$APK")"
-for entry in classes.dex assets/agent/server.ts assets/agent/vendor/ lib/arm64-v8a/libbun.so; do
+for entry in classes.dex assets/agent/server.ts assets/agent/vendor/ lib/arm64-v8a/libbun.so lib/arm64-v8a/libopenssh_ssh.so; do
   grep -qF " ${entry}" <<<"$LISTING" || { echo "$APK: missing ${entry}" >&2; exit 1; }
 done
+# arm64 only: a stray x86_64 libbun.so would add ~80 MB for nothing.
+! grep -qF " lib/x86_64/" <<<"$LISTING" || { echo "$APK: unexpected lib/x86_64/" >&2; exit 1; }
 echo "$APK: built"
 
 rm -rf release-assets

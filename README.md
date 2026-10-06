@@ -13,10 +13,11 @@ Releases are automated with [semantic-release](https://semantic-release.gitbook.
 | `dev`  | prerelease | `1.3.0-dev.1` |
 
 On every push to `main`/`dev` the **Release** workflow analyses commits since the last tag. If a release is
-warranted it stamps `version` in `gradle.properties`, builds the signed APK (`pidroid-<version>.apk`), commits
+warranted it stamps `version` in `gradle.properties`, builds the signed, minified (R8) arm64-v8a APK (`pidroid-<version>.apk`, ~40 MB), commits
 `CHANGELOG.md` + `gradle.properties`, tags, publishes a GitHub release, and back-merges `main` into `dev`.
 Pushes to `dev` also open a draft PR `dev` -> `main`. Pull requests run the **Build** workflow.
 CI needs JDK 17 and Bun (the `:app:bundleAgent` Gradle task runs `bun install --frozen-lockfile` and `bun build`).
+Only `arm64-v8a` is shipped (Bun has no 32-bit build, and the x86_64 `libbun.so` is filtered out of the APK).
 `app/tools/openssh/` is a local tool; its outputs are committed under `app/src/main/jniLibs` and CI never runs it.
 
 ### Commit rules (from now on)
