@@ -44,7 +44,16 @@ const UNION_ALPHA_ID = "union-alpha";
 
 const FREE_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-/** IDs that list as *-free but are unusable (no endpoint, ended promo, deprecated). */
+/**
+ * IDs that list as *-free but are unusable.
+ *
+ * Verified against the live gateway on 2026-10-07:
+ *   - mimo-v2.5-free: 410, "Model mimo-v2.5-free has been deprecated."
+ *   - exo-free: gateway answers "Upstream request failed: Endpoint is unavailable."
+ *     (the string comes from Zen's own upstream provider, not from us), i.e. the
+ *     model is listed but has no route behind it yet. Same class of failure as
+ *     the rest of this set, so it is hidden rather than offered and then failed.
+ */
 const DENYLISTED_FREE_IDS = new Set([
   "minimax-m2.5-free",
   "trinity-large-preview-free",
@@ -55,11 +64,13 @@ const DENYLISTED_FREE_IDS = new Set([
   "minimax-m3-free",
   "big-pickle",
   "laguna-s-2.1-free",
+  "mimo-v2.5-free",
+  "exo-free",
   UNION_ALPHA_ID,
 ]);
 
 /** API claims more than testing allows; force text-only. */
-const TEXT_ONLY_IDS = new Set(["mimo-v2.5-free"]);
+const TEXT_ONLY_IDS = new Set<string>();
 
 let opencodeClientVersion = DEFAULT_OPENCODE_CLIENT_VERSION;
 
@@ -192,11 +203,17 @@ function buildModel(id: string, spec: ModelSpec = {}): Model<Api> {
   } as Model<Api>;
 }
 
-/** Verified-live snapshot (2026-09-27) so the provider works offline. */
+/**
+ * Verified-live snapshot (2026-10-07) so the provider works offline.
+ *
+ * Note on credentials: without OPENCODE_API_KEY the provider uses the anonymous
+ * "public" credential, and Zen now serves only space-bunny-free to it -- every
+ * other *-free id answers 403 "OpenCode's free tier can only be used from within
+ * OpenCode". A real Zen key (https://opencode.ai/auth) is what unlocks the rest.
+ */
 const STATIC_MODELS: [string, ModelSpec][] = [
   ["muse-spark-1.2-contributor-free", { name: "Muse Spark 1.2 Contributor Free" }],
   ["muse-spark-1.3-contributor-free", { name: "Muse Spark 1.3 Contributor Free" }],
-  ["mimo-v2.5-free", { name: "Xiaomi MiMo V2.5 Free", context: 200000, output: 32000 }],
   ["ling-3.0-flash-fin-free", { name: "Ling 3.0 Flash Fin Free", context: 262144, output: 32768 }],
   ["nemotron-3-ultra-free", { name: "Nemotron 3 Ultra Free", context: 1000000, output: 128000 }],
   ["nemotron-3.5-lightning-free", { name: "Nemotron 3.5 Lightning Free", context: 262144, output: 262144 }],
