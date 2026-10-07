@@ -1314,22 +1314,22 @@ textarea {
 .sheet .model-group { background-color: color-mix(in srgb, var(--text-primary) 7%, var(--bg-primary)); }
 
 .sheet .model-list { margin: 0; padding: 0; }
-.sheet .model-group { margin: 0; padding: 10px 4px 6px; border-bottom: none; }
+.sheet .model-group { margin: 0; padding: 12px 0 4px; border-bottom: none; }
 .sheet .recents-head { border-bottom: none; }
 .sheet .recents-head + .model-item { margin-top: 0; }
 
-/* Rows read as one rounded stack, like a settings list. */
-.sheet .model-item { margin-bottom: 3px; }
+/* Plain rows on the sheet itself; only a press tints one. */
+.sheet .model-item { margin: 0 -8px; }
 .sheet .model-row {
   position: relative;
-  padding: 12px 44px 12px 16px;
+  padding: 10px 44px 10px 8px;
   border: none;
-  border-radius: 14px;
-  background-color: var(--row-fill);
+  border-radius: 12px;
+  background: none;
   font-size: 0.95rem;
 }
-.sheet .model-row.selected { background-color: var(--row-fill); border: none; }
-.sheet .model-row:active { background-color: color-mix(in srgb, var(--text-primary) 12%, transparent); }
+.sheet .model-row.selected { background: none; border: none; }
+.sheet .model-row:active { background-color: var(--row-fill); }
 
 .model-check {
   position: absolute;
