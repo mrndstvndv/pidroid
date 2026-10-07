@@ -896,8 +896,8 @@ function isOpen(key, byDefault) {
 
 /* ---------- rendering ---------- */
 
-function thinkingBlock(key, block, streaming) {
-  const open = isOpen(key, streaming);
+function thinkingBlock(key, block, streaming, openByDefault = streaming) {
+  const open = isOpen(key, openByDefault);
   const body = escapeHtml(block.text) || "…";
   const label = streaming ? '<span class="shimmer">Thinking…</span>' : `${icon("brain", 13, "ico-inline")} Thought`;
   return `
@@ -936,8 +936,10 @@ function assistantParts(idKey, blocks, live, results, tools, error, ms, branchAf
   const parts = blocks.map((b, i) => {
     const key = `${idKey}-${i}`;
     if (b.type === "thinking") {
-      // Streaming thinking stays open only while it is the block being written.
-      return thinkingBlock(key, b, live && i === blocks.length - 1);
+      // A thought in the streaming partial stays open until its step commits. Closing it the
+      // moment the answer starts shrank the turn under a list pinned to the bottom, so the view
+      // dropped by the box's height and was then pushed back up as the text grew.
+      return thinkingBlock(key, b, live && i === blocks.length - 1, live);
     }
     if (b.type === "toolCall") return toolBlock(`t-${b.id}`, b, tools.get(b.id), results.get(b.id));
     // Committed text arrives pre-rendered from the server (chatview.ts); the streaming
