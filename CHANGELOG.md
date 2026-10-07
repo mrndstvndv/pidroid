@@ -1,3 +1,10 @@
+## [0.4.1](https://github.com/mrndstvndv/pidroid/compare/v0.4.0...v0.4.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **agent:** stop the chat bouncing back up as streamed text arrives ([006a048](https://github.com/mrndstvndv/pidroid/commit/006a048bfec5b84e99426b558e77b965ac993d91))
+
 # [0.4.0](https://github.com/mrndstvndv/pidroid/compare/v0.3.0...v0.4.0) (2026-10-07)
 
 
