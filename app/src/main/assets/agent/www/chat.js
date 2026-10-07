@@ -1080,10 +1080,24 @@ const firstSeen = new Map();
 /** `m12-0` -> `live-0`: the same block before and after a run is committed. */
 const liveAlias = (key) => key.replace(/^m\d+-/, "live-");
 
-function markFreshBlocks(root = messagesEl) {
+/** Blocks still inside their entrance animation, so a streaming render revisits only those and
+ *  the nodes it just created instead of every keyed block in the tail. */
+const freshEls = new Set();
+
+/** `created` is what a patch just (re)built; kept nodes are untouched, so they need no visit. */
+function markFreshIn(created) {
+  const els = new Set(freshEls);
+  for (const root of created) {
+    if (root.dataset?.key) els.add(root);
+    root.querySelectorAll?.("[data-key]").forEach((el) => els.add(el));
+  }
+  markFreshBlocks(messagesEl, [...els].filter((el) => el.isConnected));
+}
+
+function markFreshBlocks(root = messagesEl, only) {
   const now = performance.now();
   const rows = [];
-  root.querySelectorAll("[data-key]").forEach((el) => {
+  (only || root.querySelectorAll("[data-key]")).forEach((el) => {
     const key = el.dataset.key;
     let t = firstSeen.get(key);
     if (t === undefined) t = firstSeen.get(liveAlias(key));
@@ -1098,6 +1112,8 @@ function markFreshBlocks(root = messagesEl) {
   const animate = arriving.length <= 3;
   for (const { el, age } of rows) {
     const live = animate && age < BLOCK_IN_MS;
+    if (live) freshEls.add(el);
+    else freshEls.delete(el);
     if (live) {
       el.classList.add("fresh");
       el.style.animationDelay = `${-(age / 1000).toFixed(3)}s`;
@@ -1235,7 +1251,7 @@ function renderMessages(view, sessionId) {
     pruneFreshBlocks();
     tickDurations(messagesEl);
   } else {
-    markFreshBlocks(dynamicEl);
+    markFreshIn(created);
     tickDurations(dynamicEl);
   }
 }
@@ -1317,6 +1333,7 @@ function render() {
     tailState.slots = [];
     historyState.slots = [];
     firstSeen.clear();
+    freshEls.clear();
     bodyScrollTop.clear();
     unpinnedBodies.clear();
     userOpen.clear();
