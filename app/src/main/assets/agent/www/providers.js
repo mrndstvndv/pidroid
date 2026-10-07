@@ -145,7 +145,7 @@ function renderModels() {
   };
 
   const rowHtml = m => `
-      <div class="model-item">
+      <div class="model-item${m.id === modelData.current ? " current" : ""}">
         <button type="button" class="model-row${m.id === modelData.current ? " selected" : ""}" data-id="${escapeHtml(m.id)}">
           <span class="model-name">${escapeHtml(m.name)}</span>
           <span class="provider-meta"><span class="provider-tag">${escapeHtml(providerOf(m))}</span> · ${escapeHtml(metaOf(m))}</span>
@@ -171,23 +171,143 @@ function renderModels() {
   `).join("") || `<p class="description">No models match. Sign in to more providers in the Providers tab.</p>`;
 
   const def = modelData.models.find(m => m.id === modelData.default);
-  modelDefault.textContent = def ? `Default for new sessions: ${def.name}` : "";
+  modelDefault.textContent = def ? `★ Default: ${def.name}` : "";
   modelCount.textContent = matches.length > shown.length
-    ? `Showing ${shown.length} of ${matches.length} — keep typing`
+    ? `${shown.length} of ${matches.length}, keep typing`
     : `${matches.length} models`;
 }
 
-modelBtn.addEventListener("click", () => {
-  modelModal.hidden = false;
-  modelSearch.value = "";
-  renderModels();
-  loadModels();
-  modelSearch.focus();
+/* ---------- thinking effort ----------
+   The second page of the chooser: the levels the current model supports, as a radio list, applied
+   with Done (or dropped with back). chat.js owns the session's thinking state and the request. */
+const modelPage = document.getElementById("model-page");
+const effortPage = document.getElementById("effort-page");
+const effortRow = document.getElementById("effort-row");
+const effortRowValue = document.getElementById("effort-row-value");
+const effortList = document.getElementById("effort-list");
+const EFFORT_HINTS = {
+  off: "Answers straight away",
+  minimal: "The lightest pass",
+  low: "A quick think first",
+  medium: "Balanced for everyday work",
+  high: "Thinks problems through",
+  xhigh: "The most thorough, and the slowest",
+};
+let effortChoice = null;
+
+function renderEffortRow(info = window.thinkingInfo?.()) {
+  const adjustable = info && info.levels.length > 1;
+  effortRow.disabled = !adjustable;
+  effortRowValue.textContent = !info ? "–" : adjustable ? window.effortLabel(info.current) : "Not adjustable";
+}
+window.onThinkingInfo = (info) => { if (!modelModal.hidden) renderEffortRow(info); };
+
+function renderEffortList() {
+  const info = window.thinkingInfo?.();
+  if (!info) return;
+  effortList.innerHTML = info.levels.map((level) => `
+    <button type="button" class="effort-opt" role="radio" aria-checked="${level === effortChoice}" data-level="${escapeHtml(level)}">
+      <span class="effort-text"><span class="effort-name">${escapeHtml(window.effortLabel(level))}</span>
+        <span class="provider-meta">${escapeHtml(EFFORT_HINTS[level] || "")}</span></span>
+      <span class="effort-radio"></span>
+    </button>`).join("");
+}
+
+/* ---------- motion ----------
+   The sheet rises from below the screen on an M3 Expressive spatial spring, which lands with a
+   slight overshoot, while the scrim fades in on an effects spring. It drops back the same way.
+   Switching pages slides the new one in from its side and springs the sheet to its new height
+   (motion.js has the springs). */
+const sheet = modelModal.querySelector(".sheet");
+let sheetAnims = [];
+let closing = false;
+
+function stopSheetMotion() {
+  for (const a of sheetAnims) a.cancel();
+  sheetAnims = [];
+}
+
+const motion = (el, frames, spring) => {
+  const a = window.M3Motion?.play(el, frames, spring);
+  if (a) sheetAnims.push(a);
+  return a;
+};
+
+const OFFSCREEN = "translateY(calc(100% + 32px))";
+
+function showPage(effort, animate = false) {
+  if (effortPage.hidden === !effort) return;
+  const from = animate ? sheet.offsetHeight : 0;
+  modelPage.hidden = effort;
+  effortPage.hidden = !effort;
+  if (effort) {
+    effortChoice = window.thinkingInfo?.()?.current ?? null;
+    renderEffortList();
+  }
+  if (!animate) return;
+  stopSheetMotion();
+  const to = sheet.offsetHeight;
+  const page = effort ? effortPage : modelPage;
+  const dx = effort ? 40 : -40; // forward comes in from the right, back from the left
+  motion(page, [{ transform: `translateX(${dx}px)` }, { transform: "none" }], "spatialFast");
+  motion(page, [{ opacity: 0 }, { opacity: 1 }], "effectsFast");
+  const grow = from !== to && motion(sheet, [{ height: `${from}px` }, { height: `${to}px` }], "spatialDefault");
+  grow?.finished.then(() => stopSheetMotion(), () => {});
+}
+
+effortRow.addEventListener("click", () => showPage(true, true));
+document.getElementById("effort-back").addEventListener("click", () => showPage(false, true));
+effortList.addEventListener("click", (e) => {
+  const opt = e.target.closest(".effort-opt");
+  if (!opt) return;
+  effortChoice = opt.dataset.level;
+  renderEffortList();
+});
+document.getElementById("effort-done").addEventListener("click", async () => {
+  const info = window.thinkingInfo?.();
+  if (effortChoice && info && effortChoice !== info.current) await window.setThinkingLevel?.(effortChoice);
+  closeModelModal();
 });
 
-document.getElementById("model-close").addEventListener("click", () => (modelModal.hidden = true));
+function openModelModal(effort = false) {
+  closing = false;
+  modelModal.style.pointerEvents = "";
+  stopSheetMotion();
+  modelModal.hidden = false;
+  modelSearch.value = "";
+  showPage(effort);
+  renderEffortRow();
+  renderModels();
+  loadModels();
+  motion(sheet, [{ transform: OFFSCREEN }, { transform: "none" }], "spatialDefault");
+  motion(modelModal, [{ opacity: 0 }, { opacity: 1 }], "effectsDefault");
+}
+
+function closeModelModal() {
+  if (modelModal.hidden || closing) return;
+  closing = true;
+  stopSheetMotion();
+  // The spring's tail is spent off screen; the page underneath is usable from the first frame.
+  modelModal.style.pointerEvents = "none";
+  const done = () => {
+    if (!closing) return; // reopened while it was leaving
+    closing = false;
+    modelModal.style.pointerEvents = "";
+    modelModal.hidden = true;
+    stopSheetMotion();
+    showPage(false);
+  };
+  const drop = motion(sheet, [{ transform: "none" }, { transform: OFFSCREEN }], "spatialDefault");
+  motion(modelModal, [{ opacity: 1 }, { opacity: 0 }], "effectsDefault");
+  if (drop) drop.finished.then(done, () => {});
+  else done();
+}
+
+modelBtn.addEventListener("click", () => openModelModal());
+
+document.getElementById("model-close").addEventListener("click", closeModelModal);
 modelModal.addEventListener("click", (e) => {
-  if (e.target === modelModal) modelModal.hidden = true;
+  if (e.target === modelModal) closeModelModal();
 });
 modelSearch.addEventListener("input", renderModels);
 
@@ -220,7 +340,7 @@ modelList.addEventListener("click", async (e) => {
   try {
     await api("/api/model", { model: row.dataset.id });
     noteRecentModel(row.dataset.id);
-    modelModal.hidden = true;
+    closeModelModal();
     loadModels();
   } catch (err) {
     alert(err.message);
@@ -327,7 +447,8 @@ function closeModal() {
 
 document.getElementById("login-close").addEventListener("click", closeModal);
 registerBackLayer(110, () => !loginModal.hidden, closeModal);
-registerBackLayer(100, () => !modelModal.hidden, () => (modelModal.hidden = true));
+// Back leaves the effort page first, then closes the chooser.
+registerBackLayer(100, () => !modelModal.hidden && !closing, () => (effortPage.hidden ? closeModelModal() : showPage(false, true)));
 
 function showKeyForm(provider) {
   openModal(`${provider.name} API key`);

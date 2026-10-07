@@ -4,6 +4,7 @@
 const LUCIDE = {
   // Not used by the UI itself: tool views name an icon, and a graph is the one the set lacked.
   "activity": `<path d="M22 12h-4l-3 9L9 3l-3 9H2" />`,
+  "arrow-up": `<path d="m5 12 7-7 7 7" /> <path d="M12 19V5" />`,
   "arrow-left": `<path d="m12 19-7-7 7-7" /> <path d="M19 12H5" />`,
   "brain": `<path d="M12 18V5" /> <path d="M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4" /> <path d="M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5" /> <path d="M17.997 5.125a4 4 0 0 1 2.526 5.77" /> <path d="M18 18a4 4 0 0 0 2-7.464" /> <path d="M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517" /> <path d="M6 18a4 4 0 0 1-2-7.464" /> <path d="M6.003 5.125a4 4 0 0 0-2.526 5.77" />`,
   "check": `<path d="M20 6 9 17l-5-5" />`,

@@ -20,7 +20,7 @@ const cacheLabel = document.getElementById("cache-label");
 const ctxPct = document.getElementById("ctx-pct");
 const ctxPill = document.getElementById("ctx-pill");
 const costLabel = document.getElementById("cost-label");
-const thinkingSelect = document.getElementById("thinking-select");
+const modelBtnEffort = document.getElementById("model-btn-effort");
 
 // Sections the user opened / closed by hand, keyed by data-key; everything else follows the defaults.
 const userOpen = new Set();
@@ -656,195 +656,18 @@ function hostOf(url) {
   }
 }
 
-/* ---------- plots ----------
-   A curve, drawn from a {"plot":...} payload that the tool left as the last line of its own
-   output (extensions/plot.ts), the same way web_search leaves text its cards are parsed back out
-   of. Nothing here evaluates the expression: the extension sampled the curve server-side and only
-   numbers crossed the wire, so this is a mapping from samples to pixels and nothing more. The
-   x values are not even sent -- xStep and xMin rebuild them -- which halves the payload and makes
-   it impossible for the two to disagree.
-
-   Anything that does not parse, or parses into something implausible, returns "" and the caller
-   falls back to the raw output: a malformed payload can cost the drawing, never the record. */
-
-const PLOT_W = 640;
-const PLOT_H = 300;
-const PLOT_PAD = { left: 48, right: 16, top: 16, bottom: 30 };
-/** More points than this and the DOM, not the maths, is the bottleneck. */
-const PLOT_MAX_POINTS = 1600;
-/** How fast the animated dot travels, in graph units (the 640-wide viewBox) per second. */
-const PLOT_SPEED = 70;
-/** Makes the path ids unique: two graphs on one page would otherwise share #plot-s0, and an
- *  <mpath> would send the second one's dot along the first one's curve. */
-let plotSeq = 0;
-
-const isNum = (v) => typeof v === "number" && Number.isFinite(v);
-
-/** A round-ish step (1, 2, 5 x 10^n) that lands near `target` intervals across [lo, hi]. */
-function niceStep(span, target) {
-  const raw = Math.abs(span) / Math.max(1, target);
-  if (!isNum(raw) || raw <= 0) return 1;
-  const exp = Math.floor(Math.log10(raw));
-  const pow = 10 ** exp;
-  for (const f of [1, 2, 5, 10]) if (raw <= f * pow) return f * pow;
-  return 10 * pow;
+/** A shell call reads like a terminal: the command after a prompt, its output underneath, in one
+ *  panel. The output is the scrolling part (.tool-out), so a long log follows its tail while it
+ *  runs and keeps the reader's place once they scroll up in it. */
+function terminalHtml(command, output, view) {
+  const out = output && !view?.hideOutput
+    ? `<pre class="term-out tool-out">${escapeHtml(output)}</pre>`
+    : output === undefined ? "" : `<div class="term-empty">no output</div>`;
+  return `<div class="term"><pre class="term-cmd"><span class="term-prompt">$</span>${escapeHtml(command)}</pre>${out}</div>`;
 }
 
-/** Tick labels: exact enough to read, short enough to fit under the axis. */
-function fmtTick(v) {
-  if (v === 0) return "0";
-  const a = Math.abs(v);
-  if (a >= 1e6 || a < 1e-3) return v.toExponential(0).replace("e+", "e");
-  return String(Number(v.toPrecision(4)));
-}
-
-function plotTicks(lo, hi, target) {
-  const step = niceStep(hi - lo, target);
-  if (!isNum(step) || step <= 0) return [];
-  const out = [];
-  // A step that is a rounding error against the window would loop forever; the guard is the cap.
-  for (let v = Math.ceil(lo / step) * step, i = 0; v <= hi + step * 1e-6 && i < 24; v += step, i++) {
-    out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
-  }
-  return out;
-}
-
-function plotPreview(output, live = false) {
-  const lines = String(output).split("\n");
-  let line = "";
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].startsWith('{"plot":')) { line = lines[i]; break; }
-  }
-  if (!line) return "";
-
-  let p;
-  try { p = JSON.parse(line).plot; } catch { return ""; }
-  if (!p || typeof p !== "object") return "";
-  if (!isNum(p.xMin) || !isNum(p.xStep) || p.xStep === 0 || !isNum(p.yMin) || !isNum(p.yMax)) return "";
-  if (!Array.isArray(p.y) || p.y.length < 2 || p.yMax <= p.yMin) return "";
-  const expr = typeof p.expr === "string" ? p.expr : "";
-  if (p.y.some((v) => v !== null && !isNum(v))) return "";
-  const breaks = Array.isArray(p.breaks) ? p.breaks.filter((i) => Number.isInteger(i) && i > 0 && i < p.y.length) : [];
-
-  let ys = p.y;
-  let brk = breaks;
-  if (ys.length > PLOT_MAX_POINTS) {
-    // Thin rather than truncate: the whole window matters more than the last sample.
-    const keep = (i) => i % 2 === 0 || i === ys.length - 1;
-    ys = ys.filter((_, i) => keep(i));
-    brk = brk.filter((i) => keep(i)).map((i) => Math.floor(i / 2));
-  }
-
-  const left = PLOT_PAD.left;
-  const top = PLOT_PAD.top;
-  const width = PLOT_W - PLOT_PAD.left - PLOT_PAD.right;
-  const height = PLOT_H - PLOT_PAD.top - PLOT_PAD.bottom;
-  const last = ys.length - 1;
-  const px = (i) => left + (i / last) * width;
-  const py = (v) => top + (1 - (v - p.yMin) / (p.yMax - p.yMin)) * height;
-  const r1 = (n) => Math.round(n * 10) / 10;
-  const xOf = (i) => p.xMin + i * p.xStep;
-
-  const grid = [];
-  for (const t of plotTicks(p.xMin, xOf(last), 5)) {
-    const x = r1(px((t - p.xMin) / p.xStep));
-    grid.push(`<line class="plot-grid" x1="${x}" y1="${top}" x2="${x}" y2="${top + height}" />`);
-    grid.push(`<text class="plot-tick" x="${x}" y="${top + height + 14}" text-anchor="middle">${escapeHtml(fmtTick(t))}</text>`);
-  }
-  for (const t of plotTicks(p.yMin, p.yMax, 4)) {
-    const y = r1(py(t));
-    grid.push(`<line class="plot-grid" x1="${left}" y1="${y}" x2="${left + width}" y2="${y}" />`);
-    grid.push(`<text class="plot-tick" x="${left - 6}" y="${y + 3}" text-anchor="end">${escapeHtml(fmtTick(t))}</text>`);
-  }
-
-  // The axes are drawn only where they fall inside the window, and heavier than the grid.
-  const axes = [];
-  if (p.yMin < 0 && p.yMax > 0) {
-    const y = r1(py(0));
-    axes.push(`<line class="plot-axis" x1="${left}" y1="${y}" x2="${left + width}" y2="${y}" />`);
-  }
-  if (p.xMin < 0 && xOf(last) > 0) {
-    const x = r1(px((0 - p.xMin) / p.xStep));
-    axes.push(`<line class="plot-axis" x1="${x}" y1="${top}" x2="${x}" y2="${top + height}" />`);
-  }
-
-  // One stroke per continuous run of the curve, kept as point lists until the markup is built:
-  // a null sample, a sample outside the window and a marked break all end a stroke, so a pole is a
-  // gap reaching the edge of the graph rather than a line up its side. The points are needed as
-  // numbers first because the animation measures each stroke's arc length before drawing it.
-  const stops = new Set(brk);
-  const segments = [];
-  let seg = [];
-  const flush = () => {
-    if (seg.length > 1) segments.push(seg);
-    seg = [];
-  };
-  for (let i = 0; i < ys.length; i++) {
-    const v = ys[i];
-    if (v === null || v < p.yMin || v > p.yMax || stops.has(i)) { flush(); continue; }
-    seg.push([r1(px(i)), r1(py(v))]);
-  }
-  flush();
-
-  const d = (pts) => pts.map(([x, y], k) => `${k ? "L" : "M"}${x} ${y}`).join(" ");
-  const uid = `plot${++plotSeq}`;
-  const paths = segments.map((pts, i) => `<path id="${uid}-s${i}" class="plot-curve" d="${d(pts)}" />`);
-
-  /* ---------- animation ----------
-     p.animate runs a single dot along the curve, from the left of the window to the right.
-
-     SMIL rather than CSS, deliberately. The dot has to follow the curve in the SVG's own user
-     units, so it stays glued to the line whatever width the graph is drawn at; CSS offset-path
-     would be working in CSS pixels on an SVG element, which is unevenly supported and drifts off
-     the curve as the graph scales. SMIL moves along a path in user units natively.
-
-     One dot per stroke, each offset to start at its share of the arc length, so the dot keeps one
-     steady speed across strokes instead of racing through a short branch and crawling along a long
-     one. Each repeats, so it loops for as long as the row is open. Where the curve leaves the
-     window the dot jumps to the next stroke -- the same jump the curve makes, rather than one
-     smoothed over a gap the graph is trying to show.
-
-     Nothing animates while the call is still running (live): the list is rebuilt on every push of
-     a streaming run, and SMIL starts over each time, which would look frozen rather than animated.
-     It begins once the result is committed and the view settles. */
-  let motion = "";
-  if (p.animate && !live && segments.length) {
-    const lengths = segments.map((pts) =>
-      pts.slice(1).reduce((sum, q, i) => sum + Math.hypot(q[0] - pts[i][0], q[1] - pts[i][1]), 0),
-    );
-    const total = lengths.reduce((a, b) => a + b, 0);
-    const dur = Math.min(14, Math.max(2.5, total / PLOT_SPEED)).toFixed(2);
-    const bits = [];
-    let passed = 0;
-    segments.forEach((pts, i) => {
-      const begin = total && passed ? ` begin="-${((passed / total) * Number(dur)).toFixed(2)}s"` : "";
-      passed += lengths[i];
-      bits.push(
-        `<circle class="plot-dot" r="3.5">` +
-          `<animateMotion dur="${dur}s"${begin} repeatCount="indefinite" rotate="auto">` +
-          `<mpath href="#${uid}-s${i}" xlink:href="#${uid}-s${i}" />` +
-          `</animateMotion>` +
-          `</circle>`,
-      );
-    });
-    motion = bits.join("");
-  }
-
-  const caption = expr ? `y = ${escapeHtml(expr)}` : "graph";
-  const alt = `${caption}, x from ${fmtTick(p.xMin)} to ${fmtTick(xOf(last))}, y from ${fmtTick(p.yMin)} to ${fmtTick(p.yMax)}`;
-  return (
-    `<div class="plot">` +
-    `<svg viewBox="0 0 ${PLOT_W} ${PLOT_H}" role="img" aria-label="${escapeHtml(alt)}" preserveAspectRatio="xMidYMid meet">` +
-    grid.join("") + axes.join("") + paths.join("") + motion +
-    `</svg>` +
-    `<div class="plot-cap">${caption}<span class="plot-range">${escapeHtml(fmtTick(p.xMin))} … ${escapeHtml(fmtTick(xOf(last)))}</span></div>` +
-    `</div>`
-  );
-}
-
-/** The expanded body of a tool call: a real preview where there is one, JSON otherwise.
- *  `live` is true while the call is still running, which is what stops a plot from animating. */
-function toolBodyHtml(call, args, output, live = false) {
+/** The expanded body of a tool call: a real preview where there is one, JSON otherwise. */
+function toolBodyHtml(call, args, output) {
   const view = toolView(call.name);
   const body = view?.body ?? defaultBody(call.name);
   // The result text is the tool's own account of what happened, so it rides along unless the view
@@ -862,12 +685,6 @@ function toolBodyHtml(call, args, output, live = false) {
     if (results) return results;
   }
 
-  if (body === "plot") {
-    // The curve is the whole point of the call, so it replaces the text; a payload that will not
-    // parse leaves the text below, which is then the only copy of what was plotted.
-    const plot = plotPreview(output, live);
-    if (plot) return plot;
-  }
 
   // Nothing to show for the result yet (a call still streaming): fall through to the arguments, so
   // the body is not blank while it runs.
@@ -875,9 +692,7 @@ function toolBodyHtml(call, args, output, live = false) {
     return toolLabel("output") + `<pre class="code tool-out">${escapeHtml(output)}</pre>`;
   }
 
-  if (body === "command" && typeof args.command === "string") {
-    return toolLabel(view?.label ?? "command") + `<pre class="code">${escapeHtml(args.command)}</pre>` + outputHtml;
-  }
+  if (body === "command" && typeof args.command === "string") return terminalHtml(args.command, output, view);
 
   let preview = "";
   if (body === "diff") preview = editPreview(args);
@@ -907,7 +722,7 @@ function thinkingBlock(key, block, streaming, openByDefault = streaming) {
     </details>`;
 }
 
-function toolBlock(key, call, state, result) {
+function toolBlockHtml(key, call, state, result) {
   const running = state && state.status !== "done" && !result;
   const failed = result?.isError;
   // No done/pending badge: a finished call is indistinguishable from the others. Only the
@@ -919,51 +734,311 @@ function toolBlock(key, call, state, result) {
   // web_search and edit are open by default because their body is the point of the call; anything
   // else stays closed until asked. A view can decide for its own tool either way.
   const openByDefault = view?.open ?? (call.name === "web_search" || call.name === "edit");
+  // A shell row is its command: the tool's name would only repeat what the icon already says.
+  const shell = (view?.body ?? defaultBody(call.name)) === "command" && typeof args.command === "string";
   return `
-    <details class="tool${failed ? " failed" : ""}${call.name === "edit" ? " edit-tool" : ""}" data-key="${key}" ${isOpen(key, openByDefault) ? "open" : ""}>
+    <details class="tool${failed ? " failed" : ""}${call.name === "edit" ? " edit-tool" : ""}${shell ? " shell-tool" : ""}" data-key="${key}" ${isOpen(key, openByDefault) ? "open" : ""}>
       <summary>
         <span class="tool-ico">${icon(view?.icon ?? toolIcon(call.name), 14)}</span>
-        <span class="tool-name">${escapeHtml(call.name)}</span>
-        <span class="tool-sum">${escapeHtml(toolSummary(call.name, args))}</span>
+        ${shell ? "" : `<span class="tool-name">${escapeHtml(call.name)}</span>`}
+        <span class="tool-sum${shell ? " tool-sum-cmd" : ""}">${escapeHtml(toolSummary(call.name, args))}</span>
         ${running ? durHtml(undefined, call.at) : durHtml(call.ms, undefined)}
         ${status}
       </summary>
-      <div class="tool-body">${toolBodyHtml(call, args, output, running)}</div>
+      <div class="tool-body">${toolBodyHtml(call, args, output)}</div>
     </details>`;
 }
 
-function assistantParts(idKey, blocks, live, results, tools, error, ms, branchAfter, messageId) {
-  const parts = blocks.map((b, i) => {
-    const key = `${idKey}-${i}`;
-    if (b.type === "thinking") {
-      // A thought in the streaming partial stays open until its step commits. Closing it the
-      // moment the answer starts shrank the turn under a list pinned to the bottom, so the view
-      // dropped by the box's height and was then pushed back up as the text grew.
-      return thinkingBlock(key, b, live && i === blocks.length - 1, live);
-    }
-    if (b.type === "toolCall") return toolBlock(`t-${b.id}`, b, tools.get(b.id), results.get(b.id));
-    // Committed text arrives pre-rendered from the server (chatview.ts); the streaming
-    // partial has no html yet, so it is rendered here.
-    if (!b.text.trim()) return "";
-    const open = '<div class="message assistant"><div class="message-content">';
-    if (b.html !== undefined) return `${open}${b.html}</div></div>`;
-    return { open, into: ".message-content", close: "</div></div>", parts: mdChunks(b.text) };
-  });
-  if (error) parts.push(`<div class="message assistant error"><div class="message-content">${escapeHtml(error)}</div></div>`);
-  // One dim line per assistant message: how long the model took to think it through and write
-  // it. Tool calls carry their own durations on their rows.
-  if (!live && ms !== undefined) parts.push(`<div class="message-meta">${iconTag("clock", 12, "dim")} Worked ${fmtDur(ms)}</div>`);
-  // data-branch-after is the entry to branch at for a session starting just after this answer. It is
-  // only set when the server marked the message as a valid branch point (no unanswered tool calls).
-  const fork = branchAfter === undefined ? "" : ` data-branch-after="${branchAfter}"`;
-  const identity = messageId === undefined ? "" : ` data-message-id="${messageId}"`;
-  return { key: idKey, open: `<div class="turn"${fork}${identity}>`, parts: parts.filter((p) => p), close: "</div>" };
+/** A finished call's row only changes when the user opens or closes it or an extension changes
+ *  its view, but a run in progress re-renders every row since its last text several times a
+ *  second, and some rows are costly to build (an edit's diff). Rows with a result are reused. */
+const toolRowCache = new Map();
+
+function toolBlock(key, call, state, result) {
+  if (!result) return toolBlockHtml(key, call, state, result);
+  const open = userOpen.has(key) ? 1 : userClosed.has(key) ? 0 : -1;
+  const hit = toolRowCache.get(key);
+  if (hit && hit.call === call && hit.result === result && hit.open === open && hit.views === viewsSignature) return hit.html;
+  const html = toolBlockHtml(key, call, state, result);
+  toolRowCache.set(key, { call, result, open, views: viewsSignature, html });
+  return html;
 }
 
-function assistantHtml(...args) {
-  const t = assistantParts(...args);
-  return t.open + t.parts.join("") + t.close;
+/* ---------- work groups ----------
+   The agent's tool calls and thoughts are folded into one quiet line per stretch of work --
+   "Ran 3 commands, read a file ›" -- and only what it says to the reader (its text, errors, the
+   artifacts it shows) stays in the open. A stretch ends wherever something visible comes between
+   two steps, so a run that narrates as it goes reads as narration with folded work in between.
+   Tapping the line opens the same rows the transcript always had.
+
+   A stretch can span several assistant messages (call, result, next call, ...), so the
+   transcript is laid out as one flow of items rather than one box per message. */
+
+/** How a tool's calls are counted on a group's line: [one, many], many with {n} in it. A tool
+ *  can say it itself with a `verb` in its view; anything without one is counted as "used N tools". */
+const DEFAULT_VERBS = {
+  bash: ["ran a command", "ran {n} commands"],
+  read: ["read a file", "read {n} files"],
+  edit: ["edited a file", "made {n} edits"],
+  write: ["wrote a file", "wrote {n} files"],
+  grep: ["searched the code", "ran {n} searches"],
+  find: ["looked for files", "looked for files {n} times"],
+  ls: ["listed a folder", "listed {n} folders"],
+  web_search: ["searched the web", "searched the web {n} times"],
+  web_fetch: ["read a page", "read {n} pages"],
+};
+
+function toolVerb(name) {
+  const v = toolView(name)?.verb;
+  if (v && typeof v.one === "string" && typeof v.many === "string") return [v.one, v.many];
+  return DEFAULT_VERBS[name] || null;
 }
+
+/** The tool whose calls are shown as artifact cards instead of being folded away. */
+const SHOW_TOOL = "show";
+
+/** {path, title, height} from the payload a show call leaves as the last line of its result. */
+function artifactOf(result) {
+  if (!result || result.isError || typeof result.text !== "string") return null;
+  const lines = result.text.trimEnd().split("\n");
+  const line = lines[lines.length - 1];
+  if (!line.startsWith('{"artifact":')) return null;
+  try {
+    const a = JSON.parse(line).artifact;
+    return a && typeof a.path === "string" ? a : null;
+  } catch {
+    return null;
+  }
+}
+
+const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/** The line a folded group shows: what was done, in the order it was first done. */
+function groupLabel(entries) {
+  const phrases = new Map(); // verb (or "") -> {verb, n}
+  let thoughtMs = 0;
+  let thoughts = 0;
+  for (const e of entries) {
+    if (e.type === "thinking") {
+      thoughts++;
+      thoughtMs += e.block.ms || 0;
+      continue;
+    }
+    const verb = toolVerb(e.call.name);
+    const id = verb ? verb[0] : "";
+    const slot = phrases.get(id) || { verb, n: 0 };
+    slot.n++;
+    phrases.set(id, slot);
+  }
+  if (!phrases.size) return thoughts && thoughtMs >= 1000 ? `Thought for ${fmtDur(thoughtMs)}` : "Thought";
+  return capitalize([...phrases.values()].map(({ verb, n }) => {
+    if (!verb) return n === 1 ? "used a tool" : `used ${n} tools`;
+    return n === 1 ? verb[0] : verb[1].replace("{n}", String(n));
+  }).join(", "));
+}
+
+/**
+ * Lays out a stretch of the transcript as display items. `start` carries the group numbering
+ * across the split between committed history and the live tail ({userId, n}): a group's key is
+ * the prompt it answers plus its ordinal, which stays the same while the run streams and after
+ * it commits, so an opened group stays open.
+ */
+function makeFlow(ctx, start = { userId: "0", n: 0 }) {
+  const items = [];
+  let group = null;
+  let { userId, n } = start;
+  const seal = () => {
+    if (group) items.push(group);
+    group = null;
+  };
+  return {
+    items,
+    state: () => ({ userId, n }),
+    item(item) { seal(); items.push(item); },
+    user(id) { seal(); userId = String(id); n = 0; },
+    work(entry) {
+      if (!group) group = { kind: "group", key: `g${userId}-${n++}`, entries: [] };
+      group.entries.push(entry);
+    },
+    /** One assistant message: committed (`m` is the message) or the streaming partial (`live`). */
+    assistant(idKey, blocks, live, m) {
+      const branch = m?.branchAfter === undefined ? "" : ` data-branch-after="${m.branchAfter}"`;
+      blocks.forEach((b, i) => {
+        const key = `${idKey}-${i}`;
+        if (b.type === "thinking") {
+          // A thought still in the streaming partial stays open until its step commits: closing it
+          // the moment the answer started shrank an opened group under a list pinned to the bottom.
+          this.work({ type: "thinking", key, block: b, streaming: live && i === blocks.length - 1, live });
+        } else if (b.type === "toolCall") {
+          const result = ctx.results.get(b.id);
+          if (b.name === SHOW_TOOL && !result?.isError) this.item({ kind: "artifact", key: `a-${b.id}`, call: b, result });
+          else this.work({ type: "tool", call: b, state: ctx.tools.get(b.id), result });
+        } else if (b.text.trim()) {
+          const open = `<div class="message assistant"${branch}><div class="message-content">`;
+          this.item(b.html !== undefined
+            ? { kind: "html", key, html: `${open}${b.html}</div></div>` }
+            : { kind: "wrap", key, open, into: ".message-content", close: "</div></div>", parts: mdChunks(b.text) });
+        }
+      });
+      if (!m) return;
+      const error = m.stop === "error" || m.stop === "aborted" ? (m.error || (m.stop === "aborted" ? "Stopped" : "")) : "";
+      if (error) this.item({ kind: "html", key: `${idKey}-err`, html: `<div class="message assistant error"><div class="message-content">${escapeHtml(error)}</div></div>` });
+      // How long the model took over an answer. A step that ends in tool calls is part of the work
+      // and is timed on its rows instead, or every step would put a line between the groups.
+      if (m.ms !== undefined && !blocks.some((b) => b.type === "toolCall")) {
+        this.item({ kind: "html", key: `${idKey}-meta`, html: `<div class="message-meta"${branch}>${iconTag("clock", 12, "dim")} Worked ${fmtDur(m.ms)}</div>` });
+      }
+    },
+    finish() { seal(); return items; },
+  };
+}
+
+/** Where the live tail starts: the last stretch of a run that can still change. While the agent
+ *  works, that is everything since its last visible text (or since the prompt), so a group that
+ *  is still growing is laid out in one piece; once it stops, the whole transcript is history.
+ *  The cut lands on a message boundary with nothing foldable on both sides of it, or one group
+ *  would be drawn as two lines, half in history and half in the tail. */
+function tailStart(messages, busy) {
+  if (!busy) return messages.length;
+  const visible = (b) => b.type === "text" && b.text.trim();
+  const work = (b) => b.type === "thinking" || b.type === "toolCall";
+  for (let k = messages.length - 1; k >= 0; k--) {
+    const m = messages[k];
+    if (m.role === "user") return k + 1;
+    if (m.role !== "assistant") continue;
+    const blocks = m.blocks || [];
+    const first = blocks.findIndex(visible);
+    if (first < 0) continue;
+    if (!blocks.slice(0, first).some(work)) return k;
+    // It opens with work, which joins any work just before it: keep walking back unless the
+    // previous step ended on something visible.
+    let j = k - 1;
+    while (j >= 0 && messages[j].role === "tool") j--;
+    const prev = messages[j];
+    const prevBlocks = (prev?.blocks || []).filter((b) => visible(b) || work(b));
+    if (!prev || prev.role !== "assistant" || !work(prevBlocks[prevBlocks.length - 1] || {})) return k;
+  }
+  return 0;
+}
+
+/** Adds committed messages to a flow. */
+function flowMessages(flow, messages) {
+  for (const m of messages) {
+    if (m.role === "event" && (m.modelChange || m.thinkingChange)) {
+      const change = m.modelChange || m.thinkingChange;
+      const isModel = !!m.modelChange;
+      const label = isModel ? "Model switched" : "Thinking effort changed";
+      flow.item({ kind: "html", key: `mc${m.id}`, html: `<div class="message model-event" data-key="mc${escapeHtml(m.id)}">${iconTag(isModel ? "cpu" : "brain", 13, "dim")}<span>${label} from <strong>${escapeHtml(change.from)}</strong> to <strong>${escapeHtml(change.to)}</strong></span></div>` });
+    } else if (m.role === "user") {
+      flow.user(m.id);
+      // data-branch-before points at the entry ahead of this prompt, so a new session can start there
+      // and replay it. Absent on the first message of a conversation, which has nothing before it.
+      const fork = m.branchBefore === undefined ? "" : ` data-branch-before="${m.branchBefore}"`;
+      flow.item({ kind: "html", key: `u${m.id}`, html: `<div class="message user" data-key="u${m.id}"${fork}><div class="message-content">${escapeHtml(m.text)}</div></div>` });
+    } else if (m.role === "assistant") {
+      flow.assistant(`m${m.id}`, m.blocks || [], false, m);
+    }
+  }
+}
+
+function artifactCard(item, sessionId, superseded) {
+  const args = item.call.args && typeof item.call.args === "object" ? item.call.args : {};
+  const a = artifactOf(item.result);
+  const title = escapeHtml(a?.title || args.title || "Artifact");
+  if (!a) {
+    return `<div class="artifact-card pending" data-key="${item.key}"><div class="artifact-card-head">` +
+      `${icon("sparkles", 14)}<span class="artifact-card-title"><span class="shimmer">Preparing ${title}…</span></span></div></div>`;
+  }
+  const path = String(a.path);
+  const url = `/workspace/${encodeURIComponent(sessionId ?? "")}/${path.split("/").map(encodeURIComponent).join("/")}`;
+  const height = Math.max(120, Math.min(900, Number(a.height) || 360));
+  // Same sandbox as the Files viewer: scripts run, but in an opaque origin that cannot reach the app.
+  return `<div class="artifact-card${superseded ? " superseded" : ""}" data-key="${item.key}">` +
+    `<div class="artifact-card-head">${icon("sparkles", 14)}<span class="artifact-card-title">${title}</span>` +
+    (superseded ? `<span class="artifact-card-note">updated below</span>` : "") +
+    `<button type="button" class="artifact-card-open" data-act="open-artifact" data-path="${escapeHtml(path)}" aria-label="Open full screen" title="Open full screen">${icon("external-link", 15)}</button></div>` +
+    `<iframe class="artifact-card-frame" sandbox="allow-scripts allow-forms allow-modals allow-popups" loading="lazy" src="${escapeHtml(url)}" style="height:${height}px"></iframe>` +
+    `</div>`;
+}
+
+/** Display items as patch specs (see syncParts). `active` is the group still being worked on. */
+function itemSpecs(items, sessionId, active) {
+  return items.map((item) => {
+    if (item.kind === "html") return { key: item.key, html: item.html };
+    if (item.kind === "wrap") return item;
+    if (item.kind === "artifact") {
+      const path = artifactOf(item.result)?.path;
+      return { key: item.key, html: artifactCard(item, sessionId, path !== undefined && latestShown.has(path) && latestShown.get(path) !== item.call.id) };
+    }
+    const entries = item.entries;
+    const running = item === active && entries.some((e) => e.type === "tool" && !e.result);
+    const thinking = item === active && entries[entries.length - 1]?.type === "thinking" && entries[entries.length - 1].streaming;
+    const failed = entries.filter((e) => e.type === "tool" && e.result?.isError).length;
+    const label = running ? '<span class="shimmer">Running</span>' : thinking ? '<span class="shimmer">Thinking</span>' : escapeHtml(groupLabel(entries));
+    const head = `<span class="work-label">${label}</span>` +
+      (failed ? `<span class="work-failed">· ${failed} failed</span>` : "") +
+      `<span class="work-chev">${icon("chevron-right", 15)}</span>`;
+    const open = isOpen(item.key, false);
+    return {
+      key: item.key,
+      sig: `${item.key}|${open}`,
+      open: `<details class="work" data-key="${item.key}"${open ? " open" : ""}><summary class="work-head">${head}</summary><div class="work-body">`,
+      head,
+      headInto: ".work-head",
+      into: ".work-body",
+      close: "</div></details>",
+      parts: entries.map((e) => e.type === "thinking"
+        ? thoughtRow(e)
+        : toolBlock(`t-${e.call.id}`, e.call, e.state, e.result)),
+    };
+  });
+}
+
+/** A committed thought never changes, so its row is reused like a finished tool's (see toolBlock). */
+function thoughtRow(e) {
+  if (e.live) return thinkingBlock(e.key, e.block, e.streaming, true);
+  const open = userOpen.has(e.key) ? 1 : userClosed.has(e.key) ? 0 : -1;
+  const hit = toolRowCache.get(e.key);
+  if (hit && hit.block === e.block && hit.open === open) return hit.html;
+  const html = thinkingBlock(e.key, e.block, false, false);
+  toolRowCache.set(e.key, { block: e.block, open, html });
+  return html;
+}
+
+/** path -> id of the latest show call for it. A file shown again is the same file, so the
+ *  earlier card already shows the new content; it says so rather than pose as the old version. */
+const latestShown = new Map();
+
+function noteShown(messages, results) {
+  for (const m of messages) {
+    if (m.role !== "assistant") continue;
+    for (const b of m.blocks || []) {
+      if (b.type !== "toolCall" || b.name !== SHOW_TOOL) continue;
+      const path = artifactOf(results.get(b.id))?.path;
+      if (path) latestShown.set(path, b.id);
+    }
+  }
+}
+
+/** The artifacts shown in the open session, newest first, for the Files screen. */
+window.chatShownArtifacts = () => {
+  const out = [];
+  const seen = new Set();
+  const messages = payload?.view?.messages || [];
+  const results = new Map(messages.filter((m) => m.role === "tool").map((m) => [m.callId, m]));
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const blocks = messages[i].role === "assistant" ? messages[i].blocks || [] : [];
+    for (let j = blocks.length - 1; j >= 0; j--) {
+      const b = blocks[j];
+      if (b.type !== "toolCall" || b.name !== SHOW_TOOL) continue;
+      const a = artifactOf(results.get(b.id));
+      if (!a || seen.has(a.path)) continue;
+      seen.add(a.path);
+      out.push({ path: a.path, title: a.title || b.args?.title || a.path });
+    }
+  }
+  return out;
+};
 
 /* ---------- live tail patching ----------
    The tail (the pending tool message, the streaming partial, the queue) used to be thrown away
@@ -982,23 +1057,35 @@ function parseEl(html) {
 }
 
 /** Brings the children of `container` in line with `want`, keeping every node whose html is
- *  unchanged. A wanted part is html, or {open, into, close, parts} for a wrapper whose own
- *  children are synced the same way. New or replaced top-level nodes go into `created`. */
+ *  unchanged. A wanted part is html, a keyed {key, html}, or a wrapper {key?, open, into?, close,
+ *  parts, sig?, head?, headInto?} whose own children are synced the same way. A wrapper is kept
+ *  while its `sig` (default: its opening html) holds; its `head`, if any, is a header swapped in
+ *  place, so a group's line can change without rebuilding the rows inside it. New or replaced
+ *  top-level nodes go into `created`. */
 function syncParts(container, have, want, created) {
   for (let j = 0; j < want.length; j++) {
     const w = want[j];
-    const leaf = typeof w === "string";
-    const sig = leaf ? w : w.open;
+    const leaf = typeof w === "string" || w.html !== undefined;
+    const html = typeof w === "string" ? w : w.html;
+    const key = typeof w === "string" ? undefined : w.key;
+    const sig = leaf ? html : (w.sig ?? w.open);
     const h = have[j];
-    if (h && h.sig === sig) {
-      if (!leaf) syncParts(h.target, h.kids, w.parts, created);
+    if (h && h.key === key && h.sig === sig) {
+      if (!leaf) {
+        if (w.head !== undefined && w.head !== h.head) {
+          h.el.querySelector(w.headInto).innerHTML = w.head;
+          h.head = w.head;
+        }
+        syncParts(h.target, h.kids, w.parts, created);
+      }
       continue;
     }
-    const el = parseEl(leaf ? w : w.open + w.close);
-    const entry = { sig, el };
+    const el = parseEl(leaf ? html : w.open + w.close);
+    const entry = { key, sig, el };
     if (!leaf) {
       entry.target = w.into ? el.querySelector(w.into) : el;
       entry.kids = [];
+      entry.head = w.head;
       syncParts(entry.target, entry.kids, w.parts, []);
     }
     created.push(el);
@@ -1017,43 +1104,11 @@ function placed(el) {
   return parent?.classList.contains("code-wrap") ? parent : el;
 }
 
-/** Items are {key, open, parts, close} turns or {key, parts:[html]} loose elements. Returns the
- *  nodes that were (re)created, so the caller only restores state on those. */
+/** Syncs a list root with its items and returns the nodes that were (re)created, so the caller
+ *  only restores state on those. */
 function patchList(root, items, state) {
-  const slots = state.slots;
   const created = [];
-  let i = 0;
-  for (; i < items.length && i < slots.length; i++) {
-    const item = items[i], slot = slots[i];
-    if (slot.key !== item.key || slot.open !== item.open) break;
-    if (slot.wrapper) {
-      syncParts(slot.wrapper, slot.parts, item.parts, created);
-    } else if (slot.parts[0].sig !== item.parts[0]) {
-      const el = parseEl(item.parts[0]);
-      slot.parts[0].el.replaceWith(el);
-      slot.parts[0] = { sig: item.parts[0], el };
-      created.push(el);
-    }
-  }
-  // From the first mismatch on, rebuild: a changed key means a different message anyway.
-  for (let k = i; k < slots.length; k++) (slots[k].wrapper || slots[k].parts[0].el).remove();
-  slots.length = i;
-  for (; i < items.length; i++) {
-    const item = items[i];
-    if (item.open === undefined) {
-      const el = parseEl(item.parts[0]);
-      root.append(el);
-      created.push(el);
-      slots.push({ key: item.key, wrapper: null, parts: [{ sig: item.parts[0], el }] });
-      continue;
-    }
-    const wrapper = parseEl(item.open + item.close);
-    const parts = [];
-    syncParts(wrapper, parts, item.parts, []);
-    root.append(wrapper);
-    created.push(wrapper);
-    slots.push({ key: item.key, open: item.open, wrapper, parts });
-  }
+  syncParts(root, state.slots, items, created);
   return created;
 }
 
@@ -1162,22 +1217,10 @@ function pruneFreshBlocks() {
   for (const key of firstSeen.keys()) {
     if (visible.has(key)) continue;
     firstSeen.delete(key);
+    toolRowCache.delete(key);
     bodyScrollTop.delete(key);
     unpinnedBodies.delete(key);
   }
-}
-
-function lastPendingToolMessage(messages, results, busy) {
-  if (!busy) return null;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message.role === "tool" || message.role === "event") continue;
-    if (message.role !== "assistant") return null;
-    return (message.blocks || []).some((block) => block.type === "toolCall" && !results.has(block.id))
-      ? message
-      : null;
-  }
-  return null;
 }
 
 let signedViews = null;
@@ -1190,18 +1233,22 @@ function toolViewSignature(views) {
   return viewsSignature;
 }
 
+/** Group numbering where history stops, so the tail's groups continue it (see makeFlow). */
+let historyEnd = { userId: "0", n: 0 };
+
 function renderMessages(view, sessionId) {
   const messages = Array.isArray(view.messages) ? view.messages : [];
   const results = new Map(messages.filter((m) => m.role === "tool").map((m) => [m.callId, m]));
   const tools = new Map((view.tools || []).map((t) => [t.callId, t]));
-  const active = lastPendingToolMessage(messages, results, view.busy);
+  const ctx = { results, tools };
   toolViews = view.toolViews || {};
+  const cut = tailStart(messages, view.busy);
 
   // The transcript is append-only. Its small id signature detects new commits / trims without
   // serializing the entire payload; the stream-only WebSocket patch leaves history untouched.
   const first = messages[0]?.id ?? "";
   const last = messages[messages.length - 1]?.id ?? "";
-  const signature = `${sessionId ?? ""}|${messages.length}|${first}|${last}|${active?.id ?? ""}|${toolViewSignature(toolViews)}`;
+  const signature = `${sessionId ?? ""}|${messages.length}|${first}|${last}|${cut}|${toolViewSignature(toolViews)}`;
   const historyChanged = signature !== lastHistoryKey;
 
   stampAnimPhase();
@@ -1216,55 +1263,40 @@ function renderMessages(view, sessionId) {
 
   let historyCreated = [];
   if (historyChanged) {
-    const historyItems = [];
-    historyHasContent = false;
-    const loose = (key, html) => historyItems.push({ key, parts: [html] });
-    for (const m of messages) {
-      if (m.role === "event" && (m.modelChange || m.thinkingChange)) {
-        const change = m.modelChange || m.thinkingChange;
-        const isModel = !!m.modelChange;
-        const label = isModel ? "Model switched" : "Thinking effort changed";
-        loose(`mc${m.id}`, `<div class="message model-event" data-key="mc${escapeHtml(m.id)}">${iconTag(isModel ? "cpu" : "brain", 13, "dim")}<span>${label} from <strong>${escapeHtml(change.from)}</strong> to <strong>${escapeHtml(change.to)}</strong></span></div>`);
-        historyHasContent = true;
-      } else if (m.role === "user") {
-        // data-branch-before points at the entry ahead of this prompt, so a new session can start there
-        // and replay it. Absent on the first message of a conversation, which has nothing before it.
-        const fork = m.branchBefore === undefined ? "" : ` data-branch-before="${m.branchBefore}"`;
-        loose(`u${m.id}`, `<div class="message user" data-key="u${m.id}"${fork}><div class="message-content">${escapeHtml(m.text)}</div></div>`);
-        historyHasContent = true;
-      } else if (m.role === "assistant" && m.id !== active?.id) {
-        const error = m.stop === "error" || m.stop === "aborted" ? (m.error || (m.stop === "aborted" ? "Stopped" : "")) : "";
-        historyItems.push(assistantParts(`m${m.id}`, m.blocks || [], false, results, tools, error, m.ms, m.branchAfter, m.id));
-        historyHasContent = true;
-      }
-    }
+    latestShown.clear();
+    noteShown(messages, results);
+    const flow = makeFlow(ctx);
+    flowMessages(flow, messages.slice(0, cut));
+    const items = flow.finish();
+    historyEnd = flow.state();
+    historyHasContent = items.length > 0;
     // A commit appends one message; patching keeps every other node (and its scroll offsets,
     // selection and open state) instead of re-parsing the whole transcript.
-    historyCreated = patchList(historyEl, historyItems, historyState);
+    historyCreated = patchList(historyEl, itemSpecs(items, sessionId, null), historyState);
     enhanceCodeBlocks(historyEl);
     lastHistoryKey = signature;
   }
 
-  // The only committed message whose tool state can still change is the pending tail. Keep it
-  // beside the streaming partial so status/output updates do not force a transcript repaint.
-  const tailItems = [];
-  if (active) {
-    const error = active.stop === "error" || active.stop === "aborted" ? (active.error || (active.stop === "aborted" ? "Stopped" : "")) : "";
-    tailItems.push(assistantParts(`m${active.id}`, active.blocks || [], false, results, tools, error, active.ms, active.branchAfter, active.id));
-  }
-  if (view.live?.blocks?.length) tailItems.push(assistantParts("live", view.live.blocks, true, results, tools, ""));
-  else if (view.busy) {
+  // The stretch of the run that can still change, beside the streaming partial, so status and
+  // output updates do not force a transcript repaint.
+  const flow = makeFlow(ctx, historyEnd);
+  flowMessages(flow, messages.slice(cut));
+  if (view.live?.blocks?.length) flow.assistant("live", view.live.blocks, true, null);
+  const items = flow.finish();
+  const lastItem = items[items.length - 1];
+  const tailSpecs = itemSpecs(items, sessionId, view.busy && lastItem?.kind === "group" ? lastItem : null);
+  if (view.busy && !view.live?.blocks?.length) {
     const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
-    tailItems.push({ key: "working", parts: [`<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>`] });
+    tailSpecs.push({ key: "working", html: `<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>` });
   }
 
   (view.queue || []).forEach((q, n) => {
-    tailItems.push({ key: `q${n}`, parts: [`<div class="message user queued"><div class="message-content">${escapeHtml(q.text)}</div><div class="message-meta">${iconTag("clock", 12, "dim")} queued · sends after the current step</div></div>`] });
+    tailSpecs.push({ key: `q${n}`, html: `<div class="message user queued"><div class="message-content">${escapeHtml(q.text)}</div><div class="message-meta">${iconTag("clock", 12, "dim")} queued · sends after the current step</div></div>` });
   });
-  if (!historyHasContent && !tailItems.length) {
-    tailItems.push({ key: "empty", parts: ['<p class="description empty">Give the agent a task. It can read, write and edit its own UI and files, and run commands.</p>'] });
+  if (!historyHasContent && !tailSpecs.length) {
+    tailSpecs.push({ key: "empty", html: '<p class="description empty">Give the agent a task. It can read, write and edit its own UI and files, and run commands.</p>' });
   }
-  const created = patchList(dynamicEl, tailItems, tailState);
+  const created = patchList(dynamicEl, tailSpecs, tailState);
   enhanceCodeBlocks(dynamicEl);
 
   if (following) glideTo(messagesEl, messagesEl.scrollHeight);
@@ -1281,6 +1313,8 @@ function renderMessages(view, sessionId) {
   }
 }
 
+/** The context ring: a circle that fills with the share of the context window in use, warm
+ *  past 70% and hot past 90%. The exact numbers (and the cache hit rate) are one tap away. */
 function renderStats(view) {
   const s = view.stats;
   if (s.contextWindow > 0) {
@@ -1291,28 +1325,36 @@ function renderStats(view) {
     ctxPill.title = `Context: ${s.contextTokens.toLocaleString()} of ${s.contextWindow.toLocaleString()} tokens used (${pct}%)`;
     ctxPill.classList.toggle("hot", pct >= 90);
     ctxPill.classList.toggle("warm", pct >= 70 && pct < 90);
-    ctxFill.style.width = `${pct}%`;
-    ctxFill.className = `meter-fill ${pct >= 90 ? "hot" : pct >= 70 ? "warm" : ""}`;
+    // A sliver stays visible at 0%, so the ring reads as a gauge rather than an empty circle.
+    ctxFill.style.strokeDasharray = `${Math.max(pct, 2)} 100`;
   } else {
     ctxLabel.textContent = "–";
     ctxPct.hidden = true;
     ctxPill.classList.remove("hot", "warm");
     ctxPill.title = "Context window usage";
-    ctxFill.style.width = "0";
-    ctxFill.className = "meter-fill";
+    ctxFill.style.strokeDasharray = "0 100";
   }
-  cacheLabel.textContent = s.cacheLast === undefined ? "Cache –" : `Cache ${s.cacheLast}%`;
-  cacheLabel.title = s.cacheSession === undefined ? "Prompt cache hit rate"
-    : `Prompt cache hit rate: ${s.cacheLast}% last request, ${s.cacheSession}% over this conversation`;
+  cacheLabel.textContent = s.cacheLast === undefined ? "–"
+    : s.cacheSession === undefined ? `${s.cacheLast}%` : `${s.cacheLast}% last · ${s.cacheSession}% overall`;
 
   if (typeof s.cost === "number") {
     costLabel.textContent = `$${s.cost > 0 && s.cost < 0.01 ? s.cost.toFixed(4) : s.cost.toFixed(2)}`;
-    costLabel.title = `${s.cost.toFixed(4)} spent in this session`;
+    costLabel.title = `$${s.cost.toFixed(4)} spent in this session`;
     costLabel.hidden = false;
   } else {
     costLabel.hidden = true;
   }
 }
+
+const ctxPop = document.getElementById("ctx-pop");
+function setCtxPop(open) {
+  ctxPop.hidden = !open;
+  ctxPill.setAttribute("aria-expanded", String(open));
+}
+ctxPill.addEventListener("click", () => setCtxPop(ctxPop.hidden));
+document.addEventListener("click", (e) => {
+  if (!ctxPop.hidden && !e.target.closest?.("#ctx-pop, #ctx-pill")) setCtxPop(false);
+});
 
 function renderControls(data) {
   const view = data.view;
@@ -1330,14 +1372,9 @@ function renderControls(data) {
   }
 
   const { levels, current } = data.thinking;
-  const signature = levels.join(",") + "|" + current;
-  if (thinkingSelect.dataset.sig !== signature) {
-    thinkingSelect.dataset.sig = signature;
-    thinkingSelect.innerHTML = levels.map(l => `<option value="${l}">${l === "off" ? "Thinking: off" : `Think: ${l}`}</option>`).join("");
-    thinkingSelect.value = current;
-    thinkingSelect.disabled = levels.length < 2;
-    thinkingSelect.title = levels.length < 2 ? "This model has no adjustable thinking effort" : "Thinking effort";
-  }
+  const effort = levels.length < 2 ? "" : effortLabel(current);
+  if (modelBtnEffort.textContent !== effort) modelBtnEffort.textContent = effort;
+  window.onThinkingInfo?.(data.thinking);
 
   if (data.model !== lastModel) {
     lastModel = data.model;
@@ -1363,6 +1400,8 @@ function renderNow() {
     dynamicEl.replaceChildren();
     tailState.slots = [];
     historyState.slots = [];
+    historyEnd = { userId: "0", n: 0 };
+    toolRowCache.clear();
     firstSeen.clear();
     freshEls.clear();
     bodyScrollTop.clear();
@@ -1454,7 +1493,7 @@ function updateComposerAction() {
   const action = stopping ? "stop" : "send";
   if (sendBtn.dataset.action !== action) {
     sendBtn.dataset.action = action;
-    sendBtn.innerHTML = icon(stopping ? "square" : "send", stopping ? 16 : 19);
+    sendBtn.innerHTML = icon(stopping ? "square" : "arrow-up", stopping ? 16 : 20);
   }
   if (sendBtn.classList.contains("stop-btn") !== stopping) sendBtn.classList.toggle("stop-btn", stopping);
   if (sendBtn.title !== (stopping ? "Stop the current run" : "Send (queues while the agent is busy)")) {
@@ -1464,6 +1503,13 @@ function updateComposerAction() {
   const disabled = attachmentUploadInProgress && !stopping;
   if (sendBtn.disabled !== disabled) sendBtn.disabled = disabled;
 }
+
+messagesEl.addEventListener("click", (e) => {
+  const opener = e.target.closest('[data-act="open-artifact"]');
+  if (!opener) return;
+  window.showScreen?.("artifacts");
+  window.openArtifactFile?.(opener.dataset.path);
+});
 
 messagesEl.addEventListener("click", (e) => {
   const summary = e.target.closest("summary");
@@ -1656,19 +1702,32 @@ function appendToComposer(text) {
   chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
 }
 
-thinkingSelect.addEventListener("change", async () => {
+/** A thinking level as the composer and the chooser show it. */
+function effortLabel(level) {
+  return level === "off" ? "No thinking" : level === "xhigh" ? "Extra high" : level.charAt(0).toUpperCase() + level.slice(1);
+}
+window.effortLabel = effortLabel;
+window.thinkingInfo = () => payload?.thinking || null;
+
+/** Sets the session's thinking effort (from the model chooser); the server answers with a fresh view. */
+window.setThinkingLevel = async (level) => {
   try {
     const res = await fetch("/api/thinking", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ level: thinkingSelect.value }),
+      body: JSON.stringify({ level }),
     });
     const data = await res.json();
     if (data.error) alert(data.error);
+    else if (payload && data.thinking) {
+      payload.thinking = data.thinking;
+      controlsDirty = true;
+      if (!frame) frame = requestAnimationFrame(render);
+    }
   } catch (err) {
     alert(err.message);
   }
-});
+};
 
 /* ---------- branching ----------
    A branch is a whole session, so the affordance hangs off a message: a long press (or a right click

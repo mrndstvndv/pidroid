@@ -1,4 +1,5 @@
-// Artifacts: the files in the current session's workspace, with viewers.
+// Files: the current session's workspace, with viewers. What the agent showed in chat (its
+// artifacts, see the show tool) is listed first, so a card scrolled far up is one tap away.
 //
 // The server lists the workspace (/api/workspace/tree) and serves each file raw under
 // /workspace/<session>/<path> with a sandboxing CSP. That path-style URL is what lets an HTML
@@ -72,14 +73,32 @@ function findNode(nodes, path) {
   return null;
 }
 
+function shownRows(out) {
+  const shown = (window.chatShownArtifacts?.() || []).filter((a) => findNode(data.tree, a.path));
+  if (!shown.length) return;
+  out.push(`<p class="artifacts-session">Shown in chat</p>`);
+  for (const a of shown) {
+    out.push(
+      `<button type="button" class="artifact-row" data-path="${esc(a.path)}" style="padding-left:12px">` +
+        `<span class="artifact-chev"></span>` +
+        `<span class="artifact-ico">${icon("sparkles", 16)}</span>` +
+        `<span class="artifact-name">${esc(a.title)}</span>` +
+        `<span class="artifact-size">${esc(a.path)}</span>` +
+      `</button>`
+    );
+  }
+}
+
 function renderList() {
   if (!data) return;
-  title.textContent = openFile ? openFile.node.name : "Artifacts";
+  title.textContent = openFile ? openFile.node.name : "Files";
   if (!data.tree.length) {
     list.innerHTML = `<p class="description artifacts-empty">This session's workspace is empty. Files the agent creates will show up here.</p>`;
     return;
   }
-  const out = [`<p class="artifacts-session">${esc(data.title || "Session")} &middot; workspace</p>`];
+  const out = [];
+  shownRows(out);
+  out.push(`<p class="artifacts-session">${esc(data.title || "Session")} &middot; workspace</p>`);
   rows(data.tree, 0, out);
   if (data.truncated) out.push(`<p class="description">Listing truncated.</p>`);
   list.innerHTML = out.join("");
@@ -314,22 +333,41 @@ viewer.addEventListener("click", async (e) => {
 
 /* ---------- loading ---------- */
 
-async function loadArtifacts() {
+let loading = null;
+let pendingOpen = null; // a path to open once the listing arrives (an artifact card's open button)
+
+function loadArtifacts() {
   if (openFile) closeFile();
   list.hidden = false;
-  try {
-    const res = await fetch("/api/workspace/tree");
-    const json = await res.json();
-    if (!res.ok) throw new Error(json.error || res.statusText);
-    if (data && data.session !== json.session) openDirs.clear();
-    data = json;
-    renderList();
-  } catch (err) {
-    list.innerHTML = `<p class="description artifacts-empty">Could not load the workspace: ${esc(err.message || err)}</p>`;
-  }
+  loading = (async () => {
+    try {
+      const res = await fetch("/api/workspace/tree");
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || res.statusText);
+      if (data && data.session !== json.session) openDirs.clear();
+      data = json;
+      renderList();
+      const node = pendingOpen && findNode(data.tree, pendingOpen);
+      pendingOpen = null;
+      if (node && !node.dir) showFile(node);
+    } catch (err) {
+      list.innerHTML = `<p class="description artifacts-empty">Could not load the workspace: ${esc(err.message || err)}</p>`;
+    } finally {
+      loading = null;
+    }
+  })();
+  return loading;
+}
+
+/** Opens one workspace file in the viewer. The screen is shown first (which starts a listing),
+ *  so this rides on that load rather than starting a second one. */
+function openArtifactFile(path) {
+  pendingOpen = String(path || "").replace(/^\.\//, "");
+  if (!loading) loadArtifacts();
 }
 
 window.loadArtifacts = loadArtifacts;
+window.openArtifactFile = openArtifactFile;
 // Back closes an open file first; the screen itself is closed by app.js's own layer below it.
 registerBackLayer(60, () => openFile !== null, closeFile);
 

@@ -109,6 +109,14 @@ object AssetExtractor {
         }
         File(targetDir, "server.js").delete()
 
+        // Shipped last time but dropped from this build (a retired extension, say): remove it, or it would
+        // keep loading forever. A file the agent has edited since is its own now, so that one stays.
+        for ((path, lastShipped) in previous) {
+            if (path in shipped) continue
+            val stale = File(targetDir, path)
+            if (stale.isFile && sha256(stale.readBytes()) == lastShipped) stale.delete()
+        }
+
         // Kept agent edits stay "modified" relative to the new shipped base, so later updates still see them.
         writeManifest(manifestFile, shipped)
         runCatching { stampFile.writeText(stamp) }

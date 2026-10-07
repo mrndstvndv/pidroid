@@ -15,6 +15,7 @@ import { bridgeCall as call } from "../bridge.ts";
 
 const batteryStatus = defineTool({
   name: "battery_status",
+  view: { verb: { one: "checked the battery", many: "checked the battery {n} times" } },
   description: "Battery level, charging state, power source and temperature of the phone.",
   parameters: Type.Object({}),
   replay: "safe",
@@ -26,6 +27,7 @@ const batteryStatus = defineTool({
 
 const notify = defineTool({
   name: "notify_user",
+  view: { verb: { one: "sent a notification", many: "sent {n} notifications" } },
   description:
     "Post an Android notification to the user, even when the app is in the background. " +
     "Passing the same id again replaces the earlier notification. Fails with code needs_permission if notifications are blocked. " +

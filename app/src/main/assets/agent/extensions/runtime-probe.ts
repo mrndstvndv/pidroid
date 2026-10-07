@@ -133,6 +133,7 @@ function safeInspect(value: unknown): string {
 
 const evalRuntime = defineTool({
   name: "eval_runtime",
+  view: { verb: { one: "ran code", many: "ran code {n} times" } },
   description:
     "Evaluate code inside the running Bun process and return its value plus anything it logged. " +
     "Unlike bash this is in-process, so it reaches the runtime itself: the Bun API surface, process state, " +

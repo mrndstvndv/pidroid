@@ -18,6 +18,7 @@ import { GITHUB_COPILOT_PROVIDER_ID, withCopilotOAuth } from "./providers/github
 import { FileCredentialStore, LoginManager } from "./auth.ts";
 import { bridgeAvailable, bridgeCall } from "./bridge.ts";
 import { Changes } from "./changes.ts";
+import { showTool } from "./artifacts.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
 import { ChatViewBuilder, clampLevel, liveDelta, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
@@ -595,7 +596,7 @@ const ImageAwareCodingTools = defineExtension({
 
 const SelfModify = defineExtension({
   name: "pidroid",
-  tools: [reloadUiTool, reloadExtensionsTool, restartServerTool],
+  tools: [reloadUiTool, reloadExtensionsTool, restartServerTool, showTool],
   sections: [
     section(
       "pidroid",
@@ -610,7 +611,7 @@ const SelfModify = defineExtension({
         `The app itself lives at ${APP_DIR} (also $PIDROID_APP_DIR), and you can change it -- every path below is relative to it: ` +
         "www/ is the web UI (index.html, style.css, app.js, chat.js, sessions.js, providers.js, changes.js); CSS edits apply instantly, but HTML/JS edits only show after you call reload_ui (call it once when a batch of UI edits is finished, not after every file). " +
         "extensions/*.ts are hot-swappable pi-durable extensions (extensions/save-bundle.ts is a worked example): add tools, prompt sections and hooks there, then call reload_extensions. No restart is needed. " +
-        "server.ts, auth.ts, changes.ts, chatview.ts, sessions.ts, extensions.ts, web-tools.ts and providers/ are the server; after editing them call restart_server (it builds first and refuses if the build fails; all sessions continue afterwards). " +
+        "server.ts, auth.ts, artifacts.ts, changes.ts, chatview.ts, sessions.ts, extensions.ts, web-tools.ts and providers/ are the server; after editing them call restart_server (it builds first and refuses if the build fails; all sessions continue afterwards). " +
         "vendor/ holds prebuilt dependencies and is not editable; only the packages mapped in tsconfig.json can be imported. " +
         `Files the user attaches from the phone are saved under ${UPLOADS_DIR} (also $PIDROID_UPLOADS). Composer image attachments are labeled [Image #N] and sent as image inputs in that order; use those labels to distinguish multiple images. The read tool also supports image files and sends them as image input to vision-capable models. If a file path is shown in the message, it is absolute and should be used as given. ` +
         "The UI is black (AMOLED) themed; keep it that way. " +

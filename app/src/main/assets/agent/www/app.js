@@ -81,7 +81,7 @@ document.addEventListener("touchstart", (e) => {
     y: t.clientY,
     chrome: !!(e.target?.closest?.(guardRoots)),
     // A capped, scrollable composer field owns its own vertical drag.
-    scroller: !!e.target?.closest?.(".chat-input-bar textarea.tall"),
+    scroller: !!e.target?.closest?.(".composer-card textarea.tall"),
   } : null;
 }, { passive: true });
 

@@ -13,18 +13,22 @@ export interface ToolView {
   /** Whether the row starts expanded. */
   open?: boolean;
   /** What the expanded body shows: "json" (arguments), "command" (args.command), "output" (the result text),
-   *  "diff" (unified diff of args.edits), "file" (args.content, clipped), "cards" (web-search result cards)
-   *  or "plot" (a curve, from a {"plot":...} payload the tool left in its output). */
+   *  "diff" (unified diff of args.edits), "file" (args.content, clipped) or "cards" (web-search result cards). */
   body?: ToolViewBody;
   /** Label above the body, when the default one ("arguments") is wrong. */
   label?: string;
   /** Leave the result text out of the body, for a tool whose preview already says everything. */
   hideOutput?: boolean;
+  /** How calls are counted on the folded line a run of tool calls collapses into ("Ran 3 commands,
+   *  read a file"): `one` for a single call, `many` with {n} for the count, both lower case, e.g.
+   *  { one: "checked the battery", many: "checked the battery {n} times" }. Without one, the
+   *  tool's calls are counted as "used N tools". */
+  verb?: { one: string; many: string };
 }
 
-export type ToolViewBody = "json" | "command" | "output" | "diff" | "file" | "cards" | "plot";
+export type ToolViewBody = "json" | "command" | "output" | "diff" | "file" | "cards";
 
-const VIEW_BODIES: ToolViewBody[] = ["json", "command", "output", "diff", "file", "cards", "plot"];
+const VIEW_BODIES: ToolViewBody[] = ["json", "command", "output", "diff", "file", "cards"];
 
 /** The view as it will be sent to the page: known keys only, right types, nothing that could fail to serialise. */
 function cleanView(view: unknown): ToolView | undefined {
@@ -36,6 +40,10 @@ function cleanView(view: unknown): ToolView | undefined {
   if (typeof v.open === "boolean") out.open = v.open;
   if (typeof v.label === "string" && v.label) out.label = v.label.slice(0, 40);
   if (typeof v.hideOutput === "boolean") out.hideOutput = v.hideOutput;
+  const verb = v.verb as { one?: unknown; many?: unknown } | undefined;
+  if (verb && typeof verb.one === "string" && verb.one && typeof verb.many === "string" && verb.many) {
+    out.verb = { one: verb.one.slice(0, 60), many: verb.many.slice(0, 60) };
+  }
   // An unknown body kind is dropped rather than passed on, so the page keeps its own default.
   if (VIEW_BODIES.includes(v.body as ToolViewBody)) out.body = v.body as ToolViewBody;
   return Object.keys(out).length ? out : undefined;

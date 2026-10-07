@@ -9,6 +9,7 @@ import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 
 const currentTime = defineTool({
   name: "current_time",
+  view: { verb: { one: "checked the time", many: "checked the time {n} times" } },
   description: "Current date and time on the phone, with its time zone.",
   parameters: Type.Object({}),
   replay: "safe",
