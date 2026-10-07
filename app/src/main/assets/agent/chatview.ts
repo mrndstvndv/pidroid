@@ -421,3 +421,20 @@ export function clampLevel(preferred: string, levels: Level[]): Level {
   const want = LEVELS.indexOf(preferred as Level);
   return [...levels].sort((a, b) => Math.abs(LEVELS.indexOf(a) - want) - Math.abs(LEVELS.indexOf(b) - want))[0];
 }
+
+/** The live partial relative to `previous` (what clients already hold): a text or thinking block
+ *  that only grew is sent as the appended suffix, everything else whole. */
+export function liveDelta(live: ChatView["live"], previous: ChatView["live"]) {
+  if (!live) return null;
+  if (!previous) return live;
+  let grew = false;
+  const blocks = live.blocks.map((block, i) => {
+    const before = previous.blocks[i];
+    if ((block.type !== "text" && block.type !== "thinking") || before?.type !== block.type) return block;
+    if (!block.text.startsWith(before.text)) return block;
+    grew = true;
+    const { text: _text, ...rest } = block;
+    return { ...rest, append: block.text.slice(before.text.length) };
+  });
+  return grew ? { delta: true, blocks } : live;
+}

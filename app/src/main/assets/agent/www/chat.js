@@ -1139,8 +1139,14 @@ function lastPendingToolMessage(messages, results, busy) {
   return null;
 }
 
+let signedViews = null;
+let viewsSignature = "";
 function toolViewSignature(views) {
-  return Object.keys(views).sort().map((name) => `${name}:${JSON.stringify(views[name])}`).join("|");
+  // The server keeps the same specs until an extension changes, so serialize only when they do.
+  if (views === signedViews) return viewsSignature;
+  signedViews = views;
+  viewsSignature = Object.keys(views).sort().map((name) => `${name}:${JSON.stringify(views[name])}`).join("|");
+  return viewsSignature;
 }
 
 function renderMessages(view, sessionId) {
@@ -1345,11 +1351,34 @@ window.onAgentView = (data) => {
   if (!frame) frame = requestAnimationFrame(render);
 };
 
+/** The server sent only what was appended to the streaming text; stitch it onto what we hold. */
+function applyLiveDelta(current, live, rev, base) {
+  if (!live?.delta) return live;
+  // Deltas build on the revision the server last sent. If one was missed (or this page holds a
+  // different partial) the stitched text would be wrong, so ask for a full snapshot instead.
+  if (base !== payload.rev) return undefined;
+  const before = current.live?.blocks || [];
+  return {
+    blocks: live.blocks.map((b, i) => {
+      if (b.append === undefined) return b;
+      const { append, ...rest } = b;
+      return { ...rest, text: (before[i]?.text ?? "") + append };
+    }),
+  };
+}
+
 window.onAgentUpdate = (data) => {
   if (!payload || !data?.view) return; // a full snapshot arrives first on each connection
   const current = payload.view;
   const update = data.view;
-  current.live = update.live == null ? undefined : update.live;
+  const live = update.live == null ? undefined : update.live;
+  const stitched = applyLiveDelta(current, live, data.rev, data.base);
+  if (live?.delta && !stitched) {
+    window.requestResync?.();
+    return;
+  }
+  payload.rev = data.rev;
+  current.live = stitched;
   current.tools = Array.isArray(update.tools) ? update.tools : [];
   current.busy = Boolean(update.busy);
   current.runStartedAt = update.runStartedAt == null ? undefined : update.runStartedAt;

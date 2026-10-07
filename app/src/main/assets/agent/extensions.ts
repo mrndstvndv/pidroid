@@ -107,6 +107,13 @@ export class ExtensionLoader {
    * extensions win over earlier ones, and a tool's own `view` over the extension-level `views` map.
    */
   views(): Record<string, ToolView> {
+    // Stable identity until an extension is installed or removed, so callers can tell cheaply
+    // whether it changed (the chat view asks on every streaming update).
+    return (this.#views ??= this.#collectViews());
+  }
+  #views: Record<string, ToolView> | undefined;
+
+  #collectViews(): Record<string, ToolView> {
     const out: Record<string, ToolView> = {};
     for (const extension of this.installed.values()) {
       const source = extension as Installable & { views?: Record<string, unknown>; tools?: { name?: string; view?: unknown }[] };
@@ -138,6 +145,7 @@ export class ExtensionLoader {
         if (previous && previous.name !== extension.name) this.registry.uninstall(previous); // renamed inside the file
         this.registry.install(extension);
         this.installed.set(file, extension);
+        this.#views = undefined;
         result.loaded.push(`${file} (${extension.name})`);
       } catch (err) {
         result.errors[file] = err instanceof Error ? err.message : String(err);
@@ -149,6 +157,7 @@ export class ExtensionLoader {
       if (active.includes(file)) continue;
       this.registry.uninstall(extension);
       this.installed.delete(file);
+      this.#views = undefined;
       (files.includes(file) ? result.skipped : result.removed).push(`${file} (${extension.name})`);
     }
     return result;

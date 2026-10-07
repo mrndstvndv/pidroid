@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ChatViewBuilder, type Block } from "./chatview.ts";
+import { ChatViewBuilder, liveDelta, type Block } from "./chatview.ts";
 import { blockStartKey, messageEndKey, toolEndKey } from "./timings.ts";
 
 const models = {
@@ -98,5 +98,30 @@ describe("ChatViewBuilder", () => {
     expect(replacement.messages).toHaveLength(1);
     expect(replacement.messages[0].id).toBe(10);
     expect(replacement.messages[0].branchBefore).toBeUndefined();
+  });
+});
+
+describe("liveDelta", () => {
+  const text = (s: string, extra = {}): Block => ({ type: "text", text: s, ...extra });
+
+  test("sends only the appended suffix of a block that grew", () => {
+    const out: any = liveDelta({ blocks: [text("hello world", { at: 5 })] }, { blocks: [text("hello")] });
+    expect(out.delta).toBe(true);
+    expect(out.blocks[0]).toEqual({ type: "text", at: 5, append: " world" });
+  });
+
+  test("sends a rewritten block, a new block and a tool call whole", () => {
+    const call: Block = { type: "toolCall", id: "c", name: "bash", args: {} };
+    const out: any = liveDelta(
+      { blocks: [text("changed"), text("new"), call] },
+      { blocks: [text("original")] },
+    );
+    expect(out).toEqual({ blocks: [text("changed"), text("new"), call] });
+  });
+
+  test("passes through when there is nothing to build on, and clears when there is no live", () => {
+    const live = { blocks: [text("hi")] };
+    expect(liveDelta(live, undefined)).toBe(live);
+    expect(liveDelta(undefined, live)).toBeNull();
   });
 });

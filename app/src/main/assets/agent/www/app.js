@@ -363,6 +363,10 @@ function reportVisibility() {
 }
 document.addEventListener("visibilitychange", reportVisibility);
 
+window.requestResync = () => {
+  if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "resync" }));
+};
+
 function connectWebSocket() {
   if (serverStopping) return;
   socket = new WebSocket(wsUrl);

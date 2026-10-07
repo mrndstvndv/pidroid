@@ -20,7 +20,7 @@ import { bridgeAvailable, bridgeCall } from "./bridge.ts";
 import { Changes } from "./changes.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
-import { ChatViewBuilder, clampLevel, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
+import { ChatViewBuilder, clampLevel, liveDelta, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
 import { Timings } from "./timings.ts";
 
 const PORT = Number(process.env.PORT) || 8765;
@@ -877,29 +877,37 @@ let chatViewBuilder = new ChatViewBuilder();
 let latestView: ChatView = chatViewBuilder.build(undefined, models, undefined, undefined, loader.views());
 // Wall-clock stamps for the durations the chat view shows ("Thought · 12s", "Worked 1m 30s").
 let timings = new Timings(db, current.id);
+// Bumped whenever latestView changes. Every client holds the live partial of the revision it last
+// received, which is what lets a streaming update carry only the text appended since.
+let liveRev = 0;
 function buildLatestView(value: unknown) {
   timings.stamp(value);
+  liveRev++;
   return chatViewBuilder.build(value, models, timings.lookup, timings.liveStarts(), loader.views());
 }
 function chatPayload() {
   return {
+    rev: liveRev,
     view: latestView,
     thinking: thinkingInfo(),
     model: `${pickDefaultModel().provider}/${pickDefaultModel().modelId}`,
     session: { id: current.id, title: current.title },
   };
 }
-function chatUpdatePayload() {
+function chatUpdatePayload(previousLive: ChatView["live"], previousViews: unknown, base: number) {
   return {
+    rev: liveRev,
+    base,
     // `null` is intentional: JSON omits undefined properties, but the browser must be able to
     // clear a live partial or run timestamp when the agent becomes idle.
     view: {
-      live: latestView.live ?? null,
+      live: liveDelta(latestView.live, previousLive),
       tools: latestView.tools,
       busy: latestView.busy,
       runStartedAt: latestView.runStartedAt ?? null,
       queue: latestView.queue,
-      toolViews: latestView.toolViews,
+      // The specs only change when an extension does; the page keeps the ones it has.
+      toolViews: latestView.toolViews === previousViews ? undefined : latestView.toolViews,
     },
     thinking: thinkingInfo(),
     model: `${pickDefaultModel().provider}/${pickDefaultModel().modelId}`,
@@ -927,10 +935,13 @@ async function attachView() {
     pushTimer = setTimeout(() => {
       pushTimer = undefined;
       const previousMessages = latestView.messages;
+      const previousLive = latestView.live;
+      const previousViews = latestView.toolViews;
+      const base = liveRev;
       latestView = buildLatestView(pendingValue);
       // Entries are immutable and append-only. When the message-array identity is unchanged,
       // send only the stream/tool/queue tail instead of the whole transcript and its HTML.
-      if (latestView.messages === previousMessages) broadcast("agent_update", chatUpdatePayload());
+      if (latestView.messages === previousMessages) broadcast("agent_update", chatUpdatePayload(previousLive, previousViews, base));
       else broadcast("agent_view", chatPayload());
     }, 50);
   };
@@ -2118,6 +2129,9 @@ const server = Bun.serve({
         const data = JSON.parse(String(message));
         if (data.type === "ping") {
           ws.send(JSON.stringify({ event: "pong" }));
+        } else if (data.type === "resync") {
+          // The page missed an update (its copy of the live partial is not the one deltas build on).
+          ws.send(JSON.stringify({ event: "agent_view", payload: chatPayload(), timestamp: Date.now() }));
         } else if (data.type === "visible") {
           // The page says when it goes to the background, which is exactly when a finished run is
           // worth a notification (see notifyRunFinished).
