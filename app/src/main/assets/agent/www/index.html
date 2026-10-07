@@ -61,45 +61,46 @@
         <span data-icon="chevron-down" data-size="20"></span>
       </button>
 
+      <!-- A floating card, like the topbar: the message list scrolls under it. The field on top,
+           one row of controls under it: attach, the model and its thinking effort, then the
+           context ring and the cost, and send. -->
       <div class="composer">
-        <div class="attachment-tray" id="attachment-tray" role="list" aria-label="Attached images" hidden></div>
         <div class="queue-bar" id="queue-bar" hidden></div>
-        <!-- Row 1: context on the left, model on the right. Row 2: cache on the
-             left, thinking effort on the right. One nowrap line holding all four
-             is what used to ellipsise "Ctx", "Cache" and the model name. -->
-        <div class="composer-meta">
-          <div class="meta-row">
-            <span class="ctx-group" id="ctx-pill" title="Context window usage">
-              <span class="conn-dot" id="conn-dot" title="Connection"></span>
-              <span class="meter"><span class="meter-fill" id="ctx-fill"></span></span>
-              <span class="stat-num" id="ctx-label">–</span>
-              <span class="stat-pct" id="ctx-pct" hidden>0%</span>
-            </span>
-            <button type="button" class="model-btn" id="model-btn" title="Choose model">
-              <span data-icon="cpu" data-size="13"></span>
-              <span id="model-btn-label">Loading model...</span>
-              <span data-icon="chevron-down" data-size="14"></span>
-            </button>
-          </div>
-          <div class="meta-row">
-            <span class="stat-tail">
-              <span id="cache-label" title="Prompt cache hit rate">Cache –</span>
-              <span id="cost-label" class="cost-pill" hidden title="Tokens spent in this session"></span>
-            </span>
-            <select id="thinking-select" class="think-select" title="Thinking effort"></select>
-          </div>
-        </div>
-        <form class="chat-input-bar" id="chat-form">
-          <button type="button" class="attach-btn" id="attach-btn" title="Attach files or images">
-            <span data-icon="paperclip" data-size="18"></span>
-          </button>
+        <form class="composer-card" id="chat-form">
+          <div class="attachment-tray" id="attachment-tray" role="list" aria-label="Attached images" hidden></div>
           <!-- Multiline: Enter (soft keyboard) inserts a newline, the button sends.
                Ctrl/Cmd+Enter is the keyboard shortcut for sending. -->
           <textarea id="chat-input" rows="1" placeholder="Give the agent a task..." autocomplete="off"
                     autocapitalize="sentences" spellcheck="false"></textarea>
-          <button type="submit" id="send-btn" title="Send (queues while the agent is busy)" aria-label="Send message">
-            <span data-icon="send" data-size="19"></span>
-          </button>
+          <div class="composer-row">
+            <button type="button" class="composer-round attach-btn" id="attach-btn" title="Attach files or images" aria-label="Attach files or images">
+              <span data-icon="plus" data-size="20"></span>
+            </button>
+            <!-- Model and thinking effort read as one pill; each half is its own control. -->
+            <div class="model-pill">
+              <button type="button" class="model-btn" id="model-btn" title="Choose model">
+                <span id="model-btn-label">Loading model...</span>
+              </button>
+              <select id="thinking-select" class="think-select" title="Thinking effort"></select>
+            </div>
+            <span class="composer-spacer"></span>
+            <span class="conn-dot" id="conn-dot" title="Connection"></span>
+            <button type="button" class="ctx-ring" id="ctx-pill" title="Context window usage" aria-label="Context window usage" aria-expanded="false">
+              <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+                <circle class="ctx-track" cx="10" cy="10" r="8" />
+                <circle class="ctx-fill" id="ctx-fill" cx="10" cy="10" r="8" pathLength="100" />
+              </svg>
+            </button>
+            <span id="cost-label" class="cost-pill" hidden title="Spent in this session"></span>
+            <button type="submit" class="composer-round" id="send-btn" title="Send (queues while the agent is busy)" aria-label="Send message">
+              <span data-icon="arrow-up" data-size="20"></span>
+            </button>
+          </div>
+          <!-- Tapping the ring opens the numbers behind it. -->
+          <div class="ctx-pop" id="ctx-pop" hidden>
+            <div><span>Context</span><span class="stat-num" id="ctx-label">–</span><span class="stat-pct" id="ctx-pct" hidden>0%</span></div>
+            <div><span>Prompt cache</span><span id="cache-label">–</span></div>
+          </div>
         </form>
         <!-- Outside the form: picking a file must never look like a submit. -->
         <input type="file" id="attach-input" multiple hidden />

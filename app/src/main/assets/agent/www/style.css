@@ -541,102 +541,6 @@ body {
   font-weight: 500;
 }
 
-.chat-input-bar {
-  display: flex;
-  align-items: flex-end;
-  padding: 12px;
-  background-color: var(--bg-secondary);
-  border-top: 1px solid var(--border);
-  gap: 8px;
-  /* A drag starting on the bar must not become a scroll of the message list above
-     (or a visual-viewport pan). pan-x keeps caret/text movement working: touch-action
-     is intersected up the ancestor chain, so `none` here would also strip the field's
-     own panning below. The textarea re-enables pan-y once it is tall enough to scroll
-     (see .chat-input-bar textarea.tall). */
-  touch-action: pan-x;
-  overscroll-behavior: none;
-}
-
-/* The composer field is a growing textarea, not a single-line input: Enter types a
-   newline (so a soft keyboard shows a return key), the text wraps instead of
-   scrolling sideways, and the box grows with the draft until JS caps it -- past the
-   cap it scrolls vertically like any other text field. */
-.chat-input-bar textarea {
-  flex: 1;
-  min-width: 0;
-  /* Beats the generic `textarea` rule further down (monospace, resizable, full width). */
-  width: auto;
-  margin-top: 0;
-  background-color: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 10px 16px;
-  color: var(--text-primary);
-  font-family: inherit;
-  font-size: 0.9rem;
-  line-height: 1.45;
-  outline: none;
-  resize: none;
-  overflow-y: auto;
-  max-height: 32vh; /* safety net for the first paint; JS drives the real cap */
-  /* Wrap everything, including one long unbroken word / URL. */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  /* Single field: horizontal pan keeps caret movement, but a vertical drag starting on
-     the field must not pan the page / message list. */
-  touch-action: pan-x;
-  overscroll-behavior: none;
-  scrollbar-width: thin;
-}
-
-/* At the height cap the field has to scroll, so let a vertical drag scroll *it*
-   instead of being swallowed by the chrome touch guard. */
-.chat-input-bar textarea.tall {
-  touch-action: pan-y;
-}
-
-.chat-input-bar textarea:focus {
-  border-color: var(--accent);
-}
-
-.chat-input-bar input {
-  flex: 1;
-  min-width: 0;
-  background-color: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 10px 16px;
-  color: var(--text-primary);
-  font-size: 0.9rem;
-  outline: none;
-  touch-action: pan-x;
-  overscroll-behavior: none;
-}
-
-.chat-input-bar button {
-  background-color: var(--accent);
-  border: none;
-  color: white;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  touch-action: manipulation;
-}
-
-/* Attach is muted, so the send button stays the one primary action in the composer. */
-.chat-input-bar .attach-btn {
-  background: none;
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.chat-input-bar .attach-btn:disabled { opacity: 0.45; }
-
 /* Editor & State */
 .editor-header {
   display: flex;
@@ -1515,30 +1419,224 @@ html[data-mode="light"] .shimmer {
   margin-top: 8px;
 }
 
-/* Composer: stats, controls and input live together under the messages.
-   Same deal as the bar: kill vertical pans starting here, keep horizontal caret
-   movement inside the field. */
-/* Floating, like the topbar: the message list scrolls under it. */
+/* Composer: a floating card over the bottom of the message list, like the topbar. The field
+   sits on top and one row of controls under it. Drags starting here must not pan the list
+   (see app.js's chrome guard); horizontal caret movement in the field still works. */
 .composer {
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
   z-index: 5;
-  background-color: transparent;
-  border-top: 1px solid var(--border);
-  flex-shrink: 0;
+  padding: 0 12px;
+  /* The Android gesture nav pill is drawn over the bottom of the window. Keep a fixed gap,
+     and grow it to the real system inset when the WebView reports one (edge-to-edge). */
+  padding-bottom: max(14px, env(safe-area-inset-bottom, 0px));
   touch-action: pan-x;
   overscroll-behavior: none;
-  /* The Android gesture nav pill is drawn over the bottom of the window, so the
-     send row sat right under it. Keep a fixed gap, and grow it to the real system
-     inset when the WebView reports one (edge-to-edge devices). */
-  padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
+  pointer-events: none; /* the gutters around the card belong to the list */
 }
 
-.composer .chat-input-bar {
-  border-top: none;
-  padding-top: 6px;
+.composer > * { pointer-events: auto; }
+
+.composer-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 8px 8px;
+  border: 1px solid var(--border);
+  border-radius: 26px;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 35%);
+  touch-action: pan-x;
+  overscroll-behavior: none;
+  isolation: isolate;
+}
+
+.composer-card textarea {
+  display: block;
+  width: auto;
+  min-width: 0;
+  margin: 0 8px;
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  max-height: 32vh; /* safety net for the first paint; JS drives the real cap */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  touch-action: pan-x;
+  overscroll-behavior: none;
+  scrollbar-width: thin;
+}
+
+.composer-card textarea::placeholder { color: var(--text-secondary); }
+
+/* At the height cap the field has to scroll, so let a vertical drag scroll *it*
+   instead of being swallowed by the chrome touch guard. */
+.composer-card textarea.tall { touch-action: pan-y; }
+
+.composer-row {
+  /* The fill of the round buttons and the model pill: a tint of the text colour, so it shows
+     on AMOLED black and on the light theme alike. */
+  --control-fill: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.composer-spacer { flex: 1; min-width: 0; }
+
+.composer-round {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background-color: var(--control-fill);
+  color: var(--text-primary);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.composer-round:disabled { opacity: 0.45; }
+
+/* Send is the one coloured control; stop (see .stop-btn) turns it red while a run can be cut. */
+#send-btn { background-color: var(--accent); color: #fff; }
+
+/* Model and effort: one pill, two controls. The model name is the only label that may
+   ellipsise; its full id is in the tooltip and in the picker. */
+.model-pill {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 40px;
+  padding: 0 2px 0 14px;
+  border-radius: 999px;
+  background-color: var(--control-fill);
+}
+
+.composer .model-btn {
+  min-width: 0;
+  max-width: none;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.composer .model-btn #model-btn-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.think-select {
+  flex: 0 0 auto;
+  max-width: 96px;
+  padding: 0 10px 0 6px;
+  height: 100%;
+  /* As wide as the chosen level, not the longest option, so the model name gets the room. */
+  field-sizing: content;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.think-select:disabled { opacity: 0.6; }
+
+/* Shown only when the page has lost the server; online needs no ink. */
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: #ef4444;
+  flex-shrink: 0;
+}
+
+.conn-dot.online { display: none; }
+
+.ctx-ring {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 40px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.ctx-ring svg { transform: rotate(-90deg); }
+.ctx-track { fill: none; stroke: var(--border); stroke-width: 2.5; }
+.ctx-fill {
+  fill: none;
+  stroke: var(--text-secondary);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-dasharray: 0 100;
+  transition: stroke-dasharray 0.3s ease;
+}
+.ctx-ring.warm .ctx-fill { stroke: var(--warn); }
+.ctx-ring.hot .ctx-fill { stroke: #ef4444; }
+
+.cost-pill {
+  flex-shrink: 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The numbers behind the ring, above the card's right edge. */
+.ctx-pop {
+  position: absolute;
+  right: 10px;
+  bottom: calc(100% + 8px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background-color: var(--bg-card);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 35%);
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.ctx-pop[hidden] { display: none; }
+.ctx-pop > div { display: flex; align-items: baseline; gap: 8px; }
+.ctx-pop > div > span:first-child { flex: 1; }
+.ctx-pop .stat-num, .ctx-pop #cache-label { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.ctx-pop .stat-pct { font-weight: 600; color: var(--text-primary); }
+.composer-card:has(.ctx-ring.hot) .stat-pct { color: #ef4444; }
+.composer-card:has(.ctx-ring.warm) .stat-pct { color: var(--warn); }
+
+/* Very narrow: the cost goes before anything starts to ellipsise. */
+@media (max-width: 340px) {
+  .cost-pill { display: none !important; }
 }
 
 .attachment-tray {
@@ -1607,142 +1705,8 @@ html[data-mode="light"] .shimmer {
 
 .attachment-remove:active { transform: scale(0.92); }
 
-/* Row 1 pairs context (left) with the model (right); row 2 pairs cache/cost
-   (left) with thinking effort (right). Pairs sit at opposite ends of the same
-   line, so each side reads as one group. Outlined pills are reserved for the
-   two things you can actually tap; the read-only numbers are plain dim text. */
-.composer-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 14px 4px;
-  font-size: 0.7rem;
-  color: var(--text-secondary);
-  touch-action: pan-x;
-  overscroll-behavior: none;
-}
-
-.meta-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-
-.ctx-group,
-.stat-tail {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  white-space: nowrap;
-}
-
-.stat-tail { gap: 8px; overflow: hidden; }
-
-.stat-num, .stat-pct, #cache-label, .cost-pill {
-  flex: 0 0 auto;
-  font-variant-numeric: tabular-nums;
-}
-
-.stat-pct {
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.ctx-group.hot .stat-pct { color: #ef4444; }
-.ctx-group.warm .stat-pct { color: var(--warn); }
-
-.cost-pill:not([hidden])::before {
-  content: "· ";
-}
-
-/* Cost is the quietest of the three; it rides along after the cache rate. */
-.cost-pill { opacity: 0.75; }
-
-.conn-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background-color: #ef4444;
-  flex-shrink: 0;
-}
-
-.conn-dot.online { background-color: var(--success); }
-
-.meter {
-  width: 40px;
-  height: 4px;
-  border-radius: 2px;
-  background-color: var(--border);
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-.meter-fill {
-  display: block;
-  height: 100%;
-  width: 0;
-  background-color: var(--success);
-}
-
-.meter-fill.warm { background-color: var(--warn); }
-.meter-fill.hot { background-color: #ef4444; }
-
-.think-select {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-primary);
-  padding: 6px 6px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  max-width: 104px;
-  flex: 0 0 auto;
-  touch-action: manipulation;
-}
-
-.think-select:disabled { color: var(--text-secondary); opacity: 0.6; }
-
-/* The model name is the only label that may ellipsise; it gets the right half of
-   row 1 and its full id is in the tooltip and in the picker. */
-.composer .model-btn {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 62%;
-  padding: 6px 10px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  border-radius: 999px;
-}
-
-.composer .model-btn #model-btn-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Wide enough for both rows side by side again (tablet, landscape). */
-@media (min-width: 560px) {
-  .composer-meta { flex-direction: row; align-items: center; gap: 16px; }
-  .meta-row { flex: 1 1 0; }
-  .composer .model-btn { max-width: 52%; }
-}
-
-/* Very narrow: drop the token counts, then the cost, before anything starts to
-   ellipsise. A missing number beats four truncated stubs. */
-@media (max-width: 340px) {
-  .stat-num { display: none; }
-  .cost-pill { display: none !important; }
-}
-
-.composer .model-btn .ico-slot {
-  flex-shrink: 0;
-}
-
 .queue-bar {
-  padding: 6px 12px 0;
+  padding: 0 14px 6px;
   font-size: 0.72rem;
   color: var(--warn);
   display: flex;
@@ -2107,6 +2071,45 @@ details.tool.failed .tool-name,
 details.tool.failed .tool-sum { color: var(--danger-text); }
 
 .tool-body { padding: 0 12px 10px; }
+/* Shell calls: one terminal panel, the command after a prompt and the output under it. */
+.term {
+  margin-top: 2px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background-color: var(--bg-inset);
+  overflow: hidden;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+.term pre {
+  margin: 0;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.term-cmd { color: var(--text-primary); }
+.term-prompt { color: var(--accent); margin-right: 8px; user-select: none; -webkit-user-select: none; }
+
+.term-out,
+.term-empty {
+  border-top: 1px solid var(--border) !important;
+  color: var(--text-secondary);
+}
+
+.term-empty { padding: 6px 10px; font-style: italic; }
+
+details.tool.failed .term { border-color: color-mix(in srgb, var(--danger-text) 45%, var(--border)); }
+details.tool.failed .term-out { color: var(--danger-text); }
+
+/* The row shows the command itself, in the terminal's face. */
+.tool-sum-cmd { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.74rem; }
+
 .tool-label { font-size: 0.65rem; text-transform: uppercase; color: var(--text-secondary); margin-top: 6px; }
 .tool-out { max-height: 220px; overflow-y: auto; }
 
@@ -2536,7 +2539,7 @@ p.empty { padding: 24px 8px; text-align: center; }
    clean pane of glass instead of bleeding into the messages. -webkit- prefix included:
    old Android WebViews need it, and a wrong prefix simply means no blur, not a broken bar. */
 .topbar,
-.composer {
+.composer-card {
   /* How much tint sits over the blur. Low on purpose: on AMOLED black the bar should read
      as a pane of glass, not a grey slab, and messages stay legible scrolling under it.
      Raise --chrome-tint to tighten it. */
@@ -2546,7 +2549,7 @@ p.empty { padding: 24px 8px; text-align: center; }
 }
 
 .topbar::before,
-.composer::before {
+.composer-card::before {
   content: "";
   position: absolute;
   left: 0;
@@ -2563,26 +2566,26 @@ p.empty { padding: 24px 8px; text-align: center; }
   background-color: color-mix(in srgb, var(--bg-primary) var(--chrome-tint), transparent);
 }
 
-.composer::before {
+.composer-card::before {
   bottom: 0;
   top: 0;
+  border-radius: inherit;
   background-color: color-mix(in srgb, var(--bg-secondary) var(--chrome-tint), transparent);
 }
 
 /* The edge of the glass: one hairline where the sheet meets the messages. */
 .topbar { border-bottom: 1px solid var(--hairline); }
-.composer { border-top: 1px solid var(--hairline); }
 
 /* Without a blur the tint alone would just look like a flat wash, so keep the chrome
    opaque where backdrop-filter is unavailable. */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .topbar { background-color: var(--bg-primary); }
-  .composer { background-color: var(--bg-secondary); }
-  .topbar::before, .composer::before { display: none; }
+  .composer-card { background-color: var(--bg-secondary); }
+  .topbar::before, .composer-card::before { display: none; }
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .topbar::before, .composer::before {
+  .topbar::before, .composer-card::before {
     background-color: var(--bg-primary);
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
@@ -2597,15 +2600,6 @@ p.empty { padding: 24px 8px; text-align: center; }
 .settings-head { padding-top: calc(var(--safe-top) + 10px); }
 .sidebar-head { padding-top: calc(var(--safe-top) + 6px); }
 
-/* The input row sits directly on the frosted sheet. Its standalone opaque background (and a nested
-   backdrop-filter, which would also isolate it from the blur behind) would paint a solid band. */
-.composer .chat-input-bar {
-  background-color: transparent;
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
-}
-
-
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .sidebar { background-color: var(--bg-secondary); }
 }
@@ -2616,18 +2610,17 @@ p.empty { padding: 24px 8px; text-align: center; }
 
 /* Frosted backdrops off (Theme > Effects): solid chrome, no blur, no fade. */
 html[data-blur="off"] .topbar::before,
-html[data-blur="off"] .composer::before {
+html[data-blur="off"] .composer-card::before {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   -webkit-mask-image: none;
   mask-image: none;
   bottom: 0;
 }
-html[data-blur="off"] .composer::before { top: 0; }
+html[data-blur="off"] .composer-card::before { top: 0; }
 html[data-blur="off"] .topbar::before { background-color: var(--bg-primary); }
-html[data-blur="off"] .composer::before { background-color: var(--bg-secondary); }
+html[data-blur="off"] .composer-card::before { background-color: var(--bg-secondary); }
 html[data-blur="off"] .topbar { border-bottom: 1px solid var(--border); }
-html[data-blur="off"] .composer { border-top: 1px solid var(--border); }
 html[data-blur="off"] .sidebar {
   background-color: var(--bg-secondary);
   -webkit-backdrop-filter: none;

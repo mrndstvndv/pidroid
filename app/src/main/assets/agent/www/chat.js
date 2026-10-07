@@ -656,6 +656,16 @@ function hostOf(url) {
   }
 }
 
+/** A shell call reads like a terminal: the command after a prompt, its output underneath, in one
+ *  panel. The output is the scrolling part (.tool-out), so a long log follows its tail while it
+ *  runs and keeps the reader's place once they scroll up in it. */
+function terminalHtml(command, output, view) {
+  const out = output && !view?.hideOutput
+    ? `<pre class="term-out tool-out">${escapeHtml(output)}</pre>`
+    : output === undefined ? "" : `<div class="term-empty">no output</div>`;
+  return `<div class="term"><pre class="term-cmd"><span class="term-prompt">$</span>${escapeHtml(command)}</pre>${out}</div>`;
+}
+
 /** The expanded body of a tool call: a real preview where there is one, JSON otherwise. */
 function toolBodyHtml(call, args, output) {
   const view = toolView(call.name);
@@ -682,9 +692,7 @@ function toolBodyHtml(call, args, output) {
     return toolLabel("output") + `<pre class="code tool-out">${escapeHtml(output)}</pre>`;
   }
 
-  if (body === "command" && typeof args.command === "string") {
-    return toolLabel(view?.label ?? "command") + `<pre class="code">${escapeHtml(args.command)}</pre>` + outputHtml;
-  }
+  if (body === "command" && typeof args.command === "string") return terminalHtml(args.command, output, view);
 
   let preview = "";
   if (body === "diff") preview = editPreview(args);
@@ -726,12 +734,14 @@ function toolBlockHtml(key, call, state, result) {
   // web_search and edit are open by default because their body is the point of the call; anything
   // else stays closed until asked. A view can decide for its own tool either way.
   const openByDefault = view?.open ?? (call.name === "web_search" || call.name === "edit");
+  // A shell row is its command: the tool's name would only repeat what the icon already says.
+  const shell = (view?.body ?? defaultBody(call.name)) === "command" && typeof args.command === "string";
   return `
-    <details class="tool${failed ? " failed" : ""}${call.name === "edit" ? " edit-tool" : ""}" data-key="${key}" ${isOpen(key, openByDefault) ? "open" : ""}>
+    <details class="tool${failed ? " failed" : ""}${call.name === "edit" ? " edit-tool" : ""}${shell ? " shell-tool" : ""}" data-key="${key}" ${isOpen(key, openByDefault) ? "open" : ""}>
       <summary>
         <span class="tool-ico">${icon(view?.icon ?? toolIcon(call.name), 14)}</span>
-        <span class="tool-name">${escapeHtml(call.name)}</span>
-        <span class="tool-sum">${escapeHtml(toolSummary(call.name, args))}</span>
+        ${shell ? "" : `<span class="tool-name">${escapeHtml(call.name)}</span>`}
+        <span class="tool-sum${shell ? " tool-sum-cmd" : ""}">${escapeHtml(toolSummary(call.name, args))}</span>
         ${running ? durHtml(undefined, call.at) : durHtml(call.ms, undefined)}
         ${status}
       </summary>
@@ -1303,6 +1313,8 @@ function renderMessages(view, sessionId) {
   }
 }
 
+/** The context ring: a circle that fills with the share of the context window in use, warm
+ *  past 70% and hot past 90%. The exact numbers (and the cache hit rate) are one tap away. */
 function renderStats(view) {
   const s = view.stats;
   if (s.contextWindow > 0) {
@@ -1313,28 +1325,36 @@ function renderStats(view) {
     ctxPill.title = `Context: ${s.contextTokens.toLocaleString()} of ${s.contextWindow.toLocaleString()} tokens used (${pct}%)`;
     ctxPill.classList.toggle("hot", pct >= 90);
     ctxPill.classList.toggle("warm", pct >= 70 && pct < 90);
-    ctxFill.style.width = `${pct}%`;
-    ctxFill.className = `meter-fill ${pct >= 90 ? "hot" : pct >= 70 ? "warm" : ""}`;
+    // A sliver stays visible at 0%, so the ring reads as a gauge rather than an empty circle.
+    ctxFill.style.strokeDasharray = `${Math.max(pct, 2)} 100`;
   } else {
     ctxLabel.textContent = "–";
     ctxPct.hidden = true;
     ctxPill.classList.remove("hot", "warm");
     ctxPill.title = "Context window usage";
-    ctxFill.style.width = "0";
-    ctxFill.className = "meter-fill";
+    ctxFill.style.strokeDasharray = "0 100";
   }
-  cacheLabel.textContent = s.cacheLast === undefined ? "Cache –" : `Cache ${s.cacheLast}%`;
-  cacheLabel.title = s.cacheSession === undefined ? "Prompt cache hit rate"
-    : `Prompt cache hit rate: ${s.cacheLast}% last request, ${s.cacheSession}% over this conversation`;
+  cacheLabel.textContent = s.cacheLast === undefined ? "–"
+    : s.cacheSession === undefined ? `${s.cacheLast}%` : `${s.cacheLast}% last · ${s.cacheSession}% overall`;
 
   if (typeof s.cost === "number") {
     costLabel.textContent = `$${s.cost > 0 && s.cost < 0.01 ? s.cost.toFixed(4) : s.cost.toFixed(2)}`;
-    costLabel.title = `${s.cost.toFixed(4)} spent in this session`;
+    costLabel.title = `$${s.cost.toFixed(4)} spent in this session`;
     costLabel.hidden = false;
   } else {
     costLabel.hidden = true;
   }
 }
+
+const ctxPop = document.getElementById("ctx-pop");
+function setCtxPop(open) {
+  ctxPop.hidden = !open;
+  ctxPill.setAttribute("aria-expanded", String(open));
+}
+ctxPill.addEventListener("click", () => setCtxPop(ctxPop.hidden));
+document.addEventListener("click", (e) => {
+  if (!ctxPop.hidden && !e.target.closest?.("#ctx-pop, #ctx-pill")) setCtxPop(false);
+});
 
 function renderControls(data) {
   const view = data.view;
@@ -1355,7 +1375,7 @@ function renderControls(data) {
   const signature = levels.join(",") + "|" + current;
   if (thinkingSelect.dataset.sig !== signature) {
     thinkingSelect.dataset.sig = signature;
-    thinkingSelect.innerHTML = levels.map(l => `<option value="${l}">${l === "off" ? "Thinking: off" : `Think: ${l}`}</option>`).join("");
+    thinkingSelect.innerHTML = levels.map(l => `<option value="${l}">${l === "off" ? "No thinking" : l.charAt(0).toUpperCase() + l.slice(1)}</option>`).join("");
     thinkingSelect.value = current;
     thinkingSelect.disabled = levels.length < 2;
     thinkingSelect.title = levels.length < 2 ? "This model has no adjustable thinking effort" : "Thinking effort";
@@ -1478,7 +1498,7 @@ function updateComposerAction() {
   const action = stopping ? "stop" : "send";
   if (sendBtn.dataset.action !== action) {
     sendBtn.dataset.action = action;
-    sendBtn.innerHTML = icon(stopping ? "square" : "send", stopping ? 16 : 19);
+    sendBtn.innerHTML = icon(stopping ? "square" : "arrow-up", stopping ? 16 : 20);
   }
   if (sendBtn.classList.contains("stop-btn") !== stopping) sendBtn.classList.toggle("stop-btn", stopping);
   if (sendBtn.title !== (stopping ? "Stop the current run" : "Send (queues while the agent is busy)")) {
