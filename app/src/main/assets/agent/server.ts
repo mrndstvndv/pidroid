@@ -1280,6 +1280,9 @@ const server = Bun.serve({
       const messageCount = db.query("SELECT COUNT(*) as count FROM messages").get() as { count: number };
       return Response.json({
         status: "online",
+        // "full" only this server can report. The app's recovery (fallback) server has no `mode`
+        // field, so the UI treats its absence as "not the real server" and says so on screen.
+        mode: "full",
         runtime: "bun",
         version: Bun.version,
         platform: process.platform,

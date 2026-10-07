@@ -2660,6 +2660,29 @@ html[data-mode="light"] { color-scheme: light; }
   touch-action: pan-x pan-y;
 }
 
+/* ---------- recovery-server banner ----------
+   Fixed under the floating chrome rather than in flow: it has to show on any screen (chat,
+   Settings, Artifacts) without pushing the message list or the composer around. */
+.mode-banner {
+  position: absolute;
+  top: var(--chrome-top, 0px);
+  left: 0;
+  right: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 12px;
+  background-color: color-mix(in srgb, var(--warn) 16%, var(--bg-secondary));
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+  color: var(--text-primary);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+.mode-banner[hidden] { display: none; }
+.mode-banner > span:nth-child(2) { flex: 1; min-width: 0; }
+.mode-banner .icon-btn { flex: 0 0 auto; width: 26px; height: 26px; }
+
 /* ---------- local token-usage dashboard ---------- */
 .usage-tab { gap: 12px; }
 .usage-tab > .editor-header { margin: 2px 0 0; }

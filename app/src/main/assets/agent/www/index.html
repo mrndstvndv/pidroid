@@ -44,6 +44,16 @@
       </button>
     </header>
 
+    <!-- Shown only when the page is talking to the app's recovery server instead of the real
+         one. Positioned rather than in flow, so it can appear on any screen without reflowing. -->
+    <div class="mode-banner" id="fallback-banner" hidden>
+      <span data-icon="triangle-alert" data-size="14" class="ico-inline"></span>
+      <span>Recovery server active. Some features are limited until the agent restarts.</span>
+      <button type="button" class="icon-btn" id="fallback-banner-close" aria-label="Dismiss">
+        <span data-icon="x" data-size="14"></span>
+      </button>
+    </div>
+
     <!-- Screen 1: Chat (main) -->
     <section class="screen active" id="screen-chat">
       <div class="chat-messages" id="messages-container"></div>

@@ -138,6 +138,35 @@ window.addEventListener("load", syncSafeTop);
 window.addEventListener("resize", syncSafeTop);
 syncSafeTop();
 
+/* ---------- which server is this? ----------
+   Both the real server and the app's recovery server answer /api/status, but only the real one
+   reports mode: "full". So a missing mode means we are on the fallback, and the banner says so
+   instead of leaving the user to guess why something is quietly different. Checked on load and
+   again whenever the socket reconnects, because the swap happens across a restart. */
+const fallbackBanner = document.getElementById("fallback-banner");
+
+async function checkServerMode() {
+  if (!fallbackBanner) return;
+  try {
+    const response = await fetch("/api/status", { cache: "no-store" });
+    if (!response.ok) return; // nothing to say while the server is unreachable
+    const status = await response.json();
+    fallbackBanner.hidden = status.mode === "full";
+    if (!fallbackBanner.hidden) {
+      fallbackBanner.querySelector("span:nth-child(2)").textContent =
+        status.mode
+          ? `Recovery server (${status.mode}). Some features are limited until the agent restarts.`
+          : "Recovery server active. Some features are limited until the agent restarts.";
+    }
+  } catch {
+    // A failed probe says nothing about which server this is; leave the banner as it was.
+  }
+}
+
+document.getElementById("fallback-banner-close")?.addEventListener("click", () => {
+  if (fallbackBanner) fallbackBanner.hidden = true;
+});
+
 /* ---------- screens: chat (main) and settings ---------- */
 
 const chatScreen = document.getElementById("screen-chat");
@@ -341,6 +370,7 @@ function connectWebSocket() {
   socket.onopen = () => {
     setConnected(true);
     reportVisibility();
+    checkServerMode();
   };
 
   socket.onmessage = (event) => {
@@ -397,4 +427,5 @@ function colorDiff(text) {
 }
 
 // WebSocket Setup
+checkServerMode();
 connectWebSocket();
