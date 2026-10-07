@@ -1321,6 +1321,12 @@ function renderControls(data) {
 }
 
 function render() {
+  const started = performance.now();
+  renderNow();
+  window.__perf?.render(performance.now() - started);
+}
+
+function renderNow() {
   frame = 0;
   if (!payload) return;
   const sessionId = payload.session?.id ?? null;

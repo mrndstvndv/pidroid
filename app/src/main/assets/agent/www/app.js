@@ -379,6 +379,7 @@ function connectWebSocket() {
 
   socket.onmessage = (event) => {
     try {
+      window.__perf?.message(event.data.length);
       const data = JSON.parse(event.data);
       if (data.event === "agent_view") {
         window.onAgentView?.(data.payload);
