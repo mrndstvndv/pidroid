@@ -44,6 +44,10 @@ class AgentForegroundService : Service() {
         }
     }
 
+    /** Set by a stop (or the service going away) so a start still in flight on its thread backs out. */
+    @Volatile
+    private var stopped = false
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -52,6 +56,7 @@ class AgentForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                stopped = true
                 AgentProcessManager.stopAgent()
                 AndroidBridge.stop(this)
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -72,10 +77,18 @@ class AgentForegroundService : Service() {
                 }
 
                 // Off the main thread: extraction and spawning Bun must not hold up the first frame.
+                // A stop can land before this thread gets going, or while it is still starting the
+                // bridge; without the checks it would then start an agent nothing is left to stop.
+                stopped = false
                 val appContext = applicationContext
                 thread(name = "agent-start") {
+                    if (stopped) return@thread
                     AndroidBridge.start(appContext)
                     AgentProcessManager.startAgent(appContext)
+                    if (stopped) {
+                        AgentProcessManager.stopAgent()
+                        AndroidBridge.stop(appContext)
+                    }
                 }
             }
         }
@@ -83,6 +96,7 @@ class AgentForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        stopped = true
         AgentProcessManager.stopAgent()
         AndroidBridge.stop(this)
         super.onDestroy()
