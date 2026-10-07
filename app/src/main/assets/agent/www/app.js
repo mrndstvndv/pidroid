@@ -234,7 +234,12 @@ function showScreen(name) {
 
   if (next === "settings") window.loadProviders?.(); // cheap (~5 kB) and keeps the list honest after a sign-in elsewhere
   else if (next === "artifacts") window.loadArtifacts?.();
-  else window.scrollChatToBottom?.();
+  else {
+    // The composer field cannot be measured while the chat screen is display:none, so it
+    // has to be sized again now that it is laid out.
+    window.autoSizeChatInput?.();
+    window.scrollChatToBottom?.();
+  }
 }
 
 /* ---------- back navigation ----------

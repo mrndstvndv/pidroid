@@ -1766,6 +1766,11 @@ let attachmentUploadInProgress = false;
    swallowed by the chrome touch guard. The cap is a share of the *visual* viewport, so it
    shrinks sensibly once the keyboard is up (CSS vh is the layout viewport and ignores it). */
 function autoSizeChatInput() {
+  // While the Files or Settings takeover is open the chat screen is display:none, so nothing
+  // here is laid out and scrollHeight reads 0. Writing that out would pin the field to
+  // height:0px, and nothing else resizes it on the way back -- the card would come back
+  // collapsed to just its button row. Skip, and let showScreen re-measure once it is back.
+  if (chatInput.offsetParent === null) return;
   const line = parseFloat(getComputedStyle(chatInput).lineHeight) || 20;
   const viewportH = window.visualViewport?.height || window.innerHeight || 640;
   const max = Math.max(line * 3, Math.round(viewportH * 0.3));
@@ -1774,9 +1779,11 @@ function autoSizeChatInput() {
   // us whether the field overflows.
   const overflowing = chatInput.scrollHeight > max + 1;
   chatInput.style.maxHeight = `${max}px`;
-  chatInput.style.height = `${overflowing ? max : chatInput.scrollHeight}px`;
+  // One line as a floor: an empty field is exactly this tall, never less.
+  chatInput.style.height = `${overflowing ? max : Math.max(chatInput.scrollHeight, line)}px`;
   chatInput.classList.toggle("tall", overflowing);
 }
+window.autoSizeChatInput = autoSizeChatInput;
 
 chatInput.addEventListener("input", () => {
   autoSizeChatInput();
