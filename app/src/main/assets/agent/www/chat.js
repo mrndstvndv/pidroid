@@ -1000,11 +1000,19 @@ function syncParts(container, have, want, created) {
       syncParts(entry.target, entry.kids, w.parts, []);
     }
     created.push(el);
-    if (h) h.el.replaceWith(el);
+    if (h) placed(h.el).replaceWith(el);
     else container.append(el);
     have[j] = entry;
   }
-  for (const gone of have.splice(want.length)) gone.el.remove();
+  for (const gone of have.splice(want.length)) placed(gone.el).remove();
+}
+
+/** The node actually in the tree for a part: enhanceCodeBlocks moves a streamed code block into
+ *  a .code-wrap with its copy button, so replacing or removing the bare <pre> would leave that
+ *  wrapper (and button) behind, and every update would nest one more. */
+function placed(el) {
+  const parent = el.parentElement;
+  return parent?.classList.contains("code-wrap") ? parent : el;
 }
 
 /** Items are {key, open, parts, close} turns or {key, parts:[html]} loose elements. Returns the
@@ -1126,8 +1134,12 @@ function markFreshBlocks(root = messagesEl, only) {
     if (live) freshEls.add(el);
     else freshEls.delete(el);
     if (live) {
-      el.classList.add("fresh");
-      el.style.animationDelay = `${-(age / 1000).toFixed(3)}s`;
+      // Only a new copy needs the delay: on a node that is already animating (kept by the
+      // patch) re-stamping it would push the running animation ahead by its own elapsed time.
+      if (!el.classList.contains("fresh")) {
+        el.classList.add("fresh");
+        el.style.animationDelay = `${-(age / 1000).toFixed(3)}s`;
+      }
     } else if (el.classList.contains("fresh")) {
       el.classList.remove("fresh");
       el.style.animationDelay = "";
@@ -1378,7 +1390,10 @@ function renderNow() {
   }
 }
 
+let awaitingResync = false;
+
 window.onAgentView = (data) => {
+  awaitingResync = false;
   payload = data;
   statsDirty = true;
   controlsDirty = true;
@@ -1408,7 +1423,9 @@ window.onAgentUpdate = (data) => {
   const live = update.live == null ? undefined : update.live;
   const stitched = applyLiveDelta(current, live, data.rev, data.base);
   if (live?.delta && !stitched) {
-    window.requestResync?.();
+    // One request is enough: every delta until the snapshot lands misses the same way.
+    if (!awaitingResync) window.requestResync?.();
+    awaitingResync = true;
     return;
   }
   payload.rev = data.rev;
