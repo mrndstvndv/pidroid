@@ -2096,7 +2096,12 @@ const server = Bun.serve({
 
     if (existsSync(fullPath)) {
       const file = Bun.file(fullPath);
-      return new Response(file);
+      // The agent edits these files itself, so they must revalidate; but an unchanged file answers
+      // 304 with no body instead of being re-read and re-sent on every page load.
+      const etag = `"${file.lastModified.toString(36)}-${file.size.toString(36)}"`;
+      const headers = { ETag: etag, "Cache-Control": "no-cache" };
+      if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers });
+      return new Response(file, { headers });
     }
 
     return new Response("Not Found", { status: 404 });

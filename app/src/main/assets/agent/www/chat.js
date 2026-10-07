@@ -909,8 +909,8 @@ function toolBlock(key, call, state, result) {
     </details>`;
 }
 
-function assistantHtml(idKey, blocks, live, results, tools, error, ms, branchAfter, messageId) {
-  const body = blocks.map((b, i) => {
+function assistantParts(idKey, blocks, live, results, tools, error, ms, branchAfter, messageId) {
+  const parts = blocks.map((b, i) => {
     const key = `${idKey}-${i}`;
     if (b.type === "thinking") {
       // Streaming thinking stays open only while it is the block being written.
@@ -922,16 +922,93 @@ function assistantHtml(idKey, blocks, live, results, tools, error, ms, branchAft
     if (!b.text.trim()) return "";
     const html = b.html ?? md(b.text);
     return `<div class="message assistant"><div class="message-content">${html}</div></div>`;
-  }).join("");
-  const err = error ? `<div class="message assistant error"><div class="message-content">${escapeHtml(error)}</div></div>` : "";
+  });
+  if (error) parts.push(`<div class="message assistant error"><div class="message-content">${escapeHtml(error)}</div></div>`);
   // One dim line per assistant message: how long the model took to think it through and write
   // it. Tool calls carry their own durations on their rows.
-  const meta = live || ms === undefined ? "" : `<div class="message-meta">${iconTag("clock", 12, "dim")} Worked ${fmtDur(ms)}</div>`;
+  if (!live && ms !== undefined) parts.push(`<div class="message-meta">${iconTag("clock", 12, "dim")} Worked ${fmtDur(ms)}</div>`);
   // data-branch-after is the entry to branch at for a session starting just after this answer. It is
   // only set when the server marked the message as a valid branch point (no unanswered tool calls).
   const fork = branchAfter === undefined ? "" : ` data-branch-after="${branchAfter}"`;
   const identity = messageId === undefined ? "" : ` data-message-id="${messageId}"`;
-  return `<div class="turn"${fork}${identity}>${body}${err}${meta}</div>`;
+  return { key: idKey, open: `<div class="turn"${fork}${identity}>`, parts: parts.filter(Boolean), close: "</div>" };
+}
+
+function assistantHtml(...args) {
+  const t = assistantParts(...args);
+  return t.open + t.parts.join("") + t.close;
+}
+
+/* ---------- live tail patching ----------
+   The tail (the pending tool message, the streaming partial, the queue) used to be thrown away
+   and re-parsed from innerHTML on every update, several times a second, even though only the
+   last block of it had changed. It is now a list of slots, each remembering the html it last
+   produced for every block; a block whose html is unchanged keeps its node (and with it its
+   scroll offset, selection, open state and running animation), and only the blocks that differ
+   are re-parsed. A slot is a turn (wrapper + blocks) or a single loose element (no wrapper). */
+let tailSlots = [];
+const parseTpl = document.createElement("template");
+
+function parseEl(html) {
+  parseTpl.innerHTML = html;
+  return parseTpl.content.firstElementChild;
+}
+
+/** Items are {key, open, parts, close} turns or {key, parts:[html]} loose elements. Returns the
+ *  nodes that were (re)created, so the caller only restores state on those. */
+function patchTail(root, items) {
+  const created = [];
+  let i = 0;
+  for (; i < items.length && i < tailSlots.length; i++) {
+    const item = items[i], slot = tailSlots[i];
+    if (slot.key !== item.key || slot.open !== item.open) break;
+    if (!slot.wrapper) {
+      if (slot.parts[0].html !== item.parts[0]) {
+        const el = parseEl(item.parts[0]);
+        slot.parts[0].el.replaceWith(el);
+        slot.parts[0] = { html: item.parts[0], el };
+        created.push(el);
+      }
+      continue;
+    }
+    const have = slot.parts;
+    for (let j = 0; j < item.parts.length; j++) {
+      if (have[j] && have[j].html === item.parts[j]) continue;
+      const el = parseEl(item.parts[j]);
+      created.push(el);
+      if (have[j]) have[j].el.replaceWith(el);
+      else slot.wrapper.append(el);
+      have[j] = { html: item.parts[j], el };
+    }
+    for (const gone of have.splice(item.parts.length)) gone.el.remove();
+  }
+  // From the first mismatch on, rebuild: the tail is a handful of nodes, and a changed key means
+  // a different message anyway.
+  for (let k = i; k < tailSlots.length; k++) {
+    const slot = tailSlots[k];
+    (slot.wrapper || slot.parts[0].el).remove();
+  }
+  tailSlots.length = i;
+  for (; i < items.length; i++) {
+    const item = items[i];
+    if (item.open === undefined) {
+      const el = parseEl(item.parts[0]);
+      root.append(el);
+      created.push(el);
+      tailSlots.push({ key: item.key, wrapper: null, parts: [{ html: item.parts[0], el }] });
+      continue;
+    }
+    const wrapper = parseEl(item.open + item.close);
+    const parts = item.parts.map((html) => {
+      const el = parseEl(html);
+      wrapper.append(el);
+      return { html, el };
+    });
+    root.append(wrapper);
+    created.push(wrapper);
+    tailSlots.push({ key: item.key, open: item.open, wrapper, parts });
+  }
+  return created;
 }
 
 function stampAnimPhase() {
@@ -1088,30 +1165,30 @@ function renderMessages(view, sessionId) {
 
   // The only committed message whose tool state can still change is the pending tail. Keep it
   // beside the streaming partial so status/output updates do not force a transcript repaint.
-  const tailHtml = [];
+  const tailItems = [];
   if (active) {
     const error = active.stop === "error" || active.stop === "aborted" ? (active.error || (active.stop === "aborted" ? "Stopped" : "")) : "";
-    tailHtml.push(assistantHtml(`m${active.id}`, active.blocks || [], false, results, tools, error, active.ms, active.branchAfter, active.id));
+    tailItems.push(assistantParts(`m${active.id}`, active.blocks || [], false, results, tools, error, active.ms, active.branchAfter, active.id));
   }
-  if (view.live?.blocks?.length) tailHtml.push(assistantHtml("live", view.live.blocks, true, results, tools, ""));
+  if (view.live?.blocks?.length) tailItems.push(assistantParts("live", view.live.blocks, true, results, tools, ""));
   else if (view.busy) {
     const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
-    tailHtml.push(`<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>`);
+    tailItems.push({ key: "working", parts: [`<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>`] });
   }
 
-  for (const q of view.queue || []) {
-    tailHtml.push(`<div class="message user queued"><div class="message-content">${escapeHtml(q.text)}</div><div class="message-meta">${iconTag("clock", 12, "dim")} queued · sends after the current step</div></div>`);
+  (view.queue || []).forEach((q, n) => {
+    tailItems.push({ key: `q${n}`, parts: [`<div class="message user queued"><div class="message-content">${escapeHtml(q.text)}</div><div class="message-meta">${iconTag("clock", 12, "dim")} queued · sends after the current step</div></div>`] });
+  });
+  if (!historyHasContent && !tailItems.length) {
+    tailItems.push({ key: "empty", parts: ['<p class="description empty">Give the agent a task. It can read, write and edit its own UI and files, and run commands.</p>'] });
   }
-  if (!historyHasContent && !tailHtml.length) {
-    tailHtml.push('<p class="description empty">Give the agent a task. It can read, write and edit its own UI and files, and run commands.</p>');
-  }
-  dynamicEl.innerHTML = tailHtml.join("");
+  const created = patchTail(dynamicEl, tailItems);
   enhanceCodeBlocks(dynamicEl);
 
   if (following) glideTo(messagesEl, messagesEl.scrollHeight);
   updateJumpBottom();
   if (historyChanged) restoreBodyScroll(historyEl);
-  restoreBodyScroll(dynamicEl);
+  for (const el of created) restoreBodyScroll(el);
   if (historyChanged) {
     markFreshBlocks(messagesEl);
     pruneFreshBlocks();
@@ -1196,6 +1273,7 @@ function render() {
     historyHasContent = false;
     historyEl.replaceChildren();
     dynamicEl.replaceChildren();
+    tailSlots = [];
     firstSeen.clear();
     bodyScrollTop.clear();
     unpinnedBodies.clear();
