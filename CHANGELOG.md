@@ -1,3 +1,23 @@
+# [0.5.0](https://github.com/mrndstvndv/pidroid/compare/v0.4.1...v0.5.0) (2026-10-07)
+
+
+### Bug Fixes
+
+* **agent:** follow the stream by reader intent, not scroll offset ([4a23de1](https://github.com/mrndstvndv/pidroid/commit/4a23de1ab0da76afafd418160fd4cfabb542d9b1))
+* **agent:** hide OpenCode free models that Zen no longer serves ([743e04d](https://github.com/mrndstvndv/pidroid/commit/743e04db3e9f2534a9d4ec0416acf10d7a855f24))
+* **agent:** keep the newest message in view when the viewport shrinks ([e94bd2a](https://github.com/mrndstvndv/pidroid/commit/e94bd2ab8e4ccfeb6d72b7f20037d3a8f966324e))
+* **agent:** re-measure the composer when the chat screen returns ([77823b2](https://github.com/mrndstvndv/pidroid/commit/77823b2fb04ae94ae770d95a6ea1f4259fb56637))
+
+
+### Features
+
+* **agent:** add a shared token-count formatter ([8769a39](https://github.com/mrndstvndv/pidroid/commit/8769a39f029156e8a8a13cd8149e551e9818bec3))
+* **agent:** artifact card rendering, branch chip and thinking status UI tweaks ([c0701b4](https://github.com/mrndstvndv/pidroid/commit/c0701b44170ef28587c2d47b76d229e4776a2368))
+* **agent:** copy or export a session transcript from its menu ([e31d211](https://github.com/mrndstvndv/pidroid/commit/e31d211ac09b1d776908773b783ef82a3b0a8faa))
+* **agent:** export a session transcript as Markdown and JSON ([fbeffe4](https://github.com/mrndstvndv/pidroid/commit/fbeffe4bed1ac5fb3e5b95e3065d6ae15cfb6678))
+* **agent:** pick the title model from the model chooser sheet ([118c3e9](https://github.com/mrndstvndv/pidroid/commit/118c3e97026784526c88e3ce0d698a26dd869068))
+* **agent:** show session title generation as in-app toasts ([11427c9](https://github.com/mrndstvndv/pidroid/commit/11427c9e0b3c1c2cd09ac1d1eb67058200368ee1))
+
 ## [0.4.1](https://github.com/mrndstvndv/pidroid/compare/v0.4.0...v0.4.1) (2026-10-07)
 
 
