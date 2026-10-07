@@ -351,6 +351,47 @@ jumpBottomBtn.addEventListener("click", () => {
   glideTo(messagesEl, messagesEl.scrollHeight, MOVE_TAU);
 });
 
+/* ---------- holding the tail while the viewport moves ----------
+   The list is the only thing that scrolls, so when the soft keyboard opens its height drops
+   by the keyboard's height. The offset we were sitting at now points further up the
+   transcript and the newest message is left behind the keyboard: tapping the composer while
+   reading the end of the chat loses your place. The same happens when the composer grows,
+   when the device rotates and when the system bars come and go.
+
+   If the reader was at the tail, follow it down; if they had scrolled back to read
+   something, leave their offset exactly where it is. A ResizeObserver rather than the
+   visualViewport event, because it runs after layout and before the frame is painted -- the
+   correction is then never seen as a jump -- and because it does not care whether app.js's
+   viewport pinning or this runs first. */
+const TAIL_PX = 120;
+
+function followTail() {
+  if (!tailPinned || messagesEl.offsetParent === null) return;
+  const bottom = clampScroll(messagesEl, Infinity);
+  if (Math.abs(bottom - messagesEl.scrollTop) < ARRIVED_PX) return;
+  stopGlide(messagesEl);
+  window.__perf?.scrollBack(bottom - messagesEl.scrollTop);
+  setScrollTop(messagesEl, bottom);
+  readerTop = bottom;
+}
+
+if (typeof ResizeObserver !== "undefined") {
+  let firstPass = true;
+  // The first callback only reports the size we already have; moving the list then would
+  // race the opening render, which does its own scroll.
+  new ResizeObserver(() => {
+    if (firstPass) { firstPass = false; return; }
+    followTail();
+  }).observe(messagesEl);
+}
+
+// Tapping the field can also make the WebView scroll the list itself to reveal the caret.
+// That lands after focusin, so undo it once the WebView has finished with the list.
+document.addEventListener("focusin", (e) => {
+  if (e.target !== chatInput) return;
+  requestAnimationFrame(followTail);
+});
+
 function bodyKey(el) {
   return el.closest("details[data-key]")?.dataset.key;
 }
