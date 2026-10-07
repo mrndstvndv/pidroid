@@ -1340,8 +1340,9 @@ const server = Bun.serve({
                  SUM(cost_total) AS cost,
                  COUNT(cost_total) AS pricedResponses,
                  COUNT(*) AS responses,
-                 COUNT(DISTINCT session_id) AS sessions
-          FROM token_usage_events ${whereFor(start)}
+                 COUNT(DISTINCT u.session_id) AS sessions
+          FROM token_usage_events u
+          JOIN sessions s ON u.session_id = s.id AND s.deleted = 0 ${whereFor(start, "u.")}
         `).get(...bindingsFor(start)) as any;
         return {
           inputTokens: Number(raw?.inputTokens ?? 0),
@@ -1376,7 +1377,8 @@ const server = Bun.serve({
                SUM(cost_total) AS cost,
                COUNT(cost_total) AS pricedResponses,
                COUNT(*) AS responses
-        FROM token_usage_events ${whereFor(start)}
+        FROM token_usage_events u
+        JOIN sessions s ON u.session_id = s.id AND s.deleted = 0 ${whereFor(start, "u.")}
         GROUP BY bucket
         ORDER BY bucket ASC
       `).all(...bindingsFor(start)) as any[]).map(normalizeUsageRow);
@@ -1423,9 +1425,9 @@ const server = Bun.serve({
         printf('-%d days', (CAST(strftime('%w', captured_at / 1000, 'unixepoch', 'localtime') AS INTEGER) + 6) % 7)
       )`;
       const monthBucket = "strftime('%Y-%m', captured_at / 1000, 'unixepoch', 'localtime')";
-      const providers = (db.query("SELECT DISTINCT provider FROM token_usage_events ORDER BY provider").all() as { provider: string }[])
+      const providers = (db.query("SELECT DISTINCT u.provider FROM token_usage_events u JOIN sessions s ON u.session_id = s.id AND s.deleted = 0 ORDER BY u.provider").all() as { provider: string }[])
         .map((row) => row.provider);
-      const availableModels = db.query("SELECT DISTINCT provider, model FROM token_usage_events ORDER BY provider, model").all() as { provider: string; model: string }[];
+      const availableModels = db.query("SELECT DISTINCT u.provider, u.model FROM token_usage_events u JOIN sessions s ON u.session_id = s.id AND s.deleted = 0 ORDER BY u.provider, u.model").all() as { provider: string; model: string }[];
       return Response.json({
         generatedAt: Date.now(),
         filters: { provider: selectedProvider, model: selectedModel, providers, models: availableModels },
