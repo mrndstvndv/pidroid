@@ -16,6 +16,7 @@ import { commandCodeProvider, commandCodeUsage, commandCodeUsageData } from "./p
 import { opencodeProvider } from "./providers/opencode.ts";
 import { GITHUB_COPILOT_PROVIDER_ID, withCopilotOAuth } from "./providers/github-copilot.ts";
 import { FileCredentialStore, LoginManager } from "./auth.ts";
+import { bridgeAvailable, bridgeCall } from "./bridge.ts";
 import { Changes } from "./changes.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
@@ -202,6 +203,20 @@ function broadcast(event: string, payload: any) {
       clients.delete(ws);
     }
   }
+}
+
+/**
+ * Clients whose page has told us it is hidden (screen off, or another app in front). A connection
+ * that has not said anything yet counts as visible: the page reports its state the moment it opens,
+ * and treating that first instant as "away" would fire a notification at someone watching the app
+ * come up.
+ */
+const hiddenClients = new Set<any>();
+
+/** Whether a browser is on screen right now. A run that ends unseen is what the notification is for. */
+function watchingUi(): boolean {
+  for (const ws of clients) if (!hiddenClients.has(ws)) return true;
+  return false;
 }
 
 // Every agent turn is bracketed by git checkpoints so changes can be inspected and undone.
@@ -967,7 +982,7 @@ function noteRunStarted(conversationId: number) {
  * left unmarked: its result is right there in the chat, so a "done" dot on it would only repeat what
  * the user is already reading. A run that ends in some other session is what the mark is for.
  */
-function markRunFinished(conversationId: number) {
+function markRunFinished(conversationId: number, notify = true) {
   runningConversations.delete(conversationId);
   if (conversationId === current.conversationId) {
     finishedRuns.delete(conversationId); // the open session never carries a mark, not even a stale one
@@ -978,6 +993,44 @@ function markRunFinished(conversationId: number) {
     clearTimeout(runWatchTimer);
     runWatchTimer = undefined;
   }
+  if (notify) notifyRunFinished(conversationId);
+}
+
+/* ---------- "the run you left going is done" notification ----------
+   A run that ends while no browser is on screen gets an Android notification: the user put the phone
+   down, and the sidebar's "done" mark is not going to say anything until they come back. While the
+   page is visible nothing is posted -- the result is on screen already, and a banner over it would
+   only repeat it. The banner carries the session's title and, when the session that finished is the
+   one this process holds a live transcript for, the last thing the model wrote.
+
+   A notification is a courtesy, never a step of the run: the host may be unreachable or refuse it
+   (notifications switched off for the app), and that must not fail a run, so a failure is logged and
+   dropped. Note that `id` is the conversation id, so the next "done" for one session replaces that
+   session's own banner rather than stacking another one on it. */
+const NOTIFICATION_PREVIEW_CHARS = 160;
+
+/** The closing text of the open session's last assistant message, flattened onto one line. */
+function lastAssistantLine(): string | undefined {
+  const message = [...latestView.messages].reverse().find(m => m.role === "assistant");
+  if (!message) return undefined;
+  const text = (message.blocks ?? []).flatMap(block => (block.type === "text" ? [block.text] : [])).join(" ");
+  // Markdown's furniture (headings, bullets, quotes) is noise in a one-line banner.
+  const line = text.replace(/^\s*[#>*+-]+\s*/gm, "").replace(/\s+/g, " ").trim();
+  if (!line) return undefined;
+  return line.length > NOTIFICATION_PREVIEW_CHARS ? `${line.slice(0, NOTIFICATION_PREVIEW_CHARS - 1)}…` : line;
+}
+
+/** Tell the user, away from the app, that this session has stopped working. */
+function notifyRunFinished(conversationId: number) {
+  if (!bridgeAvailable() || watchingUi()) return;
+  const row = sessions.byConversation(conversationId);
+  if (!row || row.deleted) return;
+  const preview = conversationId === current.conversationId ? lastAssistantLine() : undefined;
+  void bridgeCall("notification.post", {
+    id: conversationId,
+    title: row.title,
+    body: preview ?? "Finished working.",
+  }).catch((err: Error) => console.warn(`[pidroid] "finished" notification for "${row.title}" failed: ${err?.message ?? err}`));
 }
 
 /* A run interrupted by a restart resumes inside this process with no request of ours to hang the
@@ -1521,7 +1574,8 @@ const server = Bun.serve({
     if (url.pathname === "/api/abort" && req.method === "POST") {
       const conversationId = current.conversationId;
       return root.abort(context)
-        .then(() => { markRunFinished(conversationId); return Response.json({ success: true }); })
+        // No notification: the user is the one who asked for the stop, so they are looking at the app.
+        .then(() => { markRunFinished(conversationId, false); return Response.json({ success: true }); })
         .catch(err => Response.json({ error: String(err) }, { status: 500 }));
     }
 
@@ -1870,6 +1924,7 @@ const server = Bun.serve({
   websocket: {
     open(ws) {
       clients.add(ws);
+      hiddenClients.delete(ws); // a fresh connection reports its own visibility in a moment
       ws.send(JSON.stringify({ event: "connected", payload: { version: Bun.version, port: PORT } }));
       ws.send(JSON.stringify({ event: "agent_view", payload: chatPayload(), timestamp: Date.now() }));
     },
@@ -1878,11 +1933,17 @@ const server = Bun.serve({
         const data = JSON.parse(String(message));
         if (data.type === "ping") {
           ws.send(JSON.stringify({ event: "pong" }));
+        } else if (data.type === "visible") {
+          // The page says when it goes to the background, which is exactly when a finished run is
+          // worth a notification (see notifyRunFinished).
+          if (data.visible === false) hiddenClients.add(ws);
+          else hiddenClients.delete(ws);
         }
       } catch {}
     },
     close(ws) {
       clients.delete(ws);
+      hiddenClients.delete(ws);
     }
   }
 });

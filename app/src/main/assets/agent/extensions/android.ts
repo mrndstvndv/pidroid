@@ -2,56 +2,16 @@
  * Android features, exposed by the app over a Unix socket (PIDROID_BRIDGE_SOCKET).
  * The Kotlin side owns the capability list and the access checks; this file only wraps calls as tools.
  * A call that needs a permission the user hasn't granted fails with code "needs_permission".
- * After editing, call reload_extensions.
+ *
+ * The socket client itself is ../bridge.ts, shared with the harness, which posts its own notification
+ * when a run ends unattended. That helper is imported, not inlined, so there is only one copy of the
+ * wire protocol -- and unlike this file it is not hot-swapped: restart_server after changing it.
+ * After editing this file, call reload_extensions.
  */
 
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-
-class BridgeError extends Error {
-  constructor(message: string, readonly code: string) {
-    super(message);
-  }
-}
-
-/** One request per connection: send a JSON line, read the JSON line back. */
-function call(method: string, args: Record<string, unknown> = {}): Promise<any> {
-  const path = process.env.PIDROID_BRIDGE_SOCKET;
-  if (!path) return Promise.reject(new BridgeError("Not running inside the Pidroid app", "unavailable"));
-  return new Promise((resolve, reject) => {
-    let buf = "";
-    const timer = setTimeout(() => reject(new BridgeError("Android bridge timed out", "timeout")), 15_000);
-    const done = (fn: () => void) => {
-      clearTimeout(timer);
-      fn();
-    };
-    Bun.connect({
-      unix: path,
-      socket: {
-        open(sock) {
-          sock.write(JSON.stringify({ method, args }) + "\n");
-        },
-        data(_sock, chunk) {
-          buf += chunk.toString();
-        },
-        close() {
-          try {
-            const res = JSON.parse(buf);
-            done(() => (res.ok ? resolve(res.result) : reject(new BridgeError(res.error, res.code))));
-          } catch {
-            done(() => reject(new BridgeError("Bad reply from Android bridge", "internal")));
-          }
-        },
-        error(_sock, err) {
-          done(() => reject(new BridgeError(err.message, "unavailable")));
-        },
-        connectError(_sock, err) {
-          done(() => reject(new BridgeError(err.message, "unavailable")));
-        },
-      },
-    }).catch((err) => done(() => reject(new BridgeError(String(err?.message ?? err), "unavailable"))));
-  });
-}
+import { bridgeCall as call } from "../bridge.ts";
 
 const batteryStatus = defineTool({
   name: "battery_status",
@@ -68,7 +28,8 @@ const notify = defineTool({
   name: "notify_user",
   description:
     "Post an Android notification to the user, even when the app is in the background. " +
-    "Passing the same id again replaces the earlier notification. Fails with code needs_permission if notifications are blocked.",
+    "Passing the same id again replaces the earlier notification. Fails with code needs_permission if notifications are blocked. " +
+    "The harness posts its own notification when a run ends while the app is off screen, so do not use this tool to announce that you are done or to report progress.",
   parameters: Type.Object({
     title: Type.String(),
     body: Type.Optional(Type.String()),

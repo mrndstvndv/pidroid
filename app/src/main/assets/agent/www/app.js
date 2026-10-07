@@ -323,11 +323,24 @@ function setConnected(online) {
   document.getElementById("conn-dot")?.classList.toggle("online", online);
 }
 
+/* The server posts an Android notification when a run ends while the app is not on screen, so it has
+   to be told whether this page is on screen: reported on connect and on every change (screen off,
+   another app in front, WebView in the background -- all of them fire visibilitychange). */
+function reportVisibility() {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "visible", visible: document.visibilityState === "visible" }));
+  }
+}
+document.addEventListener("visibilitychange", reportVisibility);
+
 function connectWebSocket() {
   if (serverStopping) return;
   socket = new WebSocket(wsUrl);
 
-  socket.onopen = () => setConnected(true);
+  socket.onopen = () => {
+    setConnected(true);
+    reportVisibility();
+  };
 
   socket.onmessage = (event) => {
     try {
