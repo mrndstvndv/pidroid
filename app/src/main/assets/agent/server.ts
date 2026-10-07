@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { Type } from "@earendil-works/pi-ai";
-import { AssistantEntry, createRegistry, defineExtension, defineTool, Harness, hook, section, ToolTask, type Conversation } from "@earendil-works/pi-durable";
+import { AssistantEntry, createRegistry, defineEntry, defineExtension, defineTool, Harness, hook, section, ToolTask, type Conversation } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools, createReadTool } from "@earendil-works/pi-durable/tools";
@@ -20,7 +20,7 @@ import { bridgeAvailable, bridgeCall } from "./bridge.ts";
 import { Changes } from "./changes.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
-import { ChatViewBuilder, clampLevel, renderMarkdown, supportedLevels, type ChatView } from "./chatview.ts";
+import { ChatViewBuilder, clampLevel, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
 import { Timings } from "./timings.ts";
 
 const PORT = Number(process.env.PORT) || 8765;
@@ -28,6 +28,8 @@ const PORT = Number(process.env.PORT) || 8765;
 const APP_DIR = process.cwd();
 const WWW_DIR = join(APP_DIR, "www");
 const DB_PATH = join(APP_DIR, "pidroid.sqlite");
+const ModelChangeEntry = defineEntry(MODEL_CHANGE_ENTRY_KIND);
+const ThinkingChangeEntry = defineEntry(THINKING_CHANGE_ENTRY_KIND);
 
 /**
  * One directory per session, so sessions stop fighting over the same files. It is a sibling of the
@@ -1368,8 +1370,16 @@ const server = Bun.serve({
         if (!models.getModel(provider, modelId)) {
           return Response.json({ error: `Unknown model: ${body.model}` }, { status: 400 });
         }
+        const nextModel = `${provider}/${modelId}`;
+        const previousModel = `${pickDefaultModel().provider}/${pickDefaultModel().modelId}`;
         await root.configure({ model: { provider, modelId } }, context);
-        sessions.setModel(current.id, `${provider}/${modelId}`);
+        const hasTranscript = latestView.messages.some((message) => message.role === "user" || message.role === "assistant");
+        if (nextModel !== previousModel && hasTranscript) {
+          await root.commit((tx) => tx.appendEntry(ModelChangeEntry, Number(root.id), {
+            data: { fromModel: previousModel, toModel: nextModel, switchedAt: Date.now() },
+          }), context);
+        }
+        sessions.setModel(current.id, nextModel);
         current = sessions.get(current.id) ?? current;
         await applyThinking();
         broadcast("agent_view", chatPayload());
@@ -1589,6 +1599,12 @@ const server = Bun.serve({
         sessions.setThinking(current.id, body.level);
         current = sessions.get(current.id) ?? current;
         await applyThinking();
+        const hasTranscript = latestView.messages.some((message) => message.role === "user" || message.role === "assistant");
+        if (body.level !== info.current && hasTranscript) {
+          await root.commit((tx) => tx.appendEntry(ThinkingChangeEntry, Number(root.id), {
+            data: { fromLevel: info.current, toLevel: body.level, switchedAt: Date.now() },
+          }), context);
+        }
         broadcast("agent_view", chatPayload());
         return Response.json({ success: true, thinking: thinkingInfo() });
       }).catch(err => Response.json({ error: String(err) }, { status: 500 }));

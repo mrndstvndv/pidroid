@@ -15,7 +15,7 @@ export type Block =
 
 export interface ViewMessage {
   id: number;
-  role: "user" | "assistant" | "tool";
+  role: "user" | "assistant" | "tool" | "event";
   /** Entry to branch at so the new session starts just after this message. Only set where that
    *  makes a well-formed conversation: an assistant message whose tool calls have all been answered.
    *  Branching after one with unanswered calls would leave tool calls without results. */
@@ -31,6 +31,8 @@ export interface ViewMessage {
   stop?: string;
   error?: string;
   model?: string;
+  modelChange?: { from: string; to: string };
+  thinkingChange?: { from: string; to: string };
   /** How long the model took for this message: its first block to the committed message. */
   ms?: number;
 }
@@ -66,6 +68,9 @@ export interface ChatView {
     cost: number;
   };
 }
+
+export const MODEL_CHANGE_ENTRY_KIND = "pidroid.model-change";
+export const THINKING_CHANGE_ENTRY_KIND = "pidroid.thinking-change";
 
 const MAX_MESSAGES = 150;
 const MAX_TOOL_TEXT = 6000;
@@ -265,6 +270,28 @@ export class ChatViewBuilder {
       // tool results and system entries logged ahead of it too.
       const before = this.#previousEntryId;
       this.#previousEntryId = entry.id;
+      if (entry?.kind === MODEL_CHANGE_ENTRY_KIND) {
+        const change = entry.data;
+        if (typeof change?.fromModel === "string" && typeof change?.toModel === "string") {
+          added.push({
+            id: entry.id,
+            role: "event",
+            modelChange: { from: change.fromModel, to: change.toModel },
+          });
+        }
+        continue;
+      }
+      if (entry?.kind === THINKING_CHANGE_ENTRY_KIND) {
+        const change = entry.data;
+        if (typeof change?.fromLevel === "string" && typeof change?.toLevel === "string") {
+          added.push({
+            id: entry.id,
+            role: "event",
+            thinkingChange: { from: change.fromLevel, to: change.toLevel },
+          });
+        }
+        continue;
+      }
       const message = entry?.model?.[0];
       if (!message) continue;
       if (entry.kind === "pi.user") {

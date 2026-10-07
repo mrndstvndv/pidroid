@@ -950,7 +950,7 @@ function lastPendingToolMessage(messages, results, busy) {
   if (!busy) return null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
-    if (message.role === "tool") continue;
+    if (message.role === "tool" || message.role === "event") continue;
     if (message.role !== "assistant") return null;
     return (message.blocks || []).some((block) => block.type === "toolCall" && !results.has(block.id))
       ? message
@@ -991,7 +991,13 @@ function renderMessages(view, sessionId) {
     const historyHtml = [];
     historyHasContent = false;
     for (const m of messages) {
-      if (m.role === "user") {
+      if (m.role === "event" && (m.modelChange || m.thinkingChange)) {
+        const change = m.modelChange || m.thinkingChange;
+        const isModel = !!m.modelChange;
+        const label = isModel ? "Model switched" : "Thinking effort changed";
+        historyHtml.push(`<div class="message model-event" data-key="mc${escapeHtml(m.id)}">${iconTag(isModel ? "cpu" : "brain", 13, "dim")}<span>${label} from <strong>${escapeHtml(change.from)}</strong> to <strong>${escapeHtml(change.to)}</strong></span></div>`);
+        historyHasContent = true;
+      } else if (m.role === "user") {
         // data-branch-before points at the entry ahead of this prompt, so a new session can start there
         // and replay it. Absent on the first message of a conversation, which has nothing before it.
         const fork = m.branchBefore === undefined ? "" : ` data-branch-before="${m.branchBefore}"`;

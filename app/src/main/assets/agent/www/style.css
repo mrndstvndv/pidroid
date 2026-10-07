@@ -520,6 +520,27 @@ body {
   gap: 4px;
 }
 
+.message.model-event {
+  align-self: center;
+  max-width: 100%;
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.message.model-event strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
 .chat-input-bar {
   display: flex;
   align-items: flex-end;
