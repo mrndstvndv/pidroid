@@ -149,7 +149,6 @@ function renderModels() {
         <button type="button" class="model-row${m.id === modelData.current ? " selected" : ""}" data-id="${escapeHtml(m.id)}">
           <span class="model-name">${escapeHtml(m.name)}</span>
           <span class="provider-meta"><span class="provider-tag">${escapeHtml(providerOf(m))}</span> · ${escapeHtml(metaOf(m))}</span>
-          ${m.id === modelData.current ? `<span class="model-check">${icon("check", 20)}</span>` : ""}
         </button>
         <button type="button" class="model-default${m.id === modelData.default ? " active" : ""}" data-id="${escapeHtml(m.id)}"
           title="${m.id === modelData.default ? "Default for new sessions" : "Make this the default for new sessions"}"

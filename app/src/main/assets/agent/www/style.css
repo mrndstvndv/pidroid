@@ -1313,32 +1313,28 @@ textarea {
 .sheet-search { margin: 0 0 10px; border-radius: 14px; background-color: var(--row-fill); }
 .sheet .model-group { background-color: color-mix(in srgb, var(--text-primary) 7%, var(--bg-primary)); }
 
-.sheet .model-list { margin: 0; padding: 0; }
+.sheet .model-list { margin: 0 -8px; padding: 0 8px; } /* room for the highlight to reach past the text */
 .sheet .model-group { margin: 0; padding: 12px 0 4px; border-bottom: none; }
 .sheet .recents-head { border-bottom: none; }
 .sheet .recents-head + .model-item { margin-top: 0; }
 
-/* Plain rows on the sheet itself; only a press tints one. */
+/* Plain rows on the sheet itself; the current model is the one highlighted row, and a press
+   tints any other. */
 .sheet .model-item { margin: 0 -8px; }
 .sheet .model-row {
   position: relative;
-  padding: 10px 44px 10px 8px;
+  padding: 10px 8px;
   border: none;
   border-radius: 12px;
   background: none;
   font-size: 0.95rem;
 }
-.sheet .model-row.selected { background: none; border: none; }
-.sheet .model-row:active { background-color: var(--row-fill); }
-
-.model-check {
-  position: absolute;
-  right: 14px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: inline-flex;
-  color: var(--accent);
+.sheet .model-row.selected {
+  border: none;
+  background-color: color-mix(in srgb, var(--accent) 18%, transparent);
 }
+.sheet .model-row.selected .model-name { color: var(--accent-text-strong, var(--accent)); font-weight: 600; }
+.sheet .model-row:active { background-color: var(--row-fill); }
 
 .sheet-row {
   display: flex;
