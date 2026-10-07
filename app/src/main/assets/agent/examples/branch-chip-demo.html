@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Branch chip</title>
+<style>
+  :root {
+    --bg: #000;
+    --card: #101014;
+    --card-2: #17171c;
+    --press: #1e1e25;
+    --line: #26262e;
+    --text: #e8e8ea;
+    --dim: #8a8a95;
+    --accent: #4f8cff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 12px 14px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  header b { font-size: 0.9rem; }
+  header p { margin: 4px 0 0; font-size: 0.72rem; color: var(--dim); }
+  .log { flex: 1; overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .msg {
+    position: relative;
+    max-width: 88%;
+    padding: 9px 13px;
+    border-radius: 14px;
+    background: var(--card-2);
+    font-size: 0.85rem;
+    -webkit-tap-highlight-color: transparent;
+    transition: box-shadow .15s ease;
+  }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.bot { align-self: flex-start; border-bottom-left-radius: 4px; }
+  .msg.picked { box-shadow: 0 0 0 1px var(--line); }
+
+  .chip {
+    position: absolute; top: 4px; right: 4px;
+    width: 27px; height: 27px;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--card); color: var(--dim);
+    opacity: 0; transform: scale(.85); pointer-events: none;
+    transition: opacity .13s ease, transform .13s ease, color .13s ease;
+  }
+  .msg.picked .chip { opacity: 1; transform: none; pointer-events: auto; }
+  .chip:hover { color: var(--text); border-color: var(--accent); }
+  .msg .pad { padding-right: 26px; }
+
+  .menu {
+    position: fixed; z-index: 9;
+    min-width: 208px; padding: 4px;
+    display: flex; flex-direction: column; gap: 2px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.6);
+  }
+  .menu[hidden] { display: none; }
+  .menu button {
+    display: grid; grid-template-columns: 16px 1fr; gap: 1px 9px;
+    padding: 8px 10px; border: 0; border-radius: 7px;
+    background: none; color: var(--text); text-align: left; cursor: pointer; font: inherit;
+  }
+  .menu button:hover, .menu button:focus-visible { background: var(--press); outline: none; }
+  .menu .lbl { font-size: .82rem; }
+  .menu .hint { grid-column: 2; font-size: .66rem; color: var(--dim); }
+  .menu svg { grid-row: 1; margin-top: 2px; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 10px 14px; font-size: .72rem; color: var(--dim);
+    display: flex; gap: 10px; align-items: center; min-height: 40px;
+  }
+  code { color: var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <b>Branch chip — the gesture demo</b>
+  <p>Tap a bubble → its chip appears. Tap the chip → the menu. Tapping elsewhere clears it.</p>
+</header>
+
+<div class="log" id="log">
+  <div class="msg user" data-point="before"><span class="pad">Show me the session list markup.</span><button class="chip" aria-label="Branch before this"></button></div>
+  <div class="msg bot" data-point="after"><span class="pad">It's in <code>www/sessions.js</code> — the row markup starts around line 40.</span><button class="chip" aria-label="Branch from here"></button></div>
+  <div class="msg user" data-point="before"><span class="pad">Now make the rows collapsible.</span><button class="chip" aria-label="Branch before this"></button></div>
+  <div class="msg bot" data-point="after"><span class="pad">Done — each row is a <code>&lt;details&gt;</code> now, state kept in a Set so an open row survives a re-render.</span><button class="chip" aria-label="Branch from here"></button></div>
+</div>
+
+<footer id="out">nothing picked yet</footer>
+
+<script>
+  const GLYPH = {
+    before: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+    after:  '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/>'
+  };
+  const ITEMS = {
+    before: { label: "Branch before this", hint: "starts again from the message above" },
+    after:  { label: "Branch from here",   hint: "keeps everything up to this answer" }
+  };
+  const svg = (p, s = 15) =>
+    `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+
+  const log = document.getElementById("log");
+  const out = document.getElementById("out");
+  const menu = document.createElement("div");
+  menu.className = "menu";
+  menu.hidden = true;
+  document.body.append(menu);
+
+  let anchor = null;
+
+  for (const msg of log.querySelectorAll(".msg")) {
+    const point = msg.dataset.point;
+    msg.querySelector(".chip").innerHTML = svg(GLYPH[point], 14);
+    msg.addEventListener("click", (e) => {
+      if (e.target.closest(".chip")) return openMenu(msg.querySelector(".chip"), point);
+      // Only ever one chip out: tapping another message moves it.
+      log.querySelectorAll(".msg.picked").forEach((m) => m.classList.remove("picked"));
+      msg.classList.toggle("picked");
+    });
+  }
+
+  function openMenu(chip, point) {
+    anchor = chip.closest(".msg");
+    log.querySelectorAll(".msg.picked").forEach((m) => m.classList.remove("picked"));
+    anchor.classList.add("picked");
+    const it = ITEMS[point];
+    menu.innerHTML = `<button type="button">${svg(GLYPH[point], 16)}<span class="lbl">${it.label}</span><span class="hint">${it.hint}</span></button>`;
+    menu.hidden = false;
+    const r = chip.getBoundingClientRect();
+    const m = menu.getBoundingClientRect();
+    const pad = 8;
+    const left = Math.max(pad, Math.min(r.left + r.width / 2 - m.width / 2, innerWidth - m.width - pad));
+    const below = r.bottom + 6;
+    const top = below + m.height > innerHeight - pad ? Math.max(pad, r.top - m.height - 6) : below;
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+    if (navigator.vibrate) navigator.vibrate(12);
+  }
+
+  menu.addEventListener("click", (e) => {
+    if (!e.target.closest("button")) return;
+    out.textContent = "forked → new session, transcript up to this point copied into its own workspace";
+    menu.hidden = true;
+    anchor?.classList.remove("picked");
+  });
+
+  const away = (e) => {
+    if (e.target.closest(".msg, .menu")) return;
+    menu.hidden = true;
+    log.querySelectorAll(".msg.picked").forEach((m) => m.classList.remove("picked"));
+  };
+  document.addEventListener("pointerdown", away);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") away({ target: document.body }); });
+  log.addEventListener("scroll", () => { menu.hidden = true; }, { passive: true });
+</script>
+</body>
+</html>
