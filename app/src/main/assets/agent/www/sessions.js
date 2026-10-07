@@ -105,6 +105,8 @@ function openSessionMenu(btn, id) {
   menuSessionId = id;
   sessionMenu.innerHTML = `
     <button type="button" class="session-menu-item" role="menuitem" data-menu="rename">${icon("square-pen", 16)}<span>Rename</span></button>
+    <button type="button" class="session-menu-item" role="menuitem" data-menu="copy-transcript">${icon("file-text", 16)}<span>Copy transcript</span></button>
+    <button type="button" class="session-menu-item" role="menuitem" data-menu="export-transcript">${icon("file-plus", 16)}<span>Export transcript</span></button>
     <button type="button" class="session-menu-item danger" role="menuitem" data-menu="delete">${icon("trash-2", 16)}<span>Delete</span></button>`;
   sessionMenu.hidden = false;
   document.querySelectorAll('.session-more-btn[aria-expanded="true"]')
@@ -150,6 +152,71 @@ async function newSession() {
 // New session lives in the topbar of the chat view now.
 document.getElementById("new-session-btn")?.addEventListener("click", newSession);
 
+/* ---------- transcripts ----------
+   Both of these read the session out of storage on the server, so they work on any row in the
+   list and not only on the session that happens to be open. The server decides what goes in the
+   transcript (the whole log, tool calls and thinking included); this side only asks, and says
+   where the file landed. */
+
+/** A one-line confirmation at the bottom of the screen. Exporting is not undoable and not
+    obviously finished, and an alert() for every saved file is heavier than the news is. */
+let flashEl = null;
+let flashTimer = null;
+function flash(text, bad = false) {
+  if (!flashEl) {
+    flashEl = document.createElement("div");
+    flashEl.className = "flash";
+    flashEl.setAttribute("role", "status");
+    flashEl.hidden = true;
+    document.body.append(flashEl);
+  }
+  flashEl.textContent = text;
+  flashEl.classList.toggle("bad", bad);
+  flashEl.hidden = false;
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => { flashEl.hidden = true; }, bad ? 5000 : 3200);
+}
+
+/** chat.js owns the clipboard helper; a session export must not fail just because that file
+    has not loaded yet, so the old textarea route stands in for it. */
+async function putOnClipboard(text) {
+  if (typeof window.copyText === "function") return window.copyText(text);
+  const scratch = document.createElement("textarea");
+  scratch.value = text;
+  scratch.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+  document.body.append(scratch);
+  scratch.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  scratch.remove();
+  return ok;
+}
+
+async function copyTranscript(id) {
+  try {
+    const res = await fetch(`/api/sessions/${id}/transcript`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Could not read the transcript (${res.status})`);
+    const text = await res.text();
+    flash(await putOnClipboard(text) ? "Transcript copied to the clipboard" : "Could not reach the clipboard", true);
+  } catch (err) {
+    flash(err.message, true);
+  }
+}
+
+async function exportTranscript(id) {
+  const session = sessionData.sessions.find(s => s.id === id);
+  flash(`Exporting "${session?.title ?? "session"}"…`);
+  try {
+    const data = await sessionsApi(`/api/sessions/${id}/export`, "POST");
+    const file = (data.paths?.[0] ?? "").split("/").pop();
+    // The count is the only thing worth saying here: a long transcript takes a moment to write
+    // and the user needs to know it landed rather than that it was big.
+    flash(`Saved ${file} and its JSON to ${data.dir}`);
+  } catch (err) {
+    flash(err.message, true);
+  }
+}
+
 sidebarList?.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-act]");
   if (!btn) return;
@@ -183,6 +250,10 @@ document.addEventListener("click", async (e) => {
         await sessionsApi(`/api/sessions/${id}/rename`, "POST", { title });
         loadSessions();
       }
+    } else if (item.dataset.menu === "copy-transcript") {
+      await copyTranscript(id);
+    } else if (item.dataset.menu === "export-transcript") {
+      await exportTranscript(id);
     } else if (item.dataset.menu === "delete") {
       if (confirm(`Delete "${session?.title}"? Any run in it is stopped. Its transcript and every file in its workspace are deleted for good -- this cannot be undone.`)) {
         await sessionsApi(`/api/sessions/${id}/delete`, "POST");

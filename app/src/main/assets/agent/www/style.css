@@ -2621,6 +2621,41 @@ p.empty { padding: 24px 8px; text-align: center; }
 .session-menu-item:focus-visible { background-color: var(--press); outline: none; }
 .session-menu-item.danger { color: var(--danger-text); }
 
+/* ---------- one-line confirmation ----------
+   Exporting a transcript is invisible work: the file goes to shared storage and the only
+   outcome is a path. This says it happened, where it went, and then gets out of the way.
+   Fixed at the bottom so it reads the same from the sidebar, the chat and any other tab, and
+   pointer-events off so it never swallows a tap meant for the screen underneath. */
+.flash {
+  position: fixed;
+  left: 50%;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  z-index: 80; /* above the session menu (60) and the sidebar (50) */
+  max-width: min(92vw, 460px);
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background-color: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  text-align: center;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  transform: translateX(-50%);
+  animation: flash-in 0.16s ease-out;
+}
+.flash[hidden] { display: none; }
+.flash.bad { color: var(--danger-text); }
+@keyframes flash-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flash { animation: none; }
+}
+
 /* ---------- branch chip ----------
    The corner button that makes branching reachable without knowing the long press. It is out of
    the way until its message is tapped — absolutely positioned, so appearing reflows nothing and
