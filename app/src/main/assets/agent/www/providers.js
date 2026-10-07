@@ -35,13 +35,21 @@ const modelSearch = document.getElementById("model-search");
 const modelList = document.getElementById("model-list");
 const modelCount = document.getElementById("model-count");
 const modelDefault = document.getElementById("model-default");
-const titleModelSelect = document.getElementById("title-model-select");
+const modelSheetTitle = document.getElementById("model-sheet-title");
+const titleModelBtn = document.getElementById("title-model-btn");
+const titleModelBtnLabel = document.getElementById("title-model-btn-label");
+const titleModelBtnSub = document.getElementById("title-model-btn-sub");
 const MAX_RESULTS = 80;
 const MAX_RECENTS = 5;
 const RECENTS_KEY = "pidroid.recentModels";
 
 let modelData = { current: "", default: "", titleModel: "", models: [] };
 let lastSeenModel = "";
+
+/* What the sheet is picking. "session" is the composer pill: the model this session runs on.
+   "title" is the Providers tab: the model that names new sessions. One list of models serves
+   both; only the target, and the rows that only make sense for one of them, differ. */
+let modelSheetMode = "session";
 
 /* ---------- recently used ----------
    The chooser is alphabetical-by-provider, so the model you actually run on can be
@@ -81,7 +89,7 @@ async function loadModels() {
   try {
     modelData = await api("/api/models");
     trackRecentModel();
-    renderTitleModelOptions();
+    renderTitleModelButton();
     const cur = modelData.models.find(m => m.id === modelData.current);
     modelBtnLabel.textContent = cur ? cur.name : modelData.current;
     modelBtn.title = cur ? `${cur.name} · ${modelData.current}` : modelData.current;
@@ -92,30 +100,25 @@ async function loadModels() {
 }
 window.loadModels = loadModels;
 
-function renderTitleModelOptions() {
-  if (!titleModelSelect) return;
-  titleModelSelect.innerHTML = `<option value="">None (disabled)</option>` + modelData.models.map(m =>
-    `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)} · ${escapeHtml(m.providerName || m.provider)}</option>`
-  ).join("");
-  titleModelSelect.value = modelData.titleModel || "";
+/* The summary of the title model on the Providers tab, since the list itself lives in the
+   sheet. "None" is a real choice, not a placeholder: with nothing picked the session is named
+   after its opening line, so the row says which of the two is in effect. */
+function renderTitleModelButton() {
+  if (!titleModelBtn) return;
+  const m = modelData.models.find(m => m.id === modelData.titleModel);
+  titleModelBtnLabel.textContent = m ? m.name : "None";
+  titleModelBtnSub.textContent = m
+    ? (m.providerName || m.provider)
+    : "Titles come from your first message";
 }
 
-titleModelSelect?.addEventListener("change", async () => {
-  const previous = modelData.titleModel || "";
-  titleModelSelect.disabled = true;
-  try {
-    const result = await api("/api/title-model", { model: titleModelSelect.value });
-    modelData.titleModel = result.model || "";
-    renderTitleModelOptions();
-  } catch (err) {
-    alert(err.message);
-    titleModelSelect.value = previous;
-  } finally {
-    titleModelSelect.disabled = false;
-  }
-});
+titleModelBtn?.addEventListener("click", () => openModelModal({ mode: "title" }));
 
 function renderModels() {
+  const titleMode = modelSheetMode === "title";
+  // The highlighted row is whichever model this sheet would set if you tapped it.
+  const selectedId = titleMode ? modelData.titleModel : modelData.current;
+
   // Every whitespace-separated term must match the id, name or provider name.
   const terms = modelSearch.value.toLowerCase().split(/\s+/).filter(Boolean);
   const matches = modelData.models.filter(m => {
@@ -144,33 +147,54 @@ function renderModels() {
     return bits.join(" · ");
   };
 
-  const rowHtml = m => `
-      <div class="model-item${m.id === modelData.current ? " current" : ""}">
-        <button type="button" class="model-row${m.id === modelData.current ? " selected" : ""}" data-id="${escapeHtml(m.id)}">
+  const rowHtml = m => {
+    const selected = m.id === selectedId;
+    // The star is "default for new sessions", which is the run model's business; in title
+    // mode there is nothing to default, so the row is just the row.
+    const star = titleMode ? "" : `<button type="button" class="model-default${m.id === modelData.default ? " active" : ""}" data-id="${escapeHtml(m.id)}"
+          title="${m.id === modelData.default ? "Default for new sessions" : "Make this the default for new sessions"}"
+          aria-label="Set as default">${m.id === modelData.default ? "★" : "☆"}</button>`;
+    return `
+      <div class="model-item${selected ? " current" : ""}">
+        <button type="button" class="model-row${selected ? " selected" : ""}" data-id="${escapeHtml(m.id)}">
           <span class="model-name">${escapeHtml(m.name)}</span>
           <span class="provider-meta"><span class="provider-tag">${escapeHtml(providerOf(m))}</span> · ${escapeHtml(metaOf(m))}</span>
         </button>
-        <button type="button" class="model-default${m.id === modelData.default ? " active" : ""}" data-id="${escapeHtml(m.id)}"
-          title="${m.id === modelData.default ? "Default for new sessions" : "Make this the default for new sessions"}"
-          aria-label="Set as default">${m.id === modelData.default ? "★" : "☆"}</button>
+        ${star}
       </div>`;
+  };
+
+  // Clearing the title model has to be one tap in the same list, not a separate control, so it
+  // sits above the catalogue. It stays put while you type: it is not a search result.
+  const noneHtml = titleMode ? `
+    <button type="button" class="sheet-row title-none-row" id="title-model-none">
+      <span>None</span>
+      <span class="sheet-row-value">${selectedId ? "Titles come from your first message" : "In use"}</span>
+    </button>` : "";
 
   // Only while browsing: once you type, this is a filtered list and a shortcut block
-  // of models that may not match would just be noise.
+  // of models that may not match would just be noise. The recents are also the run model's:
+  // the last few you ran on say nothing about what you would want to name a session with.
   const byId = new Map(modelData.models.map(m => [m.id, m]));
-  const recents = terms.length ? [] : readRecents().map(id => byId.get(id)).filter(Boolean);
+  const recents = !titleMode && !terms.length ? readRecents().map(id => byId.get(id)).filter(Boolean) : [];
   const recentHtml = recents.length ? `
     <div class="model-group recents-head">Recently used
       <button type="button" class="link-btn" id="clear-recents" title="Forget the recently used list">clear</button>
     </div>
     ${recents.map(rowHtml).join("")}` : "";
 
-  modelList.innerHTML = recentHtml + [...groups].map(([name, items]) => `
+  const catalogue = [...groups].map(([name, items]) => `
     <div class="model-group">${escapeHtml(name)}</div>
     ${items.map(rowHtml).join("")}
-  `).join("") || `<p class="description">No models match. Sign in to more providers in the Providers tab.</p>`;
+  `).join("");
 
-  const def = modelData.models.find(m => m.id === modelData.default);
+  // The fallback hangs off the catalogue alone: the None row above it is always there, so
+  // testing the whole lot would swallow the message on a search that matches nothing.
+  modelList.innerHTML = noneHtml + recentHtml + (catalogue ||
+    `<p class="description">No models match. Sign in to more providers in the Providers tab.</p>`);
+
+  // The default is set with the star, so with the star gone there is nothing to foot it with.
+  const def = titleMode ? undefined : modelData.models.find(m => m.id === modelData.default);
   modelDefault.textContent = def ? `★ Default: ${def.name}` : "";
   modelCount.textContent = matches.length > shown.length
     ? `${shown.length} of ${matches.length}, keep typing`
@@ -269,8 +293,13 @@ document.getElementById("effort-done").addEventListener("click", async () => {
   closeModelModal();
 });
 
-function openModelModal(effort = false) {
+function openModelModal({ mode = "session", effort = false } = {}) {
   closing = false;
+  modelSheetMode = mode;
+  // Effort and the default star are about the model the session runs on, so the title sheet
+  // shows neither: there is one model to pick and nothing else on the page to set.
+  effortRow.hidden = mode === "title";
+  modelSheetTitle.textContent = mode === "title" ? "Title generation model" : "Select model";
   modelModal.style.pointerEvents = "";
   stopSheetMotion();
   modelModal.hidden = false;
@@ -319,6 +348,26 @@ modelList.addEventListener("click", async (e) => {
     renderModels();
     return;
   }
+
+  // Title mode writes the one setting and stops: no run model to switch, no default to set.
+  // The None row clears it, which the server takes as "" (the same as picking "none").
+  if (modelSheetMode === "title") {
+    const none = e.target.closest("#title-model-none");
+    const row = e.target.closest(".model-row");
+    if (!none && !row) return;
+    const pick = none ? "" : row.dataset.id;
+    try {
+      const res = await api("/api/title-model", { model: pick });
+      modelData.titleModel = res.model || "";
+      renderTitleModelButton();
+      closeModelModal();
+      loadModels();
+    } catch (err) {
+      alert(err.message);
+    }
+    return;
+  }
+
   // The star sets the default for *new* sessions and leaves this one alone, so the dialog stays
   // open and you can keep browsing; tapping the row itself switches the session and closes.
   const star = e.target.closest(".model-default");

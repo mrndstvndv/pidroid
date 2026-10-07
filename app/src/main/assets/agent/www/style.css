@@ -1365,6 +1365,18 @@ textarea {
 .sheet-row:disabled { opacity: 0.55; cursor: default; }
 .sheet-row:disabled [data-icon], .sheet-row:disabled .ico { display: none; }
 
+/* The Providers tab opens the same chooser, but from a page rather than a sheet: --row-fill is
+   declared on .sheet, so it is restated here, and a hairline keeps the row off the background. */
+.setting-row {
+  --row-fill: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  border: 1px solid var(--border);
+}
+
+/* "None" at the head of the title list. The list scrolls under it like any other row, so it
+   only needs the sheet-row's default top margin taken back down to sit flush at the top. */
+.model-list > .title-none-row { margin-top: 0; }
+.title-none-row + .model-group { margin-top: 4px; }
+
 .sheet-foot {
   display: flex;
   justify-content: space-between;

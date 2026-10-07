@@ -185,11 +185,13 @@
         <div class="editor-header">
           <h2>Automatic session titles</h2>
         </div>
-        <label for="title-model-select" class="provider-meta">Title generation model</label>
-        <select id="title-model-select" class="field" aria-label="Title generation model">
-          <option value="">None (disabled)</option>
-        </select>
-        <p class="description">When selected, this model generates a title from the first message in a new session. None disables automatic title generation.</p>
+        <span class="provider-meta">Title generation model</span>
+        <button type="button" class="sheet-row setting-row" id="title-model-btn" aria-haspopup="dialog">
+          <span id="title-model-btn-label">None</span>
+          <span class="sheet-row-value" id="title-model-btn-sub">Titles come from your first message</span>
+          <span data-icon="chevron-right" data-size="18"></span>
+        </button>
+        <p class="description">When a model is picked, it writes a title from the first message in a new session. Without one, the opening line of your message is used instead.</p>
 
         <div class="editor-header">
           <h2>Providers</h2>
