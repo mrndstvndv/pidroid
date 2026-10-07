@@ -182,6 +182,11 @@ const MOVE_TAU = 0.13;
 const CHASE_SCREENS = 3;
 const DEFER_GAIN = 2.5;
 
+/** Close enough to stop. Below a pixel is invisible, and on a fractional-DPR screen (2.7 here)
+ *  scrollTop snaps to device pixels, so it can sit 0.85px short of the target for good: a tighter
+ *  threshold left the glide running a frame loop, with a forced layout per frame, indefinitely. */
+const ARRIVED_PX = 1;
+
 const clampScroll = (el, v) => Math.max(0, Math.min(v, el.scrollHeight - el.clientHeight));
 
 function glideKey(el) {
@@ -224,7 +229,7 @@ function glideStep(now) {
     el.scrollTop += step;
     // Arrived: snap the sub-pixel remainder and stop, rather than letting the damped tail
     // keep a rAF alive for a third of a second to close a gap nobody can see.
-    if (Math.abs(target - el.scrollTop) < 0.5) { el.scrollTop = target; glides.delete(key); }
+    if (Math.abs(target - el.scrollTop) < ARRIVED_PX) { el.scrollTop = target; glides.delete(key); }
   }
   if (glides.size) glideFrame = requestAnimationFrame(glideStep);
 }
@@ -253,7 +258,7 @@ function glideTo(el, target, tau) {
     return;
   }
   const distance = Math.abs(target - el.scrollTop);
-  if (distance < 0.5 && !g) return; // already there, and nothing in flight
+  if (distance < ARRIVED_PX && !g) return; // already there, and nothing in flight
   // The spring constant is picked once, when the glide starts, and then held: recomputing it
   // from the remaining distance on every pass would let a lagging view choose a softer spring
   // the more it lagged, and lag itself into a standstill. A pass that lands mid-glide simply
@@ -1058,12 +1063,18 @@ function harvestBodyScroll(root = messagesEl) {
   });
 }
 
-function restoreBodyScroll(root) {
+/** `animate` is for the streaming tail. A body in committed history has nothing arriving, so it
+ *  is placed at its position outright: gliding every one of them on a page or session load kept
+ *  dozens of springs (and a forced layout per spring per frame) running for seconds. */
+function restoreBodyScroll(root, animate = true) {
   root.querySelectorAll("details[data-key] .think-body, details[data-key] .tool-out").forEach((el) => {
     const key = bodyKey(el);
     // Start where this body was: the outgoing node's offset is what makes the glide a continuation.
     el.scrollTop = (key && bodyScrollTop.get(key)) || 0;
-    if (!key || !unpinnedBodies.has(key)) glideTo(el, el.scrollHeight);
+    if (!key || !unpinnedBodies.has(key)) {
+      if (animate) glideTo(el, el.scrollHeight);
+      else el.scrollTop = el.scrollHeight;
+    }
     if (el.classList.contains("think-body")) el.classList.toggle("overflowing", el.scrollHeight - el.clientHeight > 2);
   });
 }
@@ -1244,7 +1255,7 @@ function renderMessages(view, sessionId) {
 
   if (following) glideTo(messagesEl, messagesEl.scrollHeight);
   updateJumpBottom();
-  for (const el of historyCreated) restoreBodyScroll(el);
+  for (const el of historyCreated) restoreBodyScroll(el, false);
   for (const el of created) restoreBodyScroll(el);
   if (historyChanged) {
     markFreshBlocks(messagesEl);
