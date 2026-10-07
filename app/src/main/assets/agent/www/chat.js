@@ -385,6 +385,24 @@ function md(text) {
   }).join("");
 }
 
+/** The same output as md(), as pieces that can be patched independently: a fenced block, or a
+ *  paragraph of plain text (cut after each blank line). Inline code and bold never span a newline,
+ *  so cutting there cannot change how either renders. While a reply streams, only its last piece
+ *  differs from one update to the next, so only that piece is re-parsed. */
+function mdChunks(text) {
+  const out = [];
+  String(text).split(/```/).forEach((part, i) => {
+    if (i % 2 === 1) {
+      out.push(`<pre class="code">${escapeHtml(part.replace(/^[^\n]*\n/, ""))}</pre>`);
+      return;
+    }
+    for (const chunk of part.match(/[\s\S]*?(?:\n\n+|$)/g) || []) {
+      if (chunk) out.push(`<span>${md(chunk)}</span>`);
+    }
+  });
+  return out;
+}
+
 /* ---------- tool views ----------
    An extension can say how its own tool should read: an icon, which argument to put on the
    collapsed row, what the expanded body shows (see extensions.ts). The specs ride along with the
@@ -920,8 +938,9 @@ function assistantParts(idKey, blocks, live, results, tools, error, ms, branchAf
     // Committed text arrives pre-rendered from the server (chatview.ts); the streaming
     // partial has no html yet, so it is rendered here.
     if (!b.text.trim()) return "";
-    const html = b.html ?? md(b.text);
-    return `<div class="message assistant"><div class="message-content">${html}</div></div>`;
+    const open = '<div class="message assistant"><div class="message-content">';
+    if (b.html !== undefined) return `${open}${b.html}</div></div>`;
+    return { open, into: ".message-content", close: "</div></div>", parts: mdChunks(b.text) };
   });
   if (error) parts.push(`<div class="message assistant error"><div class="message-content">${escapeHtml(error)}</div></div>`);
   // One dim line per assistant message: how long the model took to think it through and write
@@ -931,7 +950,7 @@ function assistantParts(idKey, blocks, live, results, tools, error, ms, branchAf
   // only set when the server marked the message as a valid branch point (no unanswered tool calls).
   const fork = branchAfter === undefined ? "" : ` data-branch-after="${branchAfter}"`;
   const identity = messageId === undefined ? "" : ` data-message-id="${messageId}"`;
-  return { key: idKey, open: `<div class="turn"${fork}${identity}>`, parts: parts.filter(Boolean), close: "</div>" };
+  return { key: idKey, open: `<div class="turn"${fork}${identity}>`, parts: parts.filter((p) => p), close: "</div>" };
 }
 
 function assistantHtml(...args) {
@@ -946,7 +965,8 @@ function assistantHtml(...args) {
    produced for every block; a block whose html is unchanged keeps its node (and with it its
    scroll offset, selection, open state and running animation), and only the blocks that differ
    are re-parsed. A slot is a turn (wrapper + blocks) or a single loose element (no wrapper). */
-let tailSlots = [];
+const tailState = { slots: [] };
+const historyState = { slots: [] };
 const parseTpl = document.createElement("template");
 
 function parseEl(html) {
@@ -954,59 +974,70 @@ function parseEl(html) {
   return parseTpl.content.firstElementChild;
 }
 
-/** Items are {key, open, parts, close} turns or {key, parts:[html]} loose elements. Returns the
- *  nodes that were (re)created, so the caller only restores state on those. */
-function patchTail(root, items) {
-  const created = [];
-  let i = 0;
-  for (; i < items.length && i < tailSlots.length; i++) {
-    const item = items[i], slot = tailSlots[i];
-    if (slot.key !== item.key || slot.open !== item.open) break;
-    if (!slot.wrapper) {
-      if (slot.parts[0].html !== item.parts[0]) {
-        const el = parseEl(item.parts[0]);
-        slot.parts[0].el.replaceWith(el);
-        slot.parts[0] = { html: item.parts[0], el };
-        created.push(el);
-      }
+/** Brings the children of `container` in line with `want`, keeping every node whose html is
+ *  unchanged. A wanted part is html, or {open, into, close, parts} for a wrapper whose own
+ *  children are synced the same way. New or replaced top-level nodes go into `created`. */
+function syncParts(container, have, want, created) {
+  for (let j = 0; j < want.length; j++) {
+    const w = want[j];
+    const leaf = typeof w === "string";
+    const sig = leaf ? w : w.open;
+    const h = have[j];
+    if (h && h.sig === sig) {
+      if (!leaf) syncParts(h.target, h.kids, w.parts, created);
       continue;
     }
-    const have = slot.parts;
-    for (let j = 0; j < item.parts.length; j++) {
-      if (have[j] && have[j].html === item.parts[j]) continue;
-      const el = parseEl(item.parts[j]);
-      created.push(el);
-      if (have[j]) have[j].el.replaceWith(el);
-      else slot.wrapper.append(el);
-      have[j] = { html: item.parts[j], el };
+    const el = parseEl(leaf ? w : w.open + w.close);
+    const entry = { sig, el };
+    if (!leaf) {
+      entry.target = w.into ? el.querySelector(w.into) : el;
+      entry.kids = [];
+      syncParts(entry.target, entry.kids, w.parts, []);
     }
-    for (const gone of have.splice(item.parts.length)) gone.el.remove();
+    created.push(el);
+    if (h) h.el.replaceWith(el);
+    else container.append(el);
+    have[j] = entry;
   }
-  // From the first mismatch on, rebuild: the tail is a handful of nodes, and a changed key means
-  // a different message anyway.
-  for (let k = i; k < tailSlots.length; k++) {
-    const slot = tailSlots[k];
-    (slot.wrapper || slot.parts[0].el).remove();
+  for (const gone of have.splice(want.length)) gone.el.remove();
+}
+
+/** Items are {key, open, parts, close} turns or {key, parts:[html]} loose elements. Returns the
+ *  nodes that were (re)created, so the caller only restores state on those. */
+function patchList(root, items, state) {
+  const slots = state.slots;
+  const created = [];
+  let i = 0;
+  for (; i < items.length && i < slots.length; i++) {
+    const item = items[i], slot = slots[i];
+    if (slot.key !== item.key || slot.open !== item.open) break;
+    if (slot.wrapper) {
+      syncParts(slot.wrapper, slot.parts, item.parts, created);
+    } else if (slot.parts[0].sig !== item.parts[0]) {
+      const el = parseEl(item.parts[0]);
+      slot.parts[0].el.replaceWith(el);
+      slot.parts[0] = { sig: item.parts[0], el };
+      created.push(el);
+    }
   }
-  tailSlots.length = i;
+  // From the first mismatch on, rebuild: a changed key means a different message anyway.
+  for (let k = i; k < slots.length; k++) (slots[k].wrapper || slots[k].parts[0].el).remove();
+  slots.length = i;
   for (; i < items.length; i++) {
     const item = items[i];
     if (item.open === undefined) {
       const el = parseEl(item.parts[0]);
       root.append(el);
       created.push(el);
-      tailSlots.push({ key: item.key, wrapper: null, parts: [{ html: item.parts[0], el }] });
+      slots.push({ key: item.key, wrapper: null, parts: [{ sig: item.parts[0], el }] });
       continue;
     }
     const wrapper = parseEl(item.open + item.close);
-    const parts = item.parts.map((html) => {
-      const el = parseEl(html);
-      wrapper.append(el);
-      return { html, el };
-    });
+    const parts = [];
+    syncParts(wrapper, parts, item.parts, []);
     root.append(wrapper);
     created.push(wrapper);
-    tailSlots.push({ key: item.key, open: item.open, wrapper, parts });
+    slots.push({ key: item.key, open: item.open, wrapper, parts });
   }
   return created;
 }
@@ -1136,29 +1167,33 @@ function renderMessages(view, sessionId) {
   if (historyChanged) harvestBodyScroll(messagesEl);
   else harvestBodyScroll(dynamicEl);
 
+  let historyCreated = [];
   if (historyChanged) {
-    const historyHtml = [];
+    const historyItems = [];
     historyHasContent = false;
+    const loose = (key, html) => historyItems.push({ key, parts: [html] });
     for (const m of messages) {
       if (m.role === "event" && (m.modelChange || m.thinkingChange)) {
         const change = m.modelChange || m.thinkingChange;
         const isModel = !!m.modelChange;
         const label = isModel ? "Model switched" : "Thinking effort changed";
-        historyHtml.push(`<div class="message model-event" data-key="mc${escapeHtml(m.id)}">${iconTag(isModel ? "cpu" : "brain", 13, "dim")}<span>${label} from <strong>${escapeHtml(change.from)}</strong> to <strong>${escapeHtml(change.to)}</strong></span></div>`);
+        loose(`mc${m.id}`, `<div class="message model-event" data-key="mc${escapeHtml(m.id)}">${iconTag(isModel ? "cpu" : "brain", 13, "dim")}<span>${label} from <strong>${escapeHtml(change.from)}</strong> to <strong>${escapeHtml(change.to)}</strong></span></div>`);
         historyHasContent = true;
       } else if (m.role === "user") {
         // data-branch-before points at the entry ahead of this prompt, so a new session can start there
         // and replay it. Absent on the first message of a conversation, which has nothing before it.
         const fork = m.branchBefore === undefined ? "" : ` data-branch-before="${m.branchBefore}"`;
-        historyHtml.push(`<div class="message user" data-key="u${m.id}"${fork}><div class="message-content">${escapeHtml(m.text)}</div></div>`);
+        loose(`u${m.id}`, `<div class="message user" data-key="u${m.id}"${fork}><div class="message-content">${escapeHtml(m.text)}</div></div>`);
         historyHasContent = true;
       } else if (m.role === "assistant" && m.id !== active?.id) {
         const error = m.stop === "error" || m.stop === "aborted" ? (m.error || (m.stop === "aborted" ? "Stopped" : "")) : "";
-        historyHtml.push(assistantHtml(`m${m.id}`, m.blocks || [], false, results, tools, error, m.ms, m.branchAfter, m.id));
+        historyItems.push(assistantParts(`m${m.id}`, m.blocks || [], false, results, tools, error, m.ms, m.branchAfter, m.id));
         historyHasContent = true;
       }
     }
-    historyEl.innerHTML = historyHtml.join("");
+    // A commit appends one message; patching keeps every other node (and its scroll offsets,
+    // selection and open state) instead of re-parsing the whole transcript.
+    historyCreated = patchList(historyEl, historyItems, historyState);
     enhanceCodeBlocks(historyEl);
     lastHistoryKey = signature;
   }
@@ -1182,12 +1217,12 @@ function renderMessages(view, sessionId) {
   if (!historyHasContent && !tailItems.length) {
     tailItems.push({ key: "empty", parts: ['<p class="description empty">Give the agent a task. It can read, write and edit its own UI and files, and run commands.</p>'] });
   }
-  const created = patchTail(dynamicEl, tailItems);
+  const created = patchList(dynamicEl, tailItems, tailState);
   enhanceCodeBlocks(dynamicEl);
 
   if (following) glideTo(messagesEl, messagesEl.scrollHeight);
   updateJumpBottom();
-  if (historyChanged) restoreBodyScroll(historyEl);
+  for (const el of historyCreated) restoreBodyScroll(el);
   for (const el of created) restoreBodyScroll(el);
   if (historyChanged) {
     markFreshBlocks(messagesEl);
@@ -1273,7 +1308,8 @@ function render() {
     historyHasContent = false;
     historyEl.replaceChildren();
     dynamicEl.replaceChildren();
-    tailSlots = [];
+    tailState.slots = [];
+    historyState.slots = [];
     firstSeen.clear();
     bodyScrollTop.clear();
     unpinnedBodies.clear();
