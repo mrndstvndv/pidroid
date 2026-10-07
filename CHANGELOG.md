@@ -1,3 +1,21 @@
+# [0.4.0](https://github.com/mrndstvndv/pidroid/compare/v0.3.0...v0.4.0) (2026-10-07)
+
+
+### Bug Fixes
+
+* **agent:** keep a streamed thought open until its step commits ([050a18b](https://github.com/mrndstvndv/pidroid/commit/050a18baea9923014d25957e427507b877407ebc))
+* **agent:** stop nesting code-block wrappers while a reply streams ([680b000](https://github.com/mrndstvndv/pidroid/commit/680b00071cfc0b2d5d35a2d6c489f6215ebb94e2))
+* **android:** don't let a stop race the off-main-thread agent start ([c1a387e](https://github.com/mrndstvndv/pidroid/commit/c1a387e87b2566728bbe0d5009be9e01b3e0e3fb))
+
+
+### Features
+
+* **agent:** floating composer card and terminal-style shell calls ([85bd266](https://github.com/mrndstvndv/pidroid/commit/85bd266ce8f64a3f1d3e11842f622d166c7b86ff))
+* **agent:** fold tool calls into work groups and add show artifacts ([f57478c](https://github.com/mrndstvndv/pidroid/commit/f57478ccb55578267f8a898fb3d33f75ebb0584d))
+* **agent:** keep the Working… row instead of a separate status line ([93b81ca](https://github.com/mrndstvndv/pidroid/commit/93b81ca4bf75b72f8dfb9aaa81a0f82371a79ef4))
+* **agent:** model chooser as a floating sheet with a thinking effort page ([0b10624](https://github.com/mrndstvndv/pidroid/commit/0b10624e4d1e825a206aaf0dcf97423947139267))
+* **agent:** spring the model sheet in and out with M3 Expressive motion ([74787e3](https://github.com/mrndstvndv/pidroid/commit/74787e32d1995b5564cbaf149e37ea65ba813f5a))
+
 # [0.3.0](https://github.com/mrndstvndv/pidroid/compare/v0.2.0...v0.3.0) (2026-10-07)
 
 
