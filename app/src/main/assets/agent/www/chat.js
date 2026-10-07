@@ -189,6 +189,15 @@ const ARRIVED_PX = 1;
 
 const clampScroll = (el, v) => Math.max(0, Math.min(v, el.scrollHeight - el.clientHeight));
 
+/* A scroll event does not say who caused it, and the list is written to by the follow glide,
+   the render's bounce guard and the viewport follow. Mark our own writes so the scroll
+   listener can tell them from the reader's hand. */
+const ownScrollAt = new WeakMap();
+function setScrollTop(el, v) {
+  ownScrollAt.set(el, v);
+  el.scrollTop = v;
+}
+
 function glideKey(el) {
   return el === messagesEl ? LIST_KEY : bodyKey(el) || el;
 }
@@ -226,10 +235,10 @@ function glideStep(now) {
       const allowed = (CHASE_SCREENS * el.clientHeight + DEFER_GAIN * Math.abs(target - el.scrollTop)) * dt;
       if (Math.abs(step) > allowed) step = Math.sign(step) * allowed;
     }
-    el.scrollTop += step;
+    setScrollTop(el, el.scrollTop + step);
     // Arrived: snap the sub-pixel remainder and stop, rather than letting the damped tail
     // keep a rAF alive for a third of a second to close a gap nobody can see.
-    if (Math.abs(target - el.scrollTop) < ARRIVED_PX) { el.scrollTop = target; glides.delete(key); }
+    if (Math.abs(target - el.scrollTop) < ARRIVED_PX) { setScrollTop(el, target); glides.delete(key); }
   }
   if (glides.size) glideFrame = requestAnimationFrame(glideStep);
 }
@@ -254,7 +263,7 @@ function glideTo(el, target, tau) {
   const g = glides.get(key);
   if (reduceMotion.matches) {
     stopGlide(el);
-    el.scrollTop = target;
+    setScrollTop(el, target);
     return;
   }
   const distance = Math.abs(target - el.scrollTop);
@@ -288,6 +297,38 @@ const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home
 window.addEventListener("keydown", (e) => {
   if (SCROLL_KEYS.has(e.key)) stopGlide(messagesEl);
 }, { passive: true });
+
+/* ---------- following the tail: intent, not position ----------
+   Whether streaming should keep pushing the list is a question about what the reader has
+   asked for, and the only one who can answer it is the reader. Deriving it from the offset
+   instead -- "near enough to the bottom" -- makes the follow fight the hand that is doing the
+   asking: a drag upwards spends its first few pixels inside that window, so every render
+   arriving mid-gesture re-armed the glide and hauled the list back down under the finger,
+   which is what made scrolling up during a stream feel like two things pulling on one list.
+
+   So record the intent instead. Any upward movement by the reader leaves the tail at once,
+   however small, and nothing re-arms the follow until they come back to the bottom
+   themselves. Movement down re-arms it on arrival, so scrolling back is enough to resume. */
+let tailPinned = true;
+let readerTop = 0; // where we last left the list, to read direction against
+
+function noteReaderScroll() {
+  const top = messagesEl.scrollTop;
+  const own = ownScrollAt.get(messagesEl);
+  if (own !== undefined && Math.abs(own - top) < 1) {
+    ownScrollAt.delete(messagesEl);
+    readerTop = top; // our own move: the baseline to read the next one against
+    return;
+  }
+  if (top < readerTop - 1) {
+    tailPinned = false;
+    stopGlide(messagesEl);
+  } else if (messagesEl.scrollHeight - top - messagesEl.clientHeight <= TAIL_PX) {
+    tailPinned = true;
+  }
+  readerTop = top;
+}
+messagesEl.addEventListener("scroll", noteReaderScroll, { passive: true });
 
 /* ---------- sticky inner scroll ----------
    Thinking bodies and tool outputs scroll on their own. Re-rendering resets scrollTop to
@@ -1340,12 +1381,13 @@ function renderMessages(view, sessionId) {
   const historyChanged = signature !== lastHistoryKey;
 
   stampAnimPhase();
-  // Following the tail: near enough to the bottom that streaming should keep pushing. A glide
-  // already heading for the bottom counts too — a long arrival settles over a moment, and a
-  // render landing in the middle of it must not read that as the user having walked away.
+  // Following the tail: the reader has not walked away from it (see "following the tail:
+  // intent, not position"), and so streaming keeps pushing. A glide already heading for the
+  // bottom counts too -- a long arrival settles over a moment, and a render landing in the
+  // middle of it must not read that as the reader having left.
   const bottom = clampScroll(messagesEl, Infinity);
   const glide = glides.get(LIST_KEY);
-  const following = bottom - messagesEl.scrollTop < 120 || (!!glide && glide.target >= bottom - 1);
+  const following = tailPinned || (!!glide && glide.target >= bottom - 1);
   const topBefore = messagesEl.scrollTop;
   if (historyChanged) harvestBodyScroll(messagesEl);
   else harvestBodyScroll(dynamicEl);
@@ -1403,7 +1445,7 @@ function renderMessages(view, sessionId) {
   // read below lays out before paint, so putting the offset back here means that frame never shows.
   if (following && messagesEl.scrollTop < topBefore - 0.5) {
     window.__perf?.scrollBack(topBefore - messagesEl.scrollTop);
-    messagesEl.scrollTop = topBefore;
+    setScrollTop(messagesEl, topBefore);
   }
   if (following) glideTo(messagesEl, messagesEl.scrollHeight);
   updateJumpBottom();
