@@ -34,6 +34,78 @@ let renderedSessionId = null;
 let lastHistoryKey = null;
 let historyHasContent = false;
 let statsDirty = true;
+
+/* ---------- copy buttons on code blocks ----------
+   The markdown is rendered by the server, so the buttons are added here in the page rather than
+   in the renderer: the transcript is rebuilt from innerHTML on every commit, and a wrapper that
+   survives only as long as its block would drop its button mid-read. Re-running this after each
+   rebuild is a few nodes, and `done` markers keep it to a single pass per block.
+
+   Only the markdown code boxes inside a message body qualify. Tool bodies and diffs are excluded:
+   a diff has no single meaningful "code" to copy, and its own chrome already offers actions. */
+function enhanceCodeBlocks(root) {
+  if (!root) return;
+  for (const pre of root.querySelectorAll(".message-content pre")) {
+    if (pre.dataset.copyReady === "1" || pre.closest(".tool-body, .tool-diff, .diff")) continue;
+    pre.dataset.copyReady = "1";
+    const wrap = document.createElement("div");
+    wrap.className = "code-wrap";
+    pre.replaceWith(wrap);
+    wrap.append(pre);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "code-copy";
+    button.dataset.act = "copy-code";
+    button.setAttribute("aria-label", "Copy code");
+    button.innerHTML = `<span class="code-copy-label">Copy</span>`;
+    wrap.append(button);
+  }
+}
+
+/** Clipboard API first; the textarea path is what works in a WebView that refuses the async one. */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the synchronous route below.
+  }
+  try {
+    const scratch = document.createElement("textarea");
+    scratch.value = text;
+    scratch.setAttribute("readonly", "");
+    scratch.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+    document.body.append(scratch);
+    scratch.select();
+    const ok = document.execCommand("copy");
+    scratch.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+// One delegated listener: the buttons are thrown away and rebuilt with the transcript, so a
+// listener per button would leak one per commit.
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest?.(".code-copy");
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const pre = button.parentElement?.querySelector("pre");
+  if (!pre) return;
+  const label = button.querySelector(".code-copy-label");
+  const ok = await copyText(pre.innerText);
+  if (label) label.textContent = ok ? "Copied" : "Failed";
+  button.classList.toggle("copied", ok);
+  clearTimeout(button.resetTimer);
+  button.resetTimer = setTimeout(() => {
+    if (label) label.textContent = "Copy";
+    button.classList.remove("copied");
+  }, 1600);
+});
 let controlsDirty = true;
 let lastSessionInfo = "";
 
@@ -1010,6 +1082,7 @@ function renderMessages(view, sessionId) {
       }
     }
     historyEl.innerHTML = historyHtml.join("");
+    enhanceCodeBlocks(historyEl);
     lastHistoryKey = signature;
   }
 
@@ -1033,6 +1106,7 @@ function renderMessages(view, sessionId) {
     tailHtml.push('<p class="description empty">Give the agent a task. It can read, write and edit its own UI and files, and run commands.</p>');
   }
   dynamicEl.innerHTML = tailHtml.join("");
+  enhanceCodeBlocks(dynamicEl);
 
   if (following) glideTo(messagesEl, messagesEl.scrollHeight);
   updateJumpBottom();

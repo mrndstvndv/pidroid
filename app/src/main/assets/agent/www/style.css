@@ -1814,6 +1814,36 @@ pre.code,
   word-break: break-word;
 }
 
+/* Copy button on a code block. The wrapper carries the position so the button stays put while
+   the block itself scrolls horizontally, and it only takes colour once the text is actually in
+   the clipboard -- a button that claims "Copied" optimistically is worse than none. */
+.code-wrap { position: relative; }
+.code-wrap > pre { margin-top: 4px; margin-bottom: 4px; padding-right: 58px; }
+.code-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  padding: 3px 9px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background-color: color-mix(in srgb, var(--bg-card) 82%, var(--bg-inset));
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+  opacity: 0.72;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.code-copy:hover, .code-copy:active { opacity: 1; }
+.code-copy.copied { color: var(--success); border-color: color-mix(in srgb, var(--success) 45%, var(--border)); }
+@media (hover: none) {
+  /* A touch device never hovers: keep the button at full contrast instead of half-faded. */
+  .code-copy { opacity: 1; }
+}
+
 /* Server-rendered markdown */
 .message-content h1, .message-content h2, .message-content h3,
 .message-content h4, .message-content h5, .message-content h6 {
