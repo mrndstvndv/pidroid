@@ -285,7 +285,12 @@ function glideTo(el, target, tau) {
 /* The finger wins, always. pointerdown covers touch on every engine that ships pointer
    events; wheel is the mouse equivalent. Keys only count when they are scroll keys — typing a
    follow-up must not be read as the reader leaving. */
+let readerTouching = false;
+let readerInputAt = -Infinity;
+
 function cancelGlides(e) {
+  readerInputAt = performance.now();
+  if (e.type === "touchstart") readerTouching = true;
   const inner = e.target?.closest?.(".think-body, .tool-out");
   if (inner) stopGlide(inner);
   stopGlide(messagesEl);
@@ -293,9 +298,17 @@ function cancelGlides(e) {
 for (const ev of ["pointerdown", "wheel", "touchstart"]) {
   messagesEl.addEventListener(ev, cancelGlides, { passive: true, capture: true });
 }
+for (const ev of ["touchend", "touchcancel"]) {
+  messagesEl.addEventListener(ev, () => {
+    readerTouching = false;
+    readerInputAt = performance.now();
+  }, { passive: true, capture: true });
+}
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
 window.addEventListener("keydown", (e) => {
-  if (SCROLL_KEYS.has(e.key)) stopGlide(messagesEl);
+  if (!SCROLL_KEYS.has(e.key)) return;
+  readerInputAt = performance.now();
+  stopGlide(messagesEl);
 }, { passive: true });
 
 /* ---------- following the tail: intent, not position ----------
@@ -312,6 +325,15 @@ window.addEventListener("keydown", (e) => {
 let tailPinned = true;
 let readerTop = 0; // where we last left the list, to read direction against
 
+/* Our own writes are marked, but they are not the only scrolls the reader did not make: when the
+   content under a pinned list shrinks for a moment (a row swapped out, a block collapsing as a
+   step commits), the browser clamps the offset upwards by itself. Read as the reader's hand,
+   that unpinned the tail and the stream stopped being followed. So only a scroll that comes with
+   the reader's input (see cancelGlides) may leave the tail. A fling keeps scrolling after the
+   finger lifts, so that input counts for a moment longer. */
+const READER_INPUT_MS = 1000;
+const readerIsScrolling = () => readerTouching || performance.now() - readerInputAt < READER_INPUT_MS;
+
 function noteReaderScroll() {
   const top = messagesEl.scrollTop;
   const own = ownScrollAt.get(messagesEl);
@@ -320,7 +342,7 @@ function noteReaderScroll() {
     readerTop = top; // our own move: the baseline to read the next one against
     return;
   }
-  if (top < readerTop - 1) {
+  if (top < readerTop - 1 && readerIsScrolling()) {
     tailPinned = false;
     stopGlide(messagesEl);
   } else if (messagesEl.scrollHeight - top - messagesEl.clientHeight <= TAIL_PX) {
