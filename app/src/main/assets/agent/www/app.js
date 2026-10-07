@@ -138,6 +138,48 @@ window.addEventListener("load", syncSafeTop);
 window.addEventListener("resize", syncSafeTop);
 syncSafeTop();
 
+/* ---------- transient in-app notices ----------
+   A toast, not an Android notification: it belongs to the page, so it says nothing while the app
+   is backgrounded and never needs a permission. The stack is positioned, not in flow, so a
+   notice can appear over the chat or any settings tab without moving the composer or the list.
+   Tapping one dismisses it early, which is the only interaction it offers. */
+const toastStack = document.getElementById("toast-stack");
+const TOAST_MS = 4200;
+const TOAST_MAX = 3;
+
+function dismissToast(el) {
+  if (!el || el.dataset.leaving) return;
+  el.dataset.leaving = "1";
+  clearTimeout(Number(el.dataset.timer));
+  el.classList.add("leaving");
+  // The exit animation is cosmetic, so the node goes either way if its end event never arrives.
+  el.addEventListener("animationend", () => el.remove(), { once: true });
+  setTimeout(() => el.remove(), 400);
+}
+
+function toast(kind, text, ms = TOAST_MS) {
+  if (!toastStack || !text) return;
+  // The same line twice (a request failing the same way twice) refreshes the one on screen
+  // instead of stacking two identical notices.
+  const existing = [...toastStack.children].find(el => el.dataset.text === text);
+  if (existing) {
+    clearTimeout(Number(existing.dataset.timer));
+    existing.dataset.timer = String(setTimeout(() => dismissToast(existing), ms));
+    return;
+  }
+  const el = document.createElement("div");
+  el.className = `toast toast-${kind}`;
+  el.dataset.text = text;
+  el.setAttribute("role", kind === "error" ? "alert" : "status");
+  el.innerHTML = `${icon(kind === "error" ? "triangle-alert" : "sparkles", 15, "ico-inline")}` +
+    `<span>${escapeHtml(text)}</span>`;
+  el.addEventListener("click", () => dismissToast(el));
+  toastStack.append(el);
+  while (toastStack.children.length > TOAST_MAX) dismissToast(toastStack.firstElementChild);
+  el.dataset.timer = String(setTimeout(() => dismissToast(el), ms));
+}
+window.toast = toast;
+
 /* ---------- which server is this? ----------
    Both the real server and the app's recovery server answer /api/status, but only the real one
    reports mode: "full". So a missing mode means we are on the fallback, and the banner says so
@@ -387,6 +429,13 @@ function connectWebSocket() {
         window.onAgentUpdate?.(data.payload);
       } else if (data.event === "sessions_changed") {
         window.onSessionsEvent?.();
+      } else if (data.event === "title_status") {
+        // The title job runs beside the turn it belongs to, so these land mid-conversation.
+        const p = data.payload || {};
+        toast(p.state === "failed" ? "error" : "info",
+          p.state === "failed"
+            ? `Session title failed: ${p.detail || "unknown error"}`
+            : `Naming this session · ${p.detail || ""}`.trim());
       } else if (data.event === "changes") {
         window.onChangesEvent?.();
       } else if (data.event === "login" || data.event === "providers_changed") {

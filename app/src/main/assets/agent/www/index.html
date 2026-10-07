@@ -54,6 +54,10 @@
       </button>
     </div>
 
+    <!-- Transient in-app notices (a title job starting, one failing). A stack that floats
+         under the top chrome: nothing is in flow, so no screen reflows when one appears. -->
+    <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
     <!-- Screen 1: Chat (main) -->
     <section class="screen active" id="screen-chat">
       <div class="chat-messages" id="messages-container"></div>

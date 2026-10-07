@@ -1310,6 +1310,14 @@ function applyGeneratedTitle(sessionId: number, title: string): boolean {
   return true;
 }
 
+/** Tell the page that a title job started, or that it gave up and why. Purely informational:
+   nothing here reads it back, and a page that never sees it (backgrounded, no browser) loses
+   nothing -- the title still lands in the database either way. `detail` is the model on the way
+   in and the reason on the way out. */
+function noteTitleStatus(sessionId: number, state: "started" | "failed", detail?: string) {
+  broadcast("title_status", { sessionId, state, detail });
+}
+
 const titleGenerationJobs = new Set<number>();
 function scheduleTitleGeneration(sessionId: number, firstMessage: string) {
   const preference = titleModelPreference();
@@ -1320,11 +1328,15 @@ function scheduleTitleGeneration(sessionId: number, firstMessage: string) {
   }
   if (titleGenerationJobs.has(sessionId)) return;
   titleGenerationJobs.add(sessionId);
+  noteTitleStatus(sessionId, "started", preference.key);
 
   void (async () => {
     try {
       const model = models.getModel(preference.provider, preference.modelId);
-      if (!model) return;
+      if (!model) {
+        noteTitleStatus(sessionId, "failed", `${preference.key} is no longer available`);
+        return;
+      }
       const stream = models.streamSimple(model, {
         messages: [{
           role: "user",
@@ -1346,13 +1358,20 @@ function scheduleTitleGeneration(sessionId: number, firstMessage: string) {
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 80);
-      if (!generated) return;
+      if (!generated) {
+        // Scrubbing can leave nothing behind (an empty or punctuation-only reply), and the
+        // fallback below is only for a thrown error -- so say so rather than leave the session
+        // on "New session" with no word about why.
+        noteTitleStatus(sessionId, "failed", "the model returned an empty title");
+        return;
+      }
 
       // Respect a manual rename, a changed title-model preference, or a deleted session.
       if (titleModelPreference()?.key !== preference.key) return;
       applyGeneratedTitle(sessionId, generated);
     } catch (err) {
       console.warn(`[pidroid] title generation failed for session ${sessionId}:`, err);
+      noteTitleStatus(sessionId, "failed", err instanceof Error ? err.message : String(err));
       // Better a plain title from the message than a session stuck on "New session".
       if (titleModelPreference()?.key === preference.key) applyGeneratedTitle(sessionId, messageTitle(firstMessage));
     } finally {
