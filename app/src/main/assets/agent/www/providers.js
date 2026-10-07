@@ -145,7 +145,7 @@ function renderModels() {
   };
 
   const rowHtml = m => `
-      <div class="model-item">
+      <div class="model-item${m.id === modelData.current ? " current" : ""}">
         <button type="button" class="model-row${m.id === modelData.current ? " selected" : ""}" data-id="${escapeHtml(m.id)}">
           <span class="model-name">${escapeHtml(m.name)}</span>
           <span class="provider-meta"><span class="provider-tag">${escapeHtml(providerOf(m))}</span> · ${escapeHtml(metaOf(m))}</span>

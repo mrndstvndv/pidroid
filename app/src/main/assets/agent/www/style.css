@@ -1329,10 +1329,12 @@ textarea {
   background: none;
   font-size: 0.95rem;
 }
-.sheet .model-row.selected {
-  border: none;
+/* The highlight spans the whole item, star included, so the row and its star read as one. */
+.sheet .model-item.current {
+  border-radius: 12px;
   background-color: color-mix(in srgb, var(--accent) 18%, transparent);
 }
+.sheet .model-row.selected { border: none; background: none; }
 .sheet .model-row.selected .model-name { color: var(--accent-text-strong, var(--accent)); font-weight: 600; }
 .sheet .model-row:active { background-color: var(--row-fill); }
 
