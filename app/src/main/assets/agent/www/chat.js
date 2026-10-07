@@ -20,7 +20,7 @@ const cacheLabel = document.getElementById("cache-label");
 const ctxPct = document.getElementById("ctx-pct");
 const ctxPill = document.getElementById("ctx-pill");
 const costLabel = document.getElementById("cost-label");
-const thinkingSelect = document.getElementById("thinking-select");
+const modelBtnEffort = document.getElementById("model-btn-effort");
 
 // Sections the user opened / closed by hand, keyed by data-key; everything else follows the defaults.
 const userOpen = new Set();
@@ -1372,14 +1372,9 @@ function renderControls(data) {
   }
 
   const { levels, current } = data.thinking;
-  const signature = levels.join(",") + "|" + current;
-  if (thinkingSelect.dataset.sig !== signature) {
-    thinkingSelect.dataset.sig = signature;
-    thinkingSelect.innerHTML = levels.map(l => `<option value="${l}">${l === "off" ? "No thinking" : l.charAt(0).toUpperCase() + l.slice(1)}</option>`).join("");
-    thinkingSelect.value = current;
-    thinkingSelect.disabled = levels.length < 2;
-    thinkingSelect.title = levels.length < 2 ? "This model has no adjustable thinking effort" : "Thinking effort";
-  }
+  const effort = levels.length < 2 ? "" : effortLabel(current);
+  if (modelBtnEffort.textContent !== effort) modelBtnEffort.textContent = effort;
+  window.onThinkingInfo?.(data.thinking);
 
   if (data.model !== lastModel) {
     lastModel = data.model;
@@ -1707,19 +1702,32 @@ function appendToComposer(text) {
   chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
 }
 
-thinkingSelect.addEventListener("change", async () => {
+/** A thinking level as the composer and the chooser show it. */
+function effortLabel(level) {
+  return level === "off" ? "No thinking" : level === "xhigh" ? "Extra high" : level.charAt(0).toUpperCase() + level.slice(1);
+}
+window.effortLabel = effortLabel;
+window.thinkingInfo = () => payload?.thinking || null;
+
+/** Sets the session's thinking effort (from the model chooser); the server answers with a fresh view. */
+window.setThinkingLevel = async (level) => {
   try {
     const res = await fetch("/api/thinking", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ level: thinkingSelect.value }),
+      body: JSON.stringify({ level }),
     });
     const data = await res.json();
     if (data.error) alert(data.error);
+    else if (payload && data.thinking) {
+      payload.thinking = data.thinking;
+      controlsDirty = true;
+      if (!frame) frame = requestAnimationFrame(render);
+    }
   } catch (err) {
     alert(err.message);
   }
-});
+};
 
 /* ---------- branching ----------
    A branch is a whole session, so the affordance hangs off a message: a long press (or a right click

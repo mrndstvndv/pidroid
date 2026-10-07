@@ -76,13 +76,11 @@
             <button type="button" class="composer-round attach-btn" id="attach-btn" title="Attach files or images" aria-label="Attach files or images">
               <span data-icon="plus" data-size="20"></span>
             </button>
-            <!-- Model and thinking effort read as one pill; each half is its own control. -->
-            <div class="model-pill">
-              <button type="button" class="model-btn" id="model-btn" title="Choose model">
-                <span id="model-btn-label">Loading model...</span>
-              </button>
-              <select id="thinking-select" class="think-select" title="Thinking effort"></select>
-            </div>
+            <!-- Model and thinking effort in one pill; it opens the chooser, which sets both. -->
+            <button type="button" class="model-pill model-btn" id="model-btn" title="Choose model and effort">
+              <span id="model-btn-label">Loading model...</span>
+              <span class="model-btn-effort" id="model-btn-effort"></span>
+            </button>
             <span class="composer-spacer"></span>
             <span class="conn-dot" id="conn-dot" title="Connection"></span>
             <button type="button" class="ctx-ring" id="ctx-pill" title="Context window usage" aria-label="Context window usage" aria-expanded="false">
@@ -362,15 +360,39 @@
       </div>
     </aside>
 
-    <!-- Model chooser dialog -->
-    <div class="modal" id="model-modal" hidden>
-      <div class="modal-card square">
-        <input type="search" id="model-search" class="field" placeholder="Search models or providers..." autocomplete="off" />
-        <div class="model-list" id="model-list"></div>
-        <div class="modal-actions">
-          <span class="provider-meta" id="model-default"></span>
-          <span class="provider-meta" id="model-count"></span>
-          <button class="btn-secondary" id="model-close">Close</button>
+    <!-- Model chooser: a floating sheet at the bottom. One page picks the model (searchable, recents
+         first), the other the thinking effort; the Effort row switches between them. -->
+    <div class="modal sheet-modal" id="model-modal" hidden>
+      <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="model-sheet-title">
+        <div class="sheet-page" id="model-page">
+          <div class="sheet-head">
+            <h3 id="model-sheet-title">Select model</h3>
+            <button type="button" class="sheet-x" id="model-close" aria-label="Close">
+              <span data-icon="x" data-size="22"></span>
+            </button>
+          </div>
+          <input type="search" id="model-search" class="field sheet-search" placeholder="Search models or providers..." autocomplete="off" />
+          <div class="model-list" id="model-list"></div>
+          <button type="button" class="sheet-row effort-row" id="effort-row">
+            <span>Effort</span>
+            <span class="sheet-row-value" id="effort-row-value">–</span>
+            <span data-icon="chevron-right" data-size="18"></span>
+          </button>
+          <div class="sheet-foot">
+            <span class="provider-meta" id="model-default"></span>
+            <span class="provider-meta" id="model-count"></span>
+          </div>
+        </div>
+        <div class="sheet-page" id="effort-page" hidden>
+          <div class="sheet-head">
+            <button type="button" class="sheet-x" id="effort-back" aria-label="Back to models">
+              <span data-icon="arrow-left" data-size="22"></span>
+            </button>
+            <h3>Thinking effort</h3>
+          </div>
+          <p class="sheet-desc">How hard the model thinks before it answers. More effort is slower and costs more, but handles harder problems.</p>
+          <div class="effort-list" id="effort-list" role="radiogroup" aria-label="Thinking effort"></div>
+          <button type="button" class="sheet-done" id="effort-done">Done</button>
         </div>
       </div>
     </div>

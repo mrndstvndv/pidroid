@@ -1252,6 +1252,186 @@ textarea {
 .model-default.active { color: var(--accent); }
 .model-default:disabled { opacity: 0.4; }
 
+/* The model chooser: a sheet floating over the bottom of the screen, inset from the edges and
+   rounded all round, rather than a box in the middle. Two pages share it: models, then effort. */
+.sheet-modal { align-items: flex-end; }
+
+.sheet {
+  --row-fill: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 560px;
+  max-height: calc(var(--vv-h, 100dvh) - 2 * var(--modal-pad, 16px));
+  padding: 6px 16px max(16px, env(safe-area-inset-bottom, 0px));
+  border: 1px solid var(--border);
+  border-radius: 28px;
+  /* A raised surface: a step up from the page, which on AMOLED black would otherwise swallow it. */
+  background-color: color-mix(in srgb, var(--text-primary) 7%, var(--bg-primary));
+  box-shadow: 0 10px 40px rgb(0 0 0 / 45%);
+  overflow: hidden;
+}
+
+.sheet-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sheet-page[hidden] { display: none; }
+
+/* Tall enough for a useful list, and fixed, so the sheet does not jump while you type a search. */
+#model-page { height: min(calc(var(--vv-h, 100dvh) - 2 * var(--modal-pad, 16px) - 24px), 620px); }
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 56px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sheet-head h3 { flex: 1; margin: 0; font-size: 1.1rem; font-weight: 600; }
+
+.sheet-x {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin: 0 -8px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.sheet-x:active { background-color: var(--row-fill); }
+
+.sheet-search { margin: 0 0 10px; border-radius: 14px; background-color: var(--row-fill); }
+.sheet .model-group { background-color: color-mix(in srgb, var(--text-primary) 7%, var(--bg-primary)); }
+
+.sheet .model-list { margin: 0; padding: 0; }
+.sheet .model-group { margin: 0; padding: 10px 4px 6px; border-bottom: none; }
+.sheet .recents-head { border-bottom: none; }
+.sheet .recents-head + .model-item { margin-top: 0; }
+
+/* Rows read as one rounded stack, like a settings list. */
+.sheet .model-item { margin-bottom: 3px; }
+.sheet .model-row {
+  position: relative;
+  padding: 12px 44px 12px 16px;
+  border: none;
+  border-radius: 14px;
+  background-color: var(--row-fill);
+  font-size: 0.95rem;
+}
+.sheet .model-row.selected { background-color: var(--row-fill); border: none; }
+.sheet .model-row:active { background-color: color-mix(in srgb, var(--text-primary) 12%, transparent); }
+
+.model-check {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--accent);
+}
+
+.sheet-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 56px;
+  margin-top: 10px;
+  padding: 0 14px 0 16px;
+  border: none;
+  border-radius: 16px;
+  background-color: var(--row-fill);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 1rem;
+  text-align: left;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sheet-row > span:first-child { flex: 1; }
+.sheet-row-value { color: var(--text-secondary); }
+.sheet-row:disabled { opacity: 0.55; cursor: default; }
+.sheet-row:disabled [data-icon], .sheet-row:disabled .ico { display: none; }
+
+.sheet-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  flex-shrink: 0;
+  font-size: 0.75rem;
+}
+
+.sheet-foot > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet-foot > span:last-child { flex-shrink: 0; }
+
+.sheet-desc { margin: 0 0 8px; font-size: 0.9rem; color: var(--text-secondary); line-height: 1.45; }
+
+.effort-list { display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
+
+.effort-opt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 2px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.effort-text { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.effort-name { font-size: 1rem; }
+
+.effort-radio {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: 2px solid var(--text-secondary);
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+
+.effort-opt[aria-checked="true"] .effort-radio {
+  border-color: var(--text-primary);
+  background: radial-gradient(circle, var(--text-primary) 0 5px, transparent 5.5px);
+}
+
+.sheet-done {
+  height: 52px;
+  margin-top: 16px;
+  border: none;
+  border-radius: 999px;
+  background-color: var(--text-primary);
+  color: var(--bg-primary);
+  font: inherit;
+  font-size: 1.05rem;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sheet-done:active { opacity: 0.85; }
+
 .modal-actions {
   align-items: center;
   justify-content: space-between;
@@ -1517,52 +1697,35 @@ html[data-mode="light"] .shimmer {
 
 /* Model and effort: one pill, two controls. The model name is the only label that may
    ellipsise; its full id is in the tooltip and in the picker. */
-.model-pill {
+/* Model and effort: one pill that opens the chooser. The model name is the only label that may
+   ellipsise; its full id is in the tooltip and in the chooser. */
+.composer .model-pill {
   display: flex;
   align-items: center;
-  min-width: 0;
-  height: 40px;
-  padding: 0 2px 0 14px;
-  border-radius: 999px;
-  background-color: var(--control-fill);
-}
-
-.composer .model-btn {
+  gap: 6px;
   min-width: 0;
   max-width: none;
-  padding: 0;
+  height: 40px;
+  padding: 0 14px;
   border: none;
-  background: none;
+  border-radius: 999px;
+  background-color: var(--control-fill);
   color: var(--text-primary);
   font-size: 0.85rem;
   font-weight: 500;
+  cursor: pointer;
+  touch-action: manipulation;
 }
 
-.composer .model-btn #model-btn-label {
-  display: block;
+.composer .model-pill #model-btn-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.think-select {
-  flex: 0 0 auto;
-  max-width: 96px;
-  padding: 0 10px 0 6px;
-  height: 100%;
-  /* As wide as the chosen level, not the longest option, so the model name gets the room. */
-  field-sizing: content;
-  border: none;
-  background: none;
-  color: var(--text-secondary);
-  font-size: 0.85rem;
-  appearance: none;
-  -webkit-appearance: none;
-  cursor: pointer;
-  touch-action: manipulation;
-}
-
-.think-select:disabled { opacity: 0.6; }
+.model-btn-effort { flex-shrink: 0; color: var(--text-secondary); white-space: nowrap; }
+.model-btn-effort:empty { display: none; }
 
 /* Shown only when the page has lost the server; online needs no ink. */
 .conn-dot {

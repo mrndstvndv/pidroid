@@ -149,6 +149,7 @@ function renderModels() {
         <button type="button" class="model-row${m.id === modelData.current ? " selected" : ""}" data-id="${escapeHtml(m.id)}">
           <span class="model-name">${escapeHtml(m.name)}</span>
           <span class="provider-meta"><span class="provider-tag">${escapeHtml(providerOf(m))}</span> · ${escapeHtml(metaOf(m))}</span>
+          ${m.id === modelData.current ? `<span class="model-check">${icon("check", 20)}</span>` : ""}
         </button>
         <button type="button" class="model-default${m.id === modelData.default ? " active" : ""}" data-id="${escapeHtml(m.id)}"
           title="${m.id === modelData.default ? "Default for new sessions" : "Make this the default for new sessions"}"
@@ -171,23 +172,90 @@ function renderModels() {
   `).join("") || `<p class="description">No models match. Sign in to more providers in the Providers tab.</p>`;
 
   const def = modelData.models.find(m => m.id === modelData.default);
-  modelDefault.textContent = def ? `Default for new sessions: ${def.name}` : "";
+  modelDefault.textContent = def ? `★ Default: ${def.name}` : "";
   modelCount.textContent = matches.length > shown.length
-    ? `Showing ${shown.length} of ${matches.length} — keep typing`
+    ? `${shown.length} of ${matches.length}, keep typing`
     : `${matches.length} models`;
 }
 
-modelBtn.addEventListener("click", () => {
-  modelModal.hidden = false;
-  modelSearch.value = "";
-  renderModels();
-  loadModels();
-  modelSearch.focus();
+/* ---------- thinking effort ----------
+   The second page of the chooser: the levels the current model supports, as a radio list, applied
+   with Done (or dropped with back). chat.js owns the session's thinking state and the request. */
+const modelPage = document.getElementById("model-page");
+const effortPage = document.getElementById("effort-page");
+const effortRow = document.getElementById("effort-row");
+const effortRowValue = document.getElementById("effort-row-value");
+const effortList = document.getElementById("effort-list");
+const EFFORT_HINTS = {
+  off: "Answers straight away",
+  minimal: "The lightest pass",
+  low: "A quick think first",
+  medium: "Balanced for everyday work",
+  high: "Thinks problems through",
+  xhigh: "The most thorough, and the slowest",
+};
+let effortChoice = null;
+
+function renderEffortRow(info = window.thinkingInfo?.()) {
+  const adjustable = info && info.levels.length > 1;
+  effortRow.disabled = !adjustable;
+  effortRowValue.textContent = !info ? "–" : adjustable ? window.effortLabel(info.current) : "Not adjustable";
+}
+window.onThinkingInfo = (info) => { if (!modelModal.hidden) renderEffortRow(info); };
+
+function renderEffortList() {
+  const info = window.thinkingInfo?.();
+  if (!info) return;
+  effortList.innerHTML = info.levels.map((level) => `
+    <button type="button" class="effort-opt" role="radio" aria-checked="${level === effortChoice}" data-level="${escapeHtml(level)}">
+      <span class="effort-text"><span class="effort-name">${escapeHtml(window.effortLabel(level))}</span>
+        <span class="provider-meta">${escapeHtml(EFFORT_HINTS[level] || "")}</span></span>
+      <span class="effort-radio"></span>
+    </button>`).join("");
+}
+
+function showPage(effort) {
+  modelPage.hidden = effort;
+  effortPage.hidden = !effort;
+  if (effort) {
+    effortChoice = window.thinkingInfo?.()?.current ?? null;
+    renderEffortList();
+  }
+}
+
+effortRow.addEventListener("click", () => showPage(true));
+document.getElementById("effort-back").addEventListener("click", () => showPage(false));
+effortList.addEventListener("click", (e) => {
+  const opt = e.target.closest(".effort-opt");
+  if (!opt) return;
+  effortChoice = opt.dataset.level;
+  renderEffortList();
+});
+document.getElementById("effort-done").addEventListener("click", async () => {
+  const info = window.thinkingInfo?.();
+  if (effortChoice && info && effortChoice !== info.current) await window.setThinkingLevel?.(effortChoice);
+  closeModelModal();
 });
 
-document.getElementById("model-close").addEventListener("click", () => (modelModal.hidden = true));
+function openModelModal(effort = false) {
+  modelModal.hidden = false;
+  modelSearch.value = "";
+  showPage(effort);
+  renderEffortRow();
+  renderModels();
+  loadModels();
+}
+
+function closeModelModal() {
+  modelModal.hidden = true;
+  showPage(false);
+}
+
+modelBtn.addEventListener("click", () => openModelModal());
+
+document.getElementById("model-close").addEventListener("click", closeModelModal);
 modelModal.addEventListener("click", (e) => {
-  if (e.target === modelModal) modelModal.hidden = true;
+  if (e.target === modelModal) closeModelModal();
 });
 modelSearch.addEventListener("input", renderModels);
 
@@ -220,7 +288,7 @@ modelList.addEventListener("click", async (e) => {
   try {
     await api("/api/model", { model: row.dataset.id });
     noteRecentModel(row.dataset.id);
-    modelModal.hidden = true;
+    closeModelModal();
     loadModels();
   } catch (err) {
     alert(err.message);
@@ -327,7 +395,8 @@ function closeModal() {
 
 document.getElementById("login-close").addEventListener("click", closeModal);
 registerBackLayer(110, () => !loginModal.hidden, closeModal);
-registerBackLayer(100, () => !modelModal.hidden, () => (modelModal.hidden = true));
+// Back leaves the effort page first, then closes the chooser.
+registerBackLayer(100, () => !modelModal.hidden, () => (effortPage.hidden ? closeModelModal() : showPage(false)));
 
 function showKeyForm(provider) {
   openModal(`${provider.name} API key`);
