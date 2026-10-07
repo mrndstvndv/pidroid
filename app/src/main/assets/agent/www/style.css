@@ -1632,6 +1632,18 @@ html[data-mode="light"] .shimmer {
 
 .composer > * { pointer-events: auto; }
 
+/* The strip between the card and the bottom of the window. Left clear, a transcript scrolled
+   back showed its text through it, under the gesture pill. Fade it out behind the lower half of
+   the card instead; the card itself stays frosted over whatever is above. */
+.composer::before {
+  content: "";
+  position: absolute;
+  inset: 50% 0 0;
+  z-index: -1;
+  background: linear-gradient(to bottom, transparent, var(--bg-primary) 45%);
+  pointer-events: none;
+}
+
 .composer-card {
   position: relative;
   display: flex;

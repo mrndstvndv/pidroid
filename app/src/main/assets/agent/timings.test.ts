@@ -74,4 +74,24 @@ describe("Timings incremental stamping", () => {
     expect(keys.map((row) => row.key)).toEqual([messageEndKey(9)]);
     db.close();
   });
+  test("keeps the run start when a running session is opened again", () => {
+    const db = makeDb();
+    const user = { id: 1, kind: "pi.user", model: [{ content: "go" }] };
+    const running = { "pi.live": { run: true } };
+    const first = new Timings(db, 3);
+    first.stamp({ entries: [user], docs: running }, 1_000);
+    first.close(); // the user switches away mid-run
+
+    // Opening it again reads the whole log afresh; its prompt is not a new one.
+    const again = new Timings(db, 3);
+    again.stamp({ entries: [user], docs: running }, 30_000);
+    expect(again.lookup(RUN_KEY)).toBe(1_000);
+
+    // A prompt that does arrive afterwards still starts a new run.
+    const next = { id: 2, kind: "pi.user", model: [{ content: "and again" }] };
+    again.stamp({ entries: [user, next], docs: running }, 40_000);
+    expect(again.lookup(RUN_KEY)).toBe(40_000);
+    again.close();
+    db.close();
+  });
 });

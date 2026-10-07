@@ -50,6 +50,9 @@ export class Timings {
   /** Start times of the blocks of the message currently streaming, in order. */
   #staged: number[] | undefined;
   #dirty = false;
+  /** Whether the log has been read once. The first read only catches up on what the database
+   *  already describes, so it must not act as if each prompt in it had just arrived. */
+  #caughtUp = false;
   #timer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private db: Database, private sessionId: number) {
@@ -108,8 +111,11 @@ export class Timings {
         } else if (kind === "pi.tool-result") {
           const callId = entry?.model?.[0]?.toolCallId;
           if (callId) this.#set(toolEndKey(callId), now);
-        } else if (kind === "pi.user") {
+        } else if (kind === "pi.user" && this.#caughtUp) {
           // A new prompt closes the previous run: its partial is gone and nothing staged applies.
+          // Not on the first read: there every prompt is old news, and the latest one is the run
+          // still going, whose start was just loaded from the database. Dropping it here restarted
+          // the run clock at zero each time a running session was opened again.
           this.#staged = undefined;
           this.#mem.delete(RUN_KEY);
           this.#dirty = true;
@@ -145,6 +151,7 @@ export class Timings {
 
     if (running) this.#live.add(RUN_KEY);
     else this.#live.delete(RUN_KEY);
+    this.#caughtUp = true;
     this.#entryCount = entries.length;
     this.#lastEntryId = entries.length ? String(entries[entries.length - 1]?.id) : undefined;
     this.#scheduleFlush();

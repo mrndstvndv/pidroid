@@ -1128,8 +1128,8 @@ function shownPageCard(item, sessionId, superseded) {
     `</div>`;
 }
 
-/** Display items as patch specs (see syncParts). `active` is the group still being worked on. */
-function itemSpecs(items, sessionId, active) {
+/** Display items as patch specs (see syncParts). */
+function itemSpecs(items, sessionId) {
   return items.map((item) => {
     if (item.kind === "html") return { key: item.key, html: item.html };
     if (item.kind === "wrap") return item;
@@ -1138,11 +1138,11 @@ function itemSpecs(items, sessionId, active) {
       return { key: item.key, html: shownPageCard(item, sessionId, path !== undefined && latestShown.has(path) && latestShown.get(path) !== item.call.id) };
     }
     const entries = item.entries;
-    const running = item === active && entries.some((e) => e.type === "tool" && !e.result);
     const failed = entries.filter((e) => e.type === "tool" && e.result?.isError).length;
-    // A streaming thought does not take over the summary: the folded line keeps naming what the
-    // group did, and the status below it says "Thinking…" — same as "Working…".
-    const label = running ? '<span class="shimmer">Running</span>' : escapeHtml(groupLabel(entries));
+    // Nothing in flight takes over the summary, a running tool included: it counts the moment it
+    // starts, so the line only ever grows ("Read 5 files" → "Read 6 files"), and what is happening
+    // right now is said once, by the status row below (see statusSpec).
+    const label = escapeHtml(groupLabel(entries));
     const head = `<span class="work-label">${label}</span>` +
       (failed ? `<span class="work-failed">· ${failed} failed</span>` : "") +
       `<span class="work-chev">${icon("chevron-right", 15)}</span>`;
@@ -1401,6 +1401,41 @@ function toolViewSignature(views) {
   return viewsSignature;
 }
 
+/** What the status row says a tool is doing while it runs. Tools without an entry just work. */
+const RUNNING_VERBS = {
+  bash: "Running a command",
+  read: "Reading a file",
+  edit: "Editing a file",
+  write: "Writing a file",
+  grep: "Searching the code",
+  find: "Looking for files",
+  ls: "Listing a folder",
+  web_search: "Searching the web",
+  web_fetch: "Reading a page",
+};
+
+/**
+ * The one status row under a busy run. It keeps a single key for the whole run, so a change of
+ * phase rewrites the row in place: removing it and adding another a moment later shrank the list
+ * by a row in between, which a reader at the bottom saw as a jump. Only answer text streaming in
+ * replaces it, because by then the text itself shows the run is alive.
+ *
+ * The clock is always the run's. Timing each phase on its own made the number leap about
+ * ("Thinking… 3s", then "Working… 34s") as the label changed under it.
+ */
+function statusSpec(view, activeItem) {
+  const blocks = view.live?.blocks;
+  if (blocks?.length && blocks[blocks.length - 1].type === "text") return null;
+  const entries = activeItem?.entries ?? [];
+  const last = entries[entries.length - 1];
+  const runningTool = [...entries].reverse().find((e) => e.type === "tool" && !e.result);
+  const label = last?.type === "thinking" && last.streaming ? "Thinking"
+    : runningTool ? RUNNING_VERBS[runningTool.call?.name] || "Working"
+    : "Working";
+  const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
+  return { key: "status", html: `<div class="message assistant thinking"><div class="message-content"><span class="shimmer">${label}…</span>${since}</div></div>` };
+}
+
 /** Group numbering where history stops, so the tail's groups continue it (see makeFlow). */
 let historyEnd = { userId: "0", n: 0 };
 
@@ -1444,7 +1479,7 @@ function renderMessages(view, sessionId) {
     historyHasContent = items.length > 0;
     // A commit appends one message; patching keeps every other node (and its scroll offsets,
     // selection and open state) instead of re-parsing the whole transcript.
-    historyCreated = patchList(historyEl, itemSpecs(items, sessionId, null), historyState);
+    historyCreated = patchList(historyEl, itemSpecs(items, sessionId), historyState);
     enhanceCodeBlocks(historyEl);
     lastHistoryKey = signature;
   }
@@ -1457,19 +1492,9 @@ function renderMessages(view, sessionId) {
   const items = flow.finish();
   const lastItem = items[items.length - 1];
   const activeItem = view.busy && lastItem?.kind === "group" ? lastItem : null;
-  const tailSpecs = itemSpecs(items, sessionId, activeItem);
-  if (view.busy) {
-    const lastEntry = activeItem?.entries[activeItem.entries.length - 1];
-    const thought = lastEntry?.type === "thinking" && lastEntry.streaming ? lastEntry : null;
-    if (thought) {
-      // Same status line as "Working…", timed from when this thought started.
-      const at = thought.block.at ? durHtml(undefined, thought.block.at) : "";
-      tailSpecs.push({ key: "thinking", html: `<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Thinking…</span>${at}</div></div>` });
-    } else if (!view.live?.blocks?.length) {
-      const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
-      tailSpecs.push({ key: "working", html: `<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>` });
-    }
-  }
+  const tailSpecs = itemSpecs(items, sessionId);
+  const status = view.busy ? statusSpec(view, activeItem) : null;
+  if (status) tailSpecs.push(status);
 
   (view.queue || []).forEach((q, n) => {
     tailSpecs.push({ key: `q${n}`, html: `<div class="message user queued"><div class="message-content">${escapeHtml(q.text)}</div><div class="message-meta">${iconTag("clock", 12, "dim")} queued · sends after the current step</div></div>` });
@@ -1581,7 +1606,8 @@ function renderNow() {
   frame = 0;
   if (!payload) return;
   const sessionId = payload.session?.id ?? null;
-  if (sessionId !== renderedSessionId) {
+  const switched = sessionId !== renderedSessionId;
+  if (switched) {
     renderedSessionId = sessionId;
     lastHistoryKey = null;
     historyHasContent = false;
@@ -1604,7 +1630,20 @@ function renderNow() {
     }
   }
 
+  // Another session opens at its newest message, whatever the reader was doing in the last one.
+  // Emptying the list above clamps it to the top, and the scroll event that clamp fires arrives
+  // later, looking exactly like a reader dragging upwards: it unpinned the tail and stopped the
+  // glide on its way down, leaving the session open at its first message. Landing here, in the
+  // same task, means that event reads the offset we set and is recognised as our own.
+  if (switched) tailPinned = true;
   renderMessages(payload.view, sessionId);
+  if (switched) {
+    stopGlide(messagesEl);
+    const bottom = clampScroll(messagesEl, Infinity);
+    setScrollTop(messagesEl, bottom);
+    readerTop = bottom;
+    updateJumpBottom();
+  }
   if (statsDirty) {
     renderStats(payload.view);
     statsDirty = false;
