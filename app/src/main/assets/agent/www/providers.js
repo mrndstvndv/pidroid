@@ -213,17 +213,50 @@ function renderEffortList() {
     </button>`).join("");
 }
 
-function showPage(effort) {
+/* ---------- motion ----------
+   The sheet rises from below the screen on an M3 Expressive spatial spring, which lands with a
+   slight overshoot, while the scrim fades in on an effects spring. It drops back the same way.
+   Switching pages slides the new one in from its side and springs the sheet to its new height
+   (motion.js has the springs). */
+const sheet = modelModal.querySelector(".sheet");
+let sheetAnims = [];
+let closing = false;
+
+function stopSheetMotion() {
+  for (const a of sheetAnims) a.cancel();
+  sheetAnims = [];
+}
+
+const motion = (el, frames, spring) => {
+  const a = window.M3Motion?.play(el, frames, spring);
+  if (a) sheetAnims.push(a);
+  return a;
+};
+
+const OFFSCREEN = "translateY(calc(100% + 32px))";
+
+function showPage(effort, animate = false) {
+  if (effortPage.hidden === !effort) return;
+  const from = animate ? sheet.offsetHeight : 0;
   modelPage.hidden = effort;
   effortPage.hidden = !effort;
   if (effort) {
     effortChoice = window.thinkingInfo?.()?.current ?? null;
     renderEffortList();
   }
+  if (!animate) return;
+  stopSheetMotion();
+  const to = sheet.offsetHeight;
+  const page = effort ? effortPage : modelPage;
+  const dx = effort ? 40 : -40; // forward comes in from the right, back from the left
+  motion(page, [{ transform: `translateX(${dx}px)` }, { transform: "none" }], "spatialFast");
+  motion(page, [{ opacity: 0 }, { opacity: 1 }], "effectsFast");
+  const grow = from !== to && motion(sheet, [{ height: `${from}px` }, { height: `${to}px` }], "spatialDefault");
+  grow?.finished.then(() => stopSheetMotion(), () => {});
 }
 
-effortRow.addEventListener("click", () => showPage(true));
-document.getElementById("effort-back").addEventListener("click", () => showPage(false));
+effortRow.addEventListener("click", () => showPage(true, true));
+document.getElementById("effort-back").addEventListener("click", () => showPage(false, true));
 effortList.addEventListener("click", (e) => {
   const opt = e.target.closest(".effort-opt");
   if (!opt) return;
@@ -237,17 +270,37 @@ document.getElementById("effort-done").addEventListener("click", async () => {
 });
 
 function openModelModal(effort = false) {
+  closing = false;
+  modelModal.style.pointerEvents = "";
+  stopSheetMotion();
   modelModal.hidden = false;
   modelSearch.value = "";
   showPage(effort);
   renderEffortRow();
   renderModels();
   loadModels();
+  motion(sheet, [{ transform: OFFSCREEN }, { transform: "none" }], "spatialDefault");
+  motion(modelModal, [{ opacity: 0 }, { opacity: 1 }], "effectsDefault");
 }
 
 function closeModelModal() {
-  modelModal.hidden = true;
-  showPage(false);
+  if (modelModal.hidden || closing) return;
+  closing = true;
+  stopSheetMotion();
+  // The spring's tail is spent off screen; the page underneath is usable from the first frame.
+  modelModal.style.pointerEvents = "none";
+  const done = () => {
+    if (!closing) return; // reopened while it was leaving
+    closing = false;
+    modelModal.style.pointerEvents = "";
+    modelModal.hidden = true;
+    stopSheetMotion();
+    showPage(false);
+  };
+  const drop = motion(sheet, [{ transform: "none" }, { transform: OFFSCREEN }], "spatialDefault");
+  motion(modelModal, [{ opacity: 1 }, { opacity: 0 }], "effectsDefault");
+  if (drop) drop.finished.then(done, () => {});
+  else done();
 }
 
 modelBtn.addEventListener("click", () => openModelModal());
@@ -395,7 +448,7 @@ function closeModal() {
 document.getElementById("login-close").addEventListener("click", closeModal);
 registerBackLayer(110, () => !loginModal.hidden, closeModal);
 // Back leaves the effort page first, then closes the chooser.
-registerBackLayer(100, () => !modelModal.hidden, () => (effortPage.hidden ? closeModelModal() : showPage(false)));
+registerBackLayer(100, () => !modelModal.hidden && !closing, () => (effortPage.hidden ? closeModelModal() : showPage(false, true)));
 
 function showKeyForm(provider) {
   openModal(`${provider.name} API key`);
