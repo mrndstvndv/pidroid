@@ -433,6 +433,9 @@ body {
    touch-action:none is set on #app/.screen here: that would disable message scrolling
    too). */
 .chat-messages {
+  /* No browser scroll anchoring: chat.js follows the tail itself, and an anchor picked inside the
+     live tail (whose nodes are patched in place) pulled the list back up as text arrived. */
+  overflow-anchor: none;
   flex: 1;
   min-height: 0;
   min-width: 0;

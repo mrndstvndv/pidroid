@@ -13,7 +13,7 @@
   if (!on) return;
 
   const renders = [];
-  let long = 0, longMs = 0, bytes = 0, updates = 0, typeableAt = 0;
+  let long = 0, longMs = 0, bytes = 0, updates = 0, typeableAt = 0, backs = 0, backPx = 0;
   const pct = (a, p) => (a.length ? [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.floor(a.length * p))] : 0);
 
   window.__perf = {
@@ -22,6 +22,7 @@
       if (renders.length > 300) renders.shift();
     },
     message(size) { bytes += size; updates++; },
+    scrollBack(px) { backs++; backPx = Math.max(backPx, px); },
   };
 
   try {
@@ -45,6 +46,7 @@
       `typeable ${typeableAt}ms\n` +
       `render p50 ${f(pct(renders, 0.5))}  p95 ${f(pct(renders, 0.95))}  max ${f(Math.max(0, ...renders))} ms\n` +
       `long tasks ${long} (${Math.round(longMs)}ms)\n` +
-      `ws ${updates} msgs, ${(bytes / 1024).toFixed(0)} KB`;
+      `ws ${updates} msgs, ${(bytes / 1024).toFixed(0)} KB\n` +
+      `scroll-backs undone ${backs} (max ${backPx.toFixed(0)}px)`;
   }, 500);
 })();

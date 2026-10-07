@@ -1258,6 +1258,7 @@ function renderMessages(view, sessionId) {
   const bottom = clampScroll(messagesEl, Infinity);
   const glide = glides.get(LIST_KEY);
   const following = bottom - messagesEl.scrollTop < 120 || (!!glide && glide.target >= bottom - 1);
+  const topBefore = messagesEl.scrollTop;
   if (historyChanged) harvestBodyScroll(messagesEl);
   else harvestBodyScroll(dynamicEl);
 
@@ -1299,6 +1300,14 @@ function renderMessages(view, sessionId) {
   const created = patchList(dynamicEl, tailSpecs, tailState);
   enhanceCodeBlocks(dynamicEl);
 
+  // While following, a render only ever adds below, so the list must never move back up. Android's
+  // WebView did exactly that on the first update after the view had come to rest: the list dropped
+  // by the height of the new text for a frame before the follow pulled it up again (a bounce). The
+  // read below lays out before paint, so putting the offset back here means that frame never shows.
+  if (following && messagesEl.scrollTop < topBefore - 0.5) {
+    window.__perf?.scrollBack(topBefore - messagesEl.scrollTop);
+    messagesEl.scrollTop = topBefore;
+  }
   if (following) glideTo(messagesEl, messagesEl.scrollHeight);
   updateJumpBottom();
   for (const el of historyCreated) restoreBodyScroll(el, false);
