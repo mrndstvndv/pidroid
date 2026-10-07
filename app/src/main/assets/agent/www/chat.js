@@ -1275,10 +1275,9 @@ function renderMessages(view, sessionId) {
   const items = flow.finish();
   const lastItem = items[items.length - 1];
   const tailSpecs = itemSpecs(items, sessionId, view.busy && lastItem?.kind === "group" ? lastItem : null);
-  if (view.busy) {
-    // One status line under everything while the agent is at it, however much is folded above.
+  if (view.busy && !view.live?.blocks?.length) {
     const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
-    tailSpecs.push({ key: "status", html: `<div class="run-status"><span class="run-dot"></span><span class="shimmer">Working…</span>${since}</div>` });
+    tailSpecs.push({ key: "working", html: `<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>` });
   }
 
   (view.queue || []).forEach((q, n) => {

@@ -1353,6 +1353,10 @@ textarea {
   justify-content: space-between;
 }
 
+.message.thinking {
+  color: var(--text-secondary);
+}
+
 /* Sweeping highlight across the live status text ("Thinking…", "Working…").
    The gradient is clipped to the glyphs, so only the text itself lights up. */
 .shimmer {
@@ -1798,26 +1802,6 @@ details.work[open] > summary .work-chev { transform: rotate(90deg); }
   border-left: 1px solid var(--border);
 }
 
-/* Under everything while the agent works, however much is folded above it. */
-.run-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-}
-
-.run-status .dur { margin-left: 0; padding-left: 0; }
-
-.run-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background-color: var(--accent);
-  flex-shrink: 0;
-  animation: busy-pulse 1.6s ease-in-out infinite;
-}
-
 /* Something the agent chose to show: never folded away with the work around it. The page runs in
    a sandboxed iframe at a fixed height, so it cannot push the transcript around as it loads. */
 .artifact-card {
@@ -2113,6 +2097,9 @@ details.tool:not(.failed) .dur-live { color: var(--accent); }
 }
 
 .dur-live { opacity: 1; }
+
+/* The waiting row carries the run age inline after the word. */
+.message.thinking .message-content .dur { margin-left: 6px; padding-left: 0; }
 
 /* A failed call turns red: icon, tool name and argument preview. */
 details.tool.failed .tool-ico,
