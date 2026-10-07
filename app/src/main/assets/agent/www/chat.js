@@ -896,8 +896,8 @@ function isOpen(key, byDefault) {
 
 /* ---------- rendering ---------- */
 
-function thinkingBlock(key, block, streaming) {
-  const open = isOpen(key, streaming);
+function thinkingBlock(key, block, streaming, openByDefault = streaming) {
+  const open = isOpen(key, openByDefault);
   const body = escapeHtml(block.text) || "…";
   const label = streaming ? '<span class="shimmer">Thinking…</span>' : `${icon("brain", 13, "ico-inline")} Thought`;
   return `
@@ -936,8 +936,10 @@ function assistantParts(idKey, blocks, live, results, tools, error, ms, branchAf
   const parts = blocks.map((b, i) => {
     const key = `${idKey}-${i}`;
     if (b.type === "thinking") {
-      // Streaming thinking stays open only while it is the block being written.
-      return thinkingBlock(key, b, live && i === blocks.length - 1);
+      // A thought in the streaming partial stays open until its step commits. Closing it the
+      // moment the answer starts shrank the turn under a list pinned to the bottom, so the view
+      // dropped by the box's height and was then pushed back up as the text grew.
+      return thinkingBlock(key, b, live && i === blocks.length - 1, live);
     }
     if (b.type === "toolCall") return toolBlock(`t-${b.id}`, b, tools.get(b.id), results.get(b.id));
     // Committed text arrives pre-rendered from the server (chatview.ts); the streaming
@@ -1000,11 +1002,19 @@ function syncParts(container, have, want, created) {
       syncParts(entry.target, entry.kids, w.parts, []);
     }
     created.push(el);
-    if (h) h.el.replaceWith(el);
+    if (h) placed(h.el).replaceWith(el);
     else container.append(el);
     have[j] = entry;
   }
-  for (const gone of have.splice(want.length)) gone.el.remove();
+  for (const gone of have.splice(want.length)) placed(gone.el).remove();
+}
+
+/** The node actually in the tree for a part: enhanceCodeBlocks moves a streamed code block into
+ *  a .code-wrap with its copy button, so replacing or removing the bare <pre> would leave that
+ *  wrapper (and button) behind, and every update would nest one more. */
+function placed(el) {
+  const parent = el.parentElement;
+  return parent?.classList.contains("code-wrap") ? parent : el;
 }
 
 /** Items are {key, open, parts, close} turns or {key, parts:[html]} loose elements. Returns the
@@ -1126,8 +1136,12 @@ function markFreshBlocks(root = messagesEl, only) {
     if (live) freshEls.add(el);
     else freshEls.delete(el);
     if (live) {
-      el.classList.add("fresh");
-      el.style.animationDelay = `${-(age / 1000).toFixed(3)}s`;
+      // Only a new copy needs the delay: on a node that is already animating (kept by the
+      // patch) re-stamping it would push the running animation ahead by its own elapsed time.
+      if (!el.classList.contains("fresh")) {
+        el.classList.add("fresh");
+        el.style.animationDelay = `${-(age / 1000).toFixed(3)}s`;
+      }
     } else if (el.classList.contains("fresh")) {
       el.classList.remove("fresh");
       el.style.animationDelay = "";
@@ -1378,7 +1392,10 @@ function renderNow() {
   }
 }
 
+let awaitingResync = false;
+
 window.onAgentView = (data) => {
+  awaitingResync = false;
   payload = data;
   statsDirty = true;
   controlsDirty = true;
@@ -1408,7 +1425,9 @@ window.onAgentUpdate = (data) => {
   const live = update.live == null ? undefined : update.live;
   const stitched = applyLiveDelta(current, live, data.rev, data.base);
   if (live?.delta && !stitched) {
-    window.requestResync?.();
+    // One request is enough: every delta until the snapshot lands misses the same way.
+    if (!awaitingResync) window.requestResync?.();
+    awaitingResync = true;
     return;
   }
   payload.rev = data.rev;
