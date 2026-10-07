@@ -1353,10 +1353,6 @@ textarea {
   justify-content: space-between;
 }
 
-.message.thinking {
-  color: var(--text-secondary);
-}
-
 /* Sweeping highlight across the live status text ("Thinking…", "Working…").
    The gradient is clipped to the glyphs, so only the text itself lights up. */
 .shimmer {
@@ -1756,14 +1752,133 @@ html[data-mode="light"] .shimmer {
   background-color: #ef4444 !important;
 }
 
-/* Messages: turns, thinking, tool calls */
-.turn {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+/* Messages: work groups, thinking, tool calls, artifacts */
+
+/* A folded stretch of work: one quiet line ("Ran 3 commands, read a file ›") that opens onto the
+   rows it stands for. No box -- it should read as a margin note between what the agent says. */
+details.work {
   align-self: stretch;
   min-width: 0;
   max-width: 100%;
+  font-size: 0.85rem;
+}
+
+details.work > summary.work-head {
+  display: inline-flex;
+  max-width: 100%;
+  gap: 4px;
+  padding: 2px 0;
+  color: var(--text-secondary);
+}
+
+.work-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-failed { color: var(--danger-text); white-space: nowrap; }
+
+.work-chev {
+  display: inline-flex;
+  flex-shrink: 0;
+  opacity: 0.8;
+  transition: transform 0.15s ease;
+}
+
+details.work[open] > summary .work-chev { transform: rotate(90deg); }
+
+.work-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 2px 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+/* Under everything while the agent works, however much is folded above it. */
+.run-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.run-status .dur { margin-left: 0; padding-left: 0; }
+
+.run-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--accent);
+  flex-shrink: 0;
+  animation: busy-pulse 1.6s ease-in-out infinite;
+}
+
+/* Something the agent chose to show: never folded away with the work around it. The page runs in
+   a sandboxed iframe at a fixed height, so it cannot push the transcript around as it loads. */
+.artifact-card {
+  /* overflow:hidden lets a flex item shrink below its content, and the list is a flex column:
+     without this the card is squeezed to its header as soon as the transcript overflows. */
+  flex-shrink: 0;
+  align-self: stretch;
+  min-width: 0;
+  max-width: 100%;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.artifact-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 12px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.artifact-card.pending .artifact-card-head { padding: 10px 12px; }
+
+.artifact-card-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.artifact-card-note { font-size: 0.72rem; white-space: nowrap; }
+.artifact-card.superseded .artifact-card-title { color: var(--text-secondary); }
+
+.artifact-card-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.artifact-card-open:active { background-color: var(--bg-inset); }
+
+.artifact-card-frame {
+  display: block;
+  width: 100%;
+  border: none;
+  border-top: 1px solid var(--border);
+  background: #fff;
 }
 
 .message.queued {
@@ -1999,9 +2114,6 @@ details.tool:not(.failed) .dur-live { color: var(--accent); }
 
 .dur-live { opacity: 1; }
 
-/* The waiting row carries the run age inline after the word. */
-.message.thinking .message-content .dur { margin-left: 6px; padding-left: 0; }
-
 /* A failed call turns red: icon, tool name and argument preview. */
 details.tool.failed .tool-ico,
 details.tool.failed .tool-name,
@@ -2020,47 +2132,6 @@ details.tool.failed .tool-sum { color: var(--danger-text); }
 }
 .diff-stat { margin-left: 6px; font-family: monospace; letter-spacing: 0; text-transform: none; }
 .tool-note { margin: 4px 0 0; color: var(--text-secondary); font-style: italic; }
-
-/* A plotted curve (extensions/plot.ts). The graph is the body, so it takes the full width of the
-   row and scales with it; the drawing is pure SVG strokes in the theme's own colours, which is
-   what keeps it legible on black without a second palette. */
-.plot {
-  margin-top: 6px;
-  border: 1px solid var(--hairline);
-  border-radius: 10px;
-  background: var(--bg-inset);
-  padding: 6px 6px 4px;
-}
-.plot svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
-.plot-grid { stroke: var(--hairline); stroke-width: 1; }
-.plot-axis { stroke: var(--text-muted); stroke-width: 1.5; }
-.plot-tick { fill: var(--text-muted); font-size: 11px; font-family: monospace; }
-.plot-curve {
-  fill: none;
-  stroke: var(--accent-text);
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  /* A curve drawn for a phone screen: joins are rounded so a dense polyline reads as one line. */
-  vector-effect: non-scaling-stroke;
-}
-.plot-cap {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 2px 4px 0;
-  font-size: 0.7rem;
-  color: var(--text-secondary);
-}
-.plot-range { font-family: monospace; color: var(--text-muted); }
-/* The travelling dot (plot.animate). Filled rather than stroked so it stays solid over the curve,
-   and ringed in the background colour so it does not disappear into the line it is riding. */
-.plot-dot { fill: var(--accent-text-strong); stroke: var(--bg-card); stroke-width: 1.5; }
-/* Someone who has asked the system for less motion gets the graph without the dot: the curve is
-   the content, the movement is decoration on top of it. */
-@media (prefers-reduced-motion: reduce) {
-  .plot-dot { display: none; }
-}
 
 /* web_search results, as cards. A numbered text dump is unreadable on a phone: the eye needs the
    title and the host to judge a result, and the excerpt is only worth two lines. Backgrounds stay

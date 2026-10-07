@@ -244,7 +244,7 @@ const inspectImage = defineTool({
   name: "image_inspect",
   // The chat view reads this (see extensions.ts): the parameters are one path, but the result is the
   // readable report the tool prints, so that is what the row shows instead of a JSON dump.
-  view: { icon: "image", body: "output" },
+  view: { icon: "image", body: "output", verb: { one: "inspected an image", many: "inspected {n} images" } },
   description:
     "Read an image's dimensions and format without fully processing it. Decodes jpeg/png/webp/avif " +
     "in-process via WASM. Use this first when you need to know an image's size before cropping or " +
@@ -270,7 +270,7 @@ const inspectImage = defineTool({
 
 const editImage = defineTool({
   name: "image_edit",
-  view: { icon: "image", body: "output", summaryArg: "input" },
+  view: { icon: "image", body: "output", summaryArg: "input", verb: { one: "edited an image", many: "edited {n} images" } },
   description:
     "Decode, transform and re-encode an image. Operations run in the order: crop, rotate, flip, " +
     "resize. Supports jpeg/png/webp/avif in and any of those out, so it also does format " +
@@ -366,7 +366,7 @@ const editImage = defineTool({
 
 const optimiseImage = defineTool({
   name: "image_optimise",
-  view: { icon: "image", body: "output", summaryArg: "input" },
+  view: { icon: "image", body: "output", summaryArg: "input", verb: { one: "optimised an image", many: "optimised {n} images" } },
   description:
     "Losslessly shrink a PNG with oxipng. Pixel data is unchanged, so the image is visually " +
     "identical -- only the file gets smaller. Good for screenshots and UI images. For lossy " +

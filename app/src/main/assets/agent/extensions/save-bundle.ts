@@ -103,6 +103,7 @@ function safeName(name: string): string {
 
 const saveBundle = defineTool({
   name: "save_bundle",
+  view: { verb: { one: "saved a bundle", many: "saved {n} bundles" } },
   description:
     "Snapshot every source file of the app to a <name>.tar.gz in /storage/emulated/0/Download so the " +
     "work can be pulled onto a desktop and committed to a real repo. This is the escape hatch: the " +
