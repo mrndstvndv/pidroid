@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import kotlin.concurrent.thread
 import androidx.core.app.NotificationCompat
 import com.mrndstvndv.pidroid.MainActivity
 import com.mrndstvndv.pidroid.R
@@ -70,8 +71,12 @@ class AgentForegroundService : Service() {
                     startForeground(NOTIFICATION_ID, notification)
                 }
 
-                AndroidBridge.start(applicationContext)
-                AgentProcessManager.startAgent(applicationContext)
+                // Off the main thread: extraction and spawning Bun must not hold up the first frame.
+                val appContext = applicationContext
+                thread(name = "agent-start") {
+                    AndroidBridge.start(appContext)
+                    AgentProcessManager.startAgent(appContext)
+                }
             }
         }
         return START_STICKY

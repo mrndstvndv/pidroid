@@ -136,10 +136,18 @@ export class ExtensionLoader {
       : [];
     const active = files.filter((file) => this.isEnabled(file));
 
-    for (const file of active) {
+    // Import everything at once (the files are independent and each pulls in its own dependencies),
+    // then install in directory order, since a later extension wins over an earlier one.
+    const stamp = Date.now();
+    // A plain path + query re-imports the file; Bun caches file:// URLs regardless of the query.
+    const imports = active.map((file) => import(`${join(this.dir, file)}?v=${stamp}`).then((m) => ({ ok: true as const, m }), (error) => ({ ok: false as const, error })));
+    const imported = await Promise.all(imports);
+
+    for (const [i, file] of active.entries()) {
       try {
-        // A plain path + query re-imports the file; Bun caches file:// URLs regardless of the query.
-        const extension = (await import(`${join(this.dir, file)}?v=${Date.now()}`)).default as Installable | undefined;
+        const got = imported[i];
+        if (!got.ok) throw got.error;
+        const extension = got.m.default as Installable | undefined;
         if (!extension || typeof extension.name !== "string") throw new Error("default export must be defineExtension({ name, ... })");
         const previous = this.installed.get(file);
         if (previous && previous.name !== extension.name) this.registry.uninstall(previous); // renamed inside the file

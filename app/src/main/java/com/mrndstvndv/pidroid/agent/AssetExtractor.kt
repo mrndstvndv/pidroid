@@ -30,6 +30,8 @@ object AssetExtractor {
     private const val TAG = "AssetExtractor"
     private const val ROOT = "agent"
     private const val MANIFEST = ".shipped_manifest.json"
+    /** The install this directory was last reconciled with; see [installStamp]. */
+    private const val STAMP = ".install_stamp"
 
     fun extractAgentAssets(
         context: Context,
@@ -40,12 +42,24 @@ object AssetExtractor {
         val targetDir = File(context.filesDir, ROOT)
         val manifestFile = File(targetDir, MANIFEST)
 
+        // Hashing every shipped asset costs about half a second on a phone, on every launch. The
+        // assets only change when the app is installed or updated, so a stamp of the install says
+        // whether the last reconcile still holds. Anything else (force, a pending conflict choice,
+        // a missing manifest) takes the full path below.
+        val stampFile = File(targetDir, STAMP)
+        val stamp = installStamp(context)
+        if (!force && choice == null && manifestFile.exists() && stampFile.exists() && runCatching { stampFile.readText() }.getOrNull() == stamp) {
+            Log.d(TAG, "Agent assets unchanged since install $stamp at ${targetDir.absolutePath}")
+            return ExtractResult(targetDir)
+        }
+
         val shipped = listAssets(context, ROOT, "").associateWith { sha256(context.assets.open("$ROOT/$it").readBytes()) }
         val previous = readManifest(manifestFile)
 
         // Same shipped files as last time: nothing to do (an app update changes the hashes, so no manual version bump).
         if (!force && targetDir.exists() && previous == shipped) {
             Log.d(TAG, "Agent assets already up-to-date at ${targetDir.absolutePath}")
+            runCatching { stampFile.writeText(stamp) }
             return ExtractResult(targetDir)
         }
 
@@ -97,7 +111,14 @@ object AssetExtractor {
 
         // Kept agent edits stay "modified" relative to the new shipped base, so later updates still see them.
         writeManifest(manifestFile, shipped)
+        runCatching { stampFile.writeText(stamp) }
         return ExtractResult(targetDir)
+    }
+
+    /** Changes on every install or update of the app, which is the only time the shipped assets change. */
+    private fun installStamp(context: Context): String {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        return "${info.longVersionCode}:${info.lastUpdateTime}"
     }
 
     private fun listAssets(context: Context, assetPath: String, relative: String): List<String> {

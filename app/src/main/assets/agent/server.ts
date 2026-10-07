@@ -242,7 +242,10 @@ function watchingUi(): boolean {
 
 // Every agent turn is bracketed by git checkpoints so changes can be inspected and undone.
 const changes = new Changes(process.cwd());
-await changes.init();
+// Scanning the whole app tree for the startup checkpoint is slow on a phone, and nothing below needs
+// it: every git operation goes through Changes' serial queue, so the first turn's snapshot simply
+// waits behind it. Don't hold the server back for it.
+changes.init().catch((err) => console.warn("[pidroid] startup checkpoint failed:", err));
 
 // --- pi-durable agent ---------------------------------------------------
 const context = BACKGROUND_CONTEXT;
