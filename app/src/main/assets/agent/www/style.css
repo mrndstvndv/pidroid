@@ -1930,6 +1930,131 @@ details.work[open] > summary .work-chev { transform: rotate(90deg); }
   border-left: 1px solid var(--border);
 }
 
+/* ---------- artifact card (artifact.js) ----------
+   The card www/artifact.js builds for a tool that declared `body: "artifact"`. Everything else in
+   a turn is working and folds into one quiet line; this is the part the reader is meant to look at,
+   so it sits in the open, never collapsed, and never inside a run of other calls.
+
+   It is a flex item of the transcript column, so it needs the same shrink and overflow treatment
+   as .artifact-card below: a graph's SVG and a page's iframe would otherwise be squeezed to
+   nothing as soon as the transcript overflows. */
+.artifact {
+  flex-shrink: 0;
+  align-self: stretch;
+  min-width: 0;
+  max-width: 100%;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.artifact-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.artifact-ico { display: inline-flex; flex: none; color: var(--accent-text); }
+
+.artifact-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.artifact-meta {
+  flex: none;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.artifact-actions { display: flex; flex: none; gap: 4px; }
+
+/* Labelled, not glyphed, the way the code blocks in the transcript label their copy button: the
+   icon set has no copy or open glyph, and a word is clearer than a mystery box anyway. */
+.artifact-act {
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.artifact-act:hover,
+.artifact-act:focus-visible { color: var(--text-primary); border-color: var(--accent); outline: none; }
+.artifact-act:active { background-color: var(--press); }
+/* Set for a moment by the delegated click handler once the clipboard has taken the text. */
+.artifact-act.done { color: var(--success); border-color: var(--success); }
+
+.artifact-body { padding: 10px 12px; }
+.artifact-note { margin: 0; font-size: 0.78rem; color: var(--text-secondary); }
+.artifact-code { margin: 0; max-height: 420px; overflow: auto; }
+/* Stands in for a card that could not be drawn, saying why: a silent missing card is the one
+   failure a reader cannot act on. */
+.artifact-why {
+  padding: 4px 10px;
+  font-size: 0.72rem;
+  color: var(--warn);
+  border-left: 2px solid var(--warn);
+}
+
+.artifact-page { display: block; width: 100%; border: none; border-radius: 8px; background: var(--bg-primary); }
+.artifact-figure img { display: block; width: 100%; height: auto; border-radius: 8px; }
+
+/* A table scrolls sideways rather than squeezing its columns into unreadable slivers. */
+.artifact-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+.artifact-table { border-collapse: collapse; width: 100%; font-size: 0.78rem; }
+
+.artifact-table th,
+.artifact-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.artifact-table th { color: var(--text-secondary); font-weight: 600; }
+.artifact-table tr:last-child td { border-bottom: none; }
+
+/* ---------- graph ----------
+   Samples in, pixels out: the extension tokenised and evaluated the expression, so the SVG here is
+   only the mapping. The grid is quiet and the axes are not, because the one thing a reader needs to
+   find first is where zero is. */
+.plot { width: 100%; }
+.plot svg { display: block; width: 100%; height: auto; }
+
+.plot-grid { stroke: var(--border); stroke-width: 1; }
+.plot-axis { stroke: var(--text-muted); stroke-width: 1; }
+.plot-tick { fill: var(--text-muted); font-size: 10px; font-family: inherit; }
+.plot-curve { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.plot-dot { fill: var(--accent-text-strong); }
+
+.plot-cap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.plot-range { margin-left: auto; font-variant-numeric: tabular-nums; }
+
 /* Something the agent chose to show: never folded away with the work around it. The page runs in
    a sandboxed iframe at a fixed height, so it cannot push the transcript around as it loads. */
 .artifact-card {
@@ -2495,6 +2620,44 @@ p.empty { padding: 24px 8px; text-align: center; }
 .session-menu-item:hover,
 .session-menu-item:focus-visible { background-color: var(--press); outline: none; }
 .session-menu-item.danger { color: var(--danger-text); }
+
+/* ---------- branch chip ----------
+   The corner button that makes branching reachable without knowing the long press. It is out of
+   the way until its message is tapped — absolutely positioned, so appearing reflows nothing and
+   shifts no scroll offset — and only ever on the one message that was tapped. Sized to a thumb,
+   and sitting on the bubble's own background so it reads as part of the message it belongs to. */
+.message { position: relative; }
+
+.branch-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background-color: var(--bg-card);
+  color: var(--text-secondary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.85);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+/* The tap that reveals it. */
+.message.show-branch .branch-btn { opacity: 1; pointer-events: auto; transform: none; }
+.branch-btn:hover,
+.branch-btn:focus-visible { color: var(--text-primary); border-color: var(--accent); outline: none; }
+/* Where there is a real pointer, hovering is the tap, so the chip is simply there. */
+@media (hover: hover) {
+  .message:hover .branch-btn { opacity: 1; pointer-events: auto; transform: none; }
+}
 
 /* ---------- branch menu ----------
    Placed exactly like the session row menu (fixed on <body>, flipped above and clamped by the

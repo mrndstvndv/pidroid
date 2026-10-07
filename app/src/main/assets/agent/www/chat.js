@@ -794,6 +794,60 @@ function toolVerb(name) {
   return DEFAULT_VERBS[name] || null;
 }
 
+/**
+ * The card for a tool call whose view asked for the artifact body, or "" when there is nothing to
+ * draw yet -- the call is still running, or the payload did not survive the trip. `artifactWhy`
+ * says which, so the row that stands in for the card can say it too instead of just sitting there.
+ *
+ * The renderer is www/artifact.js: an extension's code cannot be shipped into the WebView, so the
+ * page owns the drawing and the tool only decides what to hand it.
+ */
+let artifactWhy = "";
+let artifactLoading = null;
+
+function artifactCardFor(result, sessionId, live) {
+  artifactWhy = "";
+  if (result?.isError) return "";
+  if (!result) { artifactWhy = "still running"; return ""; }
+  // artifactRenderer, not the bare artifactCard global: see shownPageCard below for why a single
+  // global name on this page cannot be trusted to still be the renderer.
+  const renderer = window.artifactRenderer;
+  if (!renderer?.card) {
+    // The document can be served from a cache that predates the script tag, in which case the
+    // renderer was never asked for. Fetch it now rather than showing nothing until the next
+    // reload: the card is drawn on the render that follows.
+    artifactWhy = "loading the artifact renderer";
+    loadArtifactRenderer();
+    return "";
+  }
+  const spec = renderer.payloadFrom?.(result.text ?? "");
+  if (!spec) { artifactWhy = "the tool left no artifact payload"; return ""; }
+  try {
+    const html = renderer.card(spec, { sessionId, live });
+    if (!html) artifactWhy = `nothing to draw for a ${spec.kind} artifact`;
+    return html || "";
+  } catch (err) {
+    artifactWhy = `the renderer threw: ${err?.message ?? err}`;
+    return "";
+  }
+}
+
+/** Loads www/artifact.js once, late, and asks for a repaint when it lands. */
+function loadArtifactRenderer() {
+  if (artifactLoading) return;
+  artifactLoading = new Promise((resolve) => {
+    const el = document.createElement("script");
+    el.src = "artifact.js?late=1";
+    el.onload = () => resolve(true);
+    el.onerror = () => resolve(false);
+    document.head.append(el);
+  }).then((ok) => {
+    artifactLoading = null;
+    if (ok && payload && !frame) frame = requestAnimationFrame(render);
+    return ok;
+  });
+}
+
 /** The tool whose calls are shown as artifact cards instead of being folded away. */
 const SHOW_TOOL = "show";
 
@@ -863,6 +917,16 @@ function makeFlow(ctx, start = { userId: "0", n: 0 }) {
     /** One assistant message: committed (`m` is the message) or the streaming partial (`live`). */
     assistant(idKey, blocks, live, m) {
       const branch = m?.branchAfter === undefined ? "" : ` data-branch-after="${m.branchAfter}"`;
+      // The chip is a sibling of the body, never inside it, so markdown, links and code blocks
+      // never see it and `.message-content` still holds exactly what the answer said. A message
+      // can carry several text blocks around its work, but they share one branch point, so only
+      // the first of them wears the chip.
+      let chipped = false;
+      const chip = () => {
+        if (!branch || chipped) return "";
+        chipped = true;
+        return branchChip("after");
+      };
       blocks.forEach((b, i) => {
         const key = `${idKey}-${i}`;
         if (b.type === "thinking") {
@@ -871,10 +935,21 @@ function makeFlow(ctx, start = { userId: "0", n: 0 }) {
           this.work({ type: "thinking", key, block: b, streaming: live && i === blocks.length - 1, live });
         } else if (b.type === "toolCall") {
           const result = ctx.results.get(b.id);
-          if (b.name === SHOW_TOOL && !result?.isError) this.item({ kind: "artifact", key: `a-${b.id}`, call: b, result });
-          else this.work({ type: "tool", call: b, state: ctx.tools.get(b.id), result });
+          // A tool whose view says its body is an artifact is not working, it is the answer's other
+          // half: drawn as a card in the open, never folded into the line a run of calls sums up to.
+          // A payload that will not parse costs the drawing, never the record -- the row below says
+          // what went wrong instead of the card silently not appearing.
+          const wants = toolView(b.name)?.body === "artifact";
+          const card = wants ? artifactCardFor(result, ctx.sessionId, live && i === blocks.length - 1) : "";
+          if (card) this.item({ kind: "html", key: `a-${b.id}`, html: card });
+          else if (b.name === SHOW_TOOL && !result?.isError) this.item({ kind: "artifact", key: `a-${b.id}`, call: b, result });
+          else if (wants || toolView(b.name)?.standalone) {
+            const row = toolBlockHtml(key, b, ctx.tools.get(b.id), result);
+            const why = wants && result ? `<div class="artifact-why">${escapeHtml(artifactWhy)}</div>` : "";
+            this.item({ kind: "html", key, html: why + row });
+          } else this.work({ type: "tool", call: b, state: ctx.tools.get(b.id), result });
         } else if (b.text.trim()) {
-          const open = `<div class="message assistant"${branch}><div class="message-content">`;
+          const open = `<div class="message assistant"${branch}>${chip()}<div class="message-content">`;
           this.item(b.html !== undefined
             ? { kind: "html", key, html: `${open}${b.html}</div></div>` }
             : { kind: "wrap", key, open, into: ".message-content", close: "</div></div>", parts: mdChunks(b.text) });
@@ -934,14 +1009,24 @@ function flowMessages(flow, messages) {
       // data-branch-before points at the entry ahead of this prompt, so a new session can start there
       // and replay it. Absent on the first message of a conversation, which has nothing before it.
       const fork = m.branchBefore === undefined ? "" : ` data-branch-before="${m.branchBefore}"`;
-      flow.item({ kind: "html", key: `u${m.id}`, html: `<div class="message user" data-key="u${m.id}"${fork}><div class="message-content">${escapeHtml(m.text)}</div></div>` });
+      const chip = fork ? branchChip("before") : "";
+      flow.item({ kind: "html", key: `u${m.id}`, html: `<div class="message user" data-key="u${m.id}"${fork}>${chip}<div class="message-content">${escapeHtml(m.text)}</div></div>` });
     } else if (m.role === "assistant") {
       flow.assistant(`m${m.id}`, m.blocks || [], false, m);
     }
   }
 }
 
-function artifactCard(item, sessionId, superseded) {
+/**
+ * The card for the `show` tool: a page the agent put on screen, in a frame of a fixed height.
+ *
+ * Named shownPageCard and not artifactCard on purpose. Both this file and www/artifact.js are
+ * classic scripts sharing one global scope, and artifact.js -- loaded first -- exports its
+ * renderer as `window.artifactCard`. A function declaration here of the same name silently
+ * replaced it, so every card asked this one for an item with a .call.args and got the distinct
+ * noise of "cannot read properties of undefined" instead of a drawing.
+ */
+function shownPageCard(item, sessionId, superseded) {
   const args = item.call.args && typeof item.call.args === "object" ? item.call.args : {};
   const a = artifactOf(item.result);
   const title = escapeHtml(a?.title || args.title || "Artifact");
@@ -968,13 +1053,14 @@ function itemSpecs(items, sessionId, active) {
     if (item.kind === "wrap") return item;
     if (item.kind === "artifact") {
       const path = artifactOf(item.result)?.path;
-      return { key: item.key, html: artifactCard(item, sessionId, path !== undefined && latestShown.has(path) && latestShown.get(path) !== item.call.id) };
+      return { key: item.key, html: shownPageCard(item, sessionId, path !== undefined && latestShown.has(path) && latestShown.get(path) !== item.call.id) };
     }
     const entries = item.entries;
     const running = item === active && entries.some((e) => e.type === "tool" && !e.result);
-    const thinking = item === active && entries[entries.length - 1]?.type === "thinking" && entries[entries.length - 1].streaming;
     const failed = entries.filter((e) => e.type === "tool" && e.result?.isError).length;
-    const label = running ? '<span class="shimmer">Running</span>' : thinking ? '<span class="shimmer">Thinking</span>' : escapeHtml(groupLabel(entries));
+    // A streaming thought does not take over the summary: the folded line keeps naming what the
+    // group did, and the status below it says "Thinking…" — same as "Working…".
+    const label = running ? '<span class="shimmer">Running</span>' : escapeHtml(groupLabel(entries));
     const head = `<span class="work-label">${label}</span>` +
       (failed ? `<span class="work-failed">· ${failed} failed</span>` : "") +
       `<span class="work-chev">${icon("chevron-right", 15)}</span>`;
@@ -1240,7 +1326,9 @@ function renderMessages(view, sessionId) {
   const messages = Array.isArray(view.messages) ? view.messages : [];
   const results = new Map(messages.filter((m) => m.role === "tool").map((m) => [m.callId, m]));
   const tools = new Map((view.tools || []).map((t) => [t.callId, t]));
-  const ctx = { results, tools };
+  // sessionId rides along because an artifact card needs it: a page or an image is shown from the
+  // workspace of the session it belongs to, not of whichever one happens to be on screen.
+  const ctx = { results, tools, sessionId };
   toolViews = view.toolViews || {};
   const cut = tailStart(messages, view.busy);
 
@@ -1285,10 +1373,19 @@ function renderMessages(view, sessionId) {
   if (view.live?.blocks?.length) flow.assistant("live", view.live.blocks, true, null);
   const items = flow.finish();
   const lastItem = items[items.length - 1];
-  const tailSpecs = itemSpecs(items, sessionId, view.busy && lastItem?.kind === "group" ? lastItem : null);
-  if (view.busy && !view.live?.blocks?.length) {
-    const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
-    tailSpecs.push({ key: "working", html: `<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>` });
+  const activeItem = view.busy && lastItem?.kind === "group" ? lastItem : null;
+  const tailSpecs = itemSpecs(items, sessionId, activeItem);
+  if (view.busy) {
+    const lastEntry = activeItem?.entries[activeItem.entries.length - 1];
+    const thought = lastEntry?.type === "thinking" && lastEntry.streaming ? lastEntry : null;
+    if (thought) {
+      // Same status line as "Working…", timed from when this thought started.
+      const at = thought.block.at ? durHtml(undefined, thought.block.at) : "";
+      tailSpecs.push({ key: "thinking", html: `<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Thinking…</span>${at}</div></div>` });
+    } else if (!view.live?.blocks?.length) {
+      const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
+      tailSpecs.push({ key: "working", html: `<div class="message assistant thinking"><div class="message-content"><span class="shimmer">Working…</span>${since}</div></div>` });
+    }
   }
 
   (view.queue || []).forEach((q, n) => {
@@ -1739,21 +1836,52 @@ window.setThinkingLevel = async (level) => {
 };
 
 /* ---------- branching ----------
-   A branch is a whole session, so the affordance hangs off a message: a long press (or a right click
-   on desktop) opens a small menu at that message listing the branch points the server marked on it.
-   The gesture is deliberately provisional — it is the one thing here worth judging on the device.
+   A branch is a whole session, so the affordance hangs off a message and opens a small menu at it,
+   listing the branch points the server marked on that message.
+
+   Tapping a message puts a chip in its corner (branchChip); tapping the chip opens the menu. There
+   is no hold gesture: a long press fired while the reader was only reaching for the chip, and it
+   cost a finger's worth of patience to discover in the first place. A right click on desktop still
+   opens the menu straight away. The chip is out of the way until asked for: it is absolutely
+   positioned, so appearing moves nothing, and only the one message you tapped ever shows it.
 
    The menu is a fixed element on <body>, for the same reason the session row menu is: it has to
    escape the message list's stacking context and be clamped to the viewport on a narrow phone. */
-const LONG_PRESS_MS = 480;
 let branchMenu = null;
-let pressTimer = 0;
-let press = null;
+/* What the last touch was. A long press on Android raises `contextmenu` just like a right click
+   does, so without this the hold that was just removed would still open the menu. */
+let lastPointerType = "";
+document.addEventListener("pointerdown", (e) => { lastPointerType = e.pointerType; }, { passive: true, capture: true });
 
 function closeBranchMenu() {
   if (!branchMenu || branchMenu.hidden) return;
   branchMenu.hidden = true;
   branchMenu.innerHTML = "";
+}
+
+/** The chip on a branchable message: `point` is which branch point it offers, "after" on an answer
+ *  or "before" on a prompt. The icon matches the menu item it leads to, so the chip and the choice
+ *  it opens read as one thing. */
+function branchChip(point) {
+  const after = point === "after";
+  const glyph = after ? "git-compare" : "rotate-ccw";
+  const label = after ? "Branch from here" : "Branch before this";
+  return `<button type="button" class="branch-btn" aria-label="${label}" title="${label}">${icon(glyph, 14)}</button>`;
+}
+
+const isBranchable = (el) => !!el?.matches("[data-branch-after], [data-branch-before]");
+
+/** Reveals the chip on `el`, or puts it away again if it was the one already out. Only ever one:
+ *  a column of chips down a long transcript is noise, and the menu is anchored to one message. */
+function toggleBranchChip(el) {
+  const out = messagesEl.querySelector(".message.show-branch");
+  if (out === el) { out.classList.remove("show-branch"); return; }
+  out?.classList.remove("show-branch");
+  el.classList.add("show-branch");
+}
+
+function clearBranchChips() {
+  messagesEl.querySelectorAll(".message.show-branch").forEach(el => el.classList.remove("show-branch"));
 }
 
 /* What can be branched from this element, in the order they should be offered. */
@@ -1796,38 +1924,39 @@ function openBranchMenu(anchor) {
   branchMenu.querySelector("button")?.focus({ preventScroll: true });
 }
 
-function cancelPress() {
-  if (pressTimer) clearTimeout(pressTimer);
-  pressTimer = 0;
-  press = null;
-}
-
-messagesEl.addEventListener("pointerdown", (e) => {
-  // Inside a summary, a scrollable body, a link or the queued-message row a tap already means
-  // something else, so a long press there must not turn into a menu.
-  if (e.target.closest("summary, .think-body, .tool-body, .tool-out, a, button")) return;
-  const el = e.target.closest("[data-branch-after], [data-branch-before]");
-  if (!el) return;
-  press = { x: e.clientX, y: e.clientY, el };
-  pressTimer = setTimeout(() => {
-    pressTimer = 0;
-    const held = press;
-    press = null;
-    if (held) openBranchMenu(held.el);
-  }, LONG_PRESS_MS);
-});
-// A finger that moves is a scroll or a selection, not a long press.
-messagesEl.addEventListener("pointermove", (e) => {
-  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) cancelPress();
-}, { passive: true });
-messagesEl.addEventListener("pointerup", cancelPress);
-messagesEl.addEventListener("pointercancel", cancelPress);
+// The menu is placed against a rect, so scrolling out from under it would leave it hanging.
 messagesEl.addEventListener("scroll", closeBranchMenu, { passive: true });
 messagesEl.addEventListener("contextmenu", (e) => {
-  const el = e.target.closest("[data-branch-after], [data-branch-before]");
-  if (!el) return;
+  // Desktop only: on a touch screen this event is what a hold produces, and holding is no longer
+  // a way in. A right click on the chip means that chip, so the menu lands on it, not the row.
+  if (lastPointerType && lastPointerType !== "mouse") return;
+  const chip = e.target.closest(".branch-btn");
+  const el = chip ? chip.closest(".message") : e.target.closest("[data-branch-after], [data-branch-before]");
+  if (!isBranchable(el)) return;
   e.preventDefault();
-  openBranchMenu(el);
+  openBranchMenu(chip || el);
+});
+
+messagesEl.addEventListener("click", (e) => {
+  const chip = e.target.closest(".branch-btn");
+  if (chip) {
+    const el = chip.closest(".message");
+    if (!isBranchable(el)) return;
+    el.classList.add("show-branch");
+    openBranchMenu(chip);
+    return;
+  }
+  // Everywhere a tap already means something — a link, an opened work row, an artifact, any other
+  // button — it keeps meaning that. Only the plain surface of a message reveals its chip.
+  if (e.target.closest("summary, .think-body, .tool-body, .tool-out, .artifact-card, a, button, iframe")) return;
+  const el = e.target.closest(".message");
+  if (!isBranchable(el)) return;
+  toggleBranchChip(el);
+});
+// A tap anywhere off the messages puts the chip away again.
+document.addEventListener("pointerdown", (e) => {
+  if (e.target.closest(".message")) return;
+  clearBranchChips();
 });
 
 // The server answers with the new session already switched to, so the pushed view and the session
@@ -1856,7 +1985,9 @@ document.addEventListener("pointerdown", (e) => {
   closeBranchMenu();
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeBranchMenu();
+  if (e.key !== "Escape") return;
+  closeBranchMenu();
+  clearBranchChips();
 });
 window.addEventListener("resize", closeBranchMenu);
 // The menu is a layer of its own: Android back closes it before anything else.
