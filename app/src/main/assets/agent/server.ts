@@ -186,6 +186,25 @@ db.exec(`
     at INTEGER NOT NULL,
     PRIMARY KEY (session, key)
   ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS token_usage_events (
+    event_key TEXT PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    conversation_id INTEGER NOT NULL,
+    task_id TEXT NOT NULL,
+    captured_at INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_total REAL
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS token_usage_by_session_time
+    ON token_usage_events (session_id, captured_at);
+  CREATE INDEX IF NOT EXISTS token_usage_by_time
+    ON token_usage_events (captured_at);
 `);
 
 console.log(`[pidroid] Agent runtime initialized. SQLite DB at: ${DB_PATH}`);
@@ -1276,6 +1295,146 @@ const server = Bun.serve({
     if (url.pathname === "/api/messages" && req.method === "GET") {
       const messages = db.query("SELECT * FROM messages ORDER BY id ASC").all();
       return Response.json({ messages });
+    }
+
+    if (url.pathname === "/api/usage/stats" && req.method === "GET") {
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const weekStart = new Date(todayStart);
+      weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7)); // Monday, local time
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      const dailyStart = new Date(todayStart);
+      dailyStart.setDate(dailyStart.getDate() - 29);
+      const weeklyStart = new Date(weekStart);
+      weeklyStart.setDate(weeklyStart.getDate() - 7 * 11);
+      const monthlyStart = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+      const selectedProvider = url.searchParams.get("provider")?.trim() || "";
+      const selectedModel = url.searchParams.get("model")?.trim() || ""; // canonical provider/model key
+      const filterClauses: string[] = [];
+      const filterBindings: (string | number)[] = [];
+      if (selectedProvider) {
+        filterClauses.push("provider = ?");
+        filterBindings.push(selectedProvider);
+      }
+      if (selectedModel) {
+        filterClauses.push("(provider || '/' || model) = ?");
+        filterBindings.push(selectedModel);
+      }
+      const whereFor = (start?: number, prefix = "") => {
+        const clauses = filterClauses.map((clause) => prefix ? clause.replaceAll("provider", `${prefix}provider`).replaceAll("model", `${prefix}model`) : clause);
+        if (start !== undefined) clauses.push(`${prefix}captured_at >= ?`);
+        return clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+      };
+      const bindingsFor = (start?: number) => start === undefined ? [...filterBindings] : [...filterBindings, start];
+
+      const total = (start?: number) => {
+        const raw = db.query(`
+          SELECT COALESCE(SUM(input_tokens), 0) AS inputTokens,
+                 COALESCE(SUM(output_tokens), 0) AS outputTokens,
+                 COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
+                 COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens,
+                 COALESCE(SUM(total_tokens), 0) AS tokens,
+                 SUM(cost_total) AS cost,
+                 COUNT(cost_total) AS pricedResponses,
+                 COUNT(*) AS responses,
+                 COUNT(DISTINCT session_id) AS sessions
+          FROM token_usage_events ${whereFor(start)}
+        `).get(...bindingsFor(start)) as any;
+        return {
+          inputTokens: Number(raw?.inputTokens ?? 0),
+          outputTokens: Number(raw?.outputTokens ?? 0),
+          cacheReadTokens: Number(raw?.cacheReadTokens ?? 0),
+          cacheWriteTokens: Number(raw?.cacheWriteTokens ?? 0),
+          tokens: Number(raw?.tokens ?? 0),
+          cost: raw?.cost === null || raw?.cost === undefined ? null : Number(raw.cost),
+          pricedResponses: Number(raw?.pricedResponses ?? 0),
+          responses: Number(raw?.responses ?? 0),
+          sessions: Number(raw?.sessions ?? 0),
+        };
+      };
+      const normalizeUsageRow = (row: any) => ({
+        ...row,
+        tokens: Number(row.tokens ?? 0),
+        inputTokens: Number(row.inputTokens ?? 0),
+        outputTokens: Number(row.outputTokens ?? 0),
+        cacheReadTokens: Number(row.cacheReadTokens ?? 0),
+        cacheWriteTokens: Number(row.cacheWriteTokens ?? 0),
+        cost: row.cost === null || row.cost === undefined ? null : Number(row.cost),
+        pricedResponses: Number(row.pricedResponses ?? 0),
+        responses: Number(row.responses ?? 0),
+      });
+      const grouped = (bucket: string, start: number) => (db.query(`
+        SELECT ${bucket} AS bucket,
+               COALESCE(SUM(total_tokens), 0) AS tokens,
+               COALESCE(SUM(input_tokens), 0) AS inputTokens,
+               COALESCE(SUM(output_tokens), 0) AS outputTokens,
+               COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
+               COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens,
+               SUM(cost_total) AS cost,
+               COUNT(cost_total) AS pricedResponses,
+               COUNT(*) AS responses
+        FROM token_usage_events ${whereFor(start)}
+        GROUP BY bucket
+        ORDER BY bucket ASC
+      `).all(...bindingsFor(start)) as any[]).map(normalizeUsageRow);
+
+      const sessionJoinFilters: string[] = [];
+      const sessionBindings: string[] = [];
+      if (selectedProvider) {
+        sessionJoinFilters.push("u.provider = ?");
+        sessionBindings.push(selectedProvider);
+      }
+      if (selectedModel) {
+        sessionJoinFilters.push("(u.provider || '/' || u.model) = ?");
+        sessionBindings.push(selectedModel);
+      }
+      const sessionFilterSql = sessionJoinFilters.length ? ` AND ${sessionJoinFilters.join(" AND ")}` : "";
+      const sessions = db.query(`
+        SELECT s.id, s.title, s.created_at AS createdAt,
+               COALESCE(SUM(u.total_tokens), 0) AS tokens,
+               COALESCE(SUM(u.input_tokens), 0) AS inputTokens,
+               COALESCE(SUM(u.output_tokens), 0) AS outputTokens,
+               COALESCE(SUM(u.cache_read_tokens), 0) AS cacheReadTokens,
+               COALESCE(SUM(u.cache_write_tokens), 0) AS cacheWriteTokens,
+               SUM(u.cost_total) AS cost,
+               COUNT(u.cost_total) AS pricedResponses,
+               COUNT(u.event_key) AS responses,
+               MAX(u.captured_at) AS lastUsedAt
+        FROM sessions s
+        LEFT JOIN token_usage_events u ON u.session_id = s.id${sessionFilterSql}
+        WHERE s.deleted = 0
+        GROUP BY s.id
+        HAVING COUNT(u.event_key) > 0
+        ORDER BY tokens DESC, s.updated_at DESC
+      `).all(...sessionBindings) as any[];
+      const normalizedSessions = sessions.map((row) => ({
+        ...normalizeUsageRow(row),
+        id: Number(row.id),
+        createdAt: Number(row.createdAt),
+        lastUsedAt: row.lastUsedAt === null || row.lastUsedAt === undefined ? null : Number(row.lastUsedAt),
+      }));
+
+      const dayBucket = "strftime('%Y-%m-%d', captured_at / 1000, 'unixepoch', 'localtime')";
+      const weekBucket = `date(
+        captured_at / 1000, 'unixepoch', 'localtime',
+        printf('-%d days', (CAST(strftime('%w', captured_at / 1000, 'unixepoch', 'localtime') AS INTEGER) + 6) % 7)
+      )`;
+      const monthBucket = "strftime('%Y-%m', captured_at / 1000, 'unixepoch', 'localtime')";
+      const providers = (db.query("SELECT DISTINCT provider FROM token_usage_events ORDER BY provider").all() as { provider: string }[])
+        .map((row) => row.provider);
+      const availableModels = db.query("SELECT DISTINCT provider, model FROM token_usage_events ORDER BY provider, model").all() as { provider: string; model: string }[];
+      return Response.json({
+        generatedAt: Date.now(),
+        filters: { provider: selectedProvider, model: selectedModel, providers, models: availableModels },
+        allTime: total(),
+        today: total(todayStart.getTime()),
+        thisWeek: total(weekStart.getTime()),
+        thisMonth: total(monthStart.getTime()),
+        sessions: normalizedSessions,
+        daily: grouped(dayBucket, dailyStart.getTime()),
+        weekly: grouped(weekBucket, weeklyStart.getTime()),
+        monthly: grouped(monthBucket, monthlyStart.getTime()),
+      });
     }
 
     if (url.pathname === "/api/chat" && req.method === "POST") {

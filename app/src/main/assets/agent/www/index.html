@@ -106,12 +106,59 @@
       </div>
 
       <nav class="nav-tabs settings-tabs">
+        <button class="tab-btn" data-tab="usage"><span data-icon="activity" data-size="16"></span>Usage</button>
         <button class="tab-btn active" data-tab="providers"><span data-icon="cpu" data-size="16"></span>Providers</button>
         <button class="tab-btn" data-tab="theme"><span data-icon="palette" data-size="16"></span>Theme</button>
         <button class="tab-btn" data-tab="extensions"><span data-icon="puzzle" data-size="16"></span>Extensions</button>
         <button class="tab-btn" data-tab="changes"><span data-icon="git-compare" data-size="16"></span>Changes</button>
         <button class="tab-btn" data-tab="workspace"><span data-icon="folder" data-size="16"></span>Files</button>
       </nav>
+
+      <section class="tab-content usage-tab" id="tab-usage">
+        <div class="editor-header">
+          <h2>Token usage</h2>
+          <button class="btn-secondary icon-btn-text" id="refresh-usage-btn">
+            <span data-icon="refresh-cw" data-size="15"></span><span class="btn-label">Refresh</span>
+          </button>
+        </div>
+        <p class="description">Usage is recorded for each completed model response. Tool-using turns may contain several responses. Counts are provider-reported; costs appear only when pricing data is available. New usage is recorded from now on; older turns are not backfilled.</p>
+        <div class="usage-filter-grid">
+          <label class="usage-filter-field">Provider
+            <select class="field" id="usage-provider-filter" aria-label="Filter usage by provider">
+              <option value="">All providers</option>
+            </select>
+          </label>
+          <label class="usage-filter-field">Model
+            <select class="field" id="usage-model-filter" aria-label="Filter usage by model">
+              <option value="">All models</option>
+            </select>
+          </label>
+          <button type="button" class="btn-secondary icon-btn-text usage-filter-clear" id="usage-filter-clear">
+            <span data-icon="x" data-size="14"></span><span class="btn-label">Clear filters</span>
+          </button>
+        </div>
+        <div class="usage-summary-grid" id="usage-summary"><p class="description">Loading usage…</p></div>
+
+        <div class="editor-header">
+          <h2>By session</h2>
+        </div>
+        <div class="usage-session-list" id="usage-session-list"><p class="description">Loading sessions…</p></div>
+
+        <div class="editor-header">
+          <h2>Daily usage</h2><span class="provider-meta">Last 30 days</span>
+        </div>
+        <div class="usage-chart" id="usage-daily-chart"><p class="description">Loading…</p></div>
+
+        <div class="editor-header">
+          <h2>Weekly usage</h2><span class="provider-meta">Last 12 weeks · Monday start</span>
+        </div>
+        <div class="usage-chart" id="usage-weekly-chart"><p class="description">Loading…</p></div>
+
+        <div class="editor-header">
+          <h2>Monthly usage</h2><span class="provider-meta">Last 12 months</span>
+        </div>
+        <div class="usage-chart" id="usage-monthly-chart"><p class="description">Loading…</p></div>
+      </section>
 
       <section class="tab-content active" id="tab-providers">
         <div class="editor-header">
@@ -351,5 +398,6 @@
   <script src="chat.js"></script>
   <script src="sessions.js"></script>
   <script src="changes.js"></script>
+  <script src="usage-stats.js"></script>
 </body>
 </html>
