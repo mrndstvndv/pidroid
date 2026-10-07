@@ -1717,8 +1717,8 @@ html[data-mode="light"] .shimmer {
 
 .composer-round:disabled { opacity: 0.45; }
 
-/* Send is the one coloured control; stop (see .stop-btn) turns it red while a run can be cut. */
-#send-btn { background-color: var(--accent); color: #fff; }
+/* Send wears no accent of its own: it inherits the neutral tint of every other round
+   composer control, so the only thing that changes while a run is live is the icon. */
 
 /* Model and effort: one pill, two controls. The model name is the only label that may
    ellipsise; its full id is in the tooltip and in the picker. */
@@ -1904,8 +1904,10 @@ html[data-mode="light"] .shimmer {
 
 .queue-bar[hidden] { display: none; }
 
+/* Stop is the same button as send (see #send-btn): no red fill, just a slightly heavier
+   neutral tint so the cut action still reads as the active one. */
 .stop-btn {
-  background-color: #ef4444 !important;
+  background-color: color-mix(in srgb, var(--text-primary) 18%, transparent) !important;
 }
 
 /* Messages: work groups, thinking, tool calls, artifacts */

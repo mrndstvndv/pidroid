@@ -22,7 +22,7 @@ import {
 } from "./transcript.ts";
 import WebTools from "./web-tools.ts";
 import { commandCodeProvider, commandCodeUsage, commandCodeUsageData } from "./providers/commandcode.ts";
-import { opencodeProvider } from "./providers/opencode.ts";
+import { opencodeProvider, normalizeOpencodeCatalog } from "./providers/opencode.ts";
 import { GITHUB_COPILOT_PROVIDER_ID, withCopilotOAuth } from "./providers/github-copilot.ts";
 import { FileCredentialStore, LoginManager } from "./auth.ts";
 import { bridgeAvailable, bridgeCall } from "./bridge.ts";
@@ -270,6 +270,15 @@ const AGENT_DB_PATH = join(process.cwd(), "pidroid-agent.sqlite");
  */
 const MODELS_STORE_PATH = join(process.cwd(), "pidroid-models.json");
 
+/**
+ * Repairs a persisted catalog in place before it is handed back to the registry: the stored copy is
+ * the one that reaches the model, so a catalog written by an older build would otherwise keep
+ * failing requests. See providers/opencode.ts for the one repair we know we need.
+ */
+function normalizeCatalog(providerId: string, models: any): any {
+  return providerId === "opencode" ? normalizeOpencodeCatalog(models) : models;
+}
+
 class FileModelsStore {
   private entries = new Map<string, unknown>();
 
@@ -287,7 +296,10 @@ class FileModelsStore {
   async read(providerId: string, options?: { signal?: AbortSignal }): Promise<any> {
     options?.signal?.throwIfAborted();
     const entry = this.entries.get(providerId);
-    return entry === undefined ? undefined : structuredClone(entry);
+    if (entry === undefined) return undefined;
+    const copy = structuredClone(entry) as any;
+    if (Array.isArray(copy?.models)) copy.models = normalizeCatalog(providerId, copy.models);
+    return copy;
   }
 
   async write(providerId: string, entry: unknown, options?: { signal?: AbortSignal }) {
