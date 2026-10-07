@@ -11,6 +11,15 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools, createReadTool } from "@earendil-works/pi-durable/tools";
 import { conversationDescendants, purgeConversations } from "./purge.ts";
+import {
+  buildTranscript,
+  countMessages,
+  transcriptFileName,
+  transcriptToJson,
+  transcriptToMarkdown,
+  type TranscriptMessage,
+  type TranscriptMeta,
+} from "./transcript.ts";
 import WebTools from "./web-tools.ts";
 import { commandCodeProvider, commandCodeUsage, commandCodeUsageData } from "./providers/commandcode.ts";
 import { opencodeProvider } from "./providers/opencode.ts";
@@ -1169,6 +1178,93 @@ async function deleteSession(id: number) {
   }
 }
 
+/* ---------- transcripts ----------
+   A session's log as something you can keep, read straight out of pi-durable rather than out of
+   the chat view: no 150-message window, no clipped tool output, and it works for a session that is
+   not the one on screen. transcript.ts owns the parsing and both renderings; this is the plumbing
+   that finds the log, the wall clock and a file to put the result in. */
+
+/** Shared storage, where an exported transcript can actually be found off the phone. */
+const TRANSCRIPT_DIR = "/storage/emulated/0/Download";
+
+/** The session's wall-clock stamps, read from the same table timings.ts writes. */
+function stampsFor(sessionId: number): (key: string) => number | undefined {
+  const rows = db.query("SELECT key, at FROM timings WHERE session = ?").all(sessionId) as { key: string; at: number }[];
+  if (!rows.length) return () => undefined;
+  const map = new Map(rows.map(r => [r.key, r.at]));
+  return key => map.get(key);
+}
+
+async function transcriptFor(row: SessionRow, options: { thinking?: boolean; tools?: boolean } = {}) {
+  const conversation = await handleFor(row);
+  // One observer of its own, so reading a transcript neither disturbs the live view of the open
+  // session nor keeps a mount alive for a session nobody is looking at.
+  const view = await conversation.viewState(context);
+  try {
+    const value = (view as any).value ?? (view as any).get?.();
+    const messages = buildTranscript(value?.entries, {
+      thinking: options.thinking,
+      tools: options.tools,
+      stamps: stampsFor(row.id),
+      // A run still going has its committed messages in the log already; only the tail is here.
+      live: value?.docs?.["pi.live"],
+    });
+    const parent = row.parentSessionId !== null ? sessions.get(row.parentSessionId) : undefined;
+    const meta: TranscriptMeta = {
+      title: row.title,
+      sessionId: row.id,
+      conversationId: row.conversationId,
+      model: row.model,
+      thinking: row.thinking,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      branchedFrom: parent?.title,
+      forkEntryId: row.forkEntryId,
+    };
+    return { messages, meta };
+  } finally {
+    (view as any).dispose?.();
+  }
+}
+
+/** Both renderings of one transcript, so the two files on disk cannot disagree. */
+function transcriptFiles(row: SessionRow, messages: TranscriptMessage[], meta: TranscriptMeta, when = new Date()) {
+  const stem = transcriptFileName(row.title, when);
+  return [
+    { name: `${stem}.md`, body: transcriptToMarkdown(messages, meta) },
+    { name: `${stem}.json`, body: transcriptToJson(messages, meta) },
+  ];
+}
+
+/**
+ * Write the transcript into shared storage, never overwriting an earlier export: two sessions
+ * with the same title exported in the same minute would otherwise silently replace each other.
+ * Returns the paths actually written. Falls back to the app tree if shared storage is not writable
+ * (a device where the folder is missing), which still leaves the file somewhere reachable.
+ */
+function saveTranscript(row: SessionRow, messages: TranscriptMessage[], meta: TranscriptMeta) {
+  const files = transcriptFiles(row, messages, meta);
+  const dirs = [TRANSCRIPT_DIR, join(APP_DIR, "exports")];
+  let lastError: unknown;
+  for (const dir of dirs) {
+    try {
+      mkdirSync(dir, { recursive: true });
+      const written: string[] = [];
+      for (const file of files) {
+        let path = join(dir, file.name);
+        for (let n = 2; existsSync(path); n++) path = join(dir, `${file.name.replace(/(\.[^.]+)$/, `-${n}$1`)}`);
+        writeFileSync(path, file.body, "utf-8");
+        written.push(path);
+      }
+      return written;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[pidroid] transcript export to ${dir} failed`, err);
+    }
+  }
+  throw new Error(`Could not write the transcript: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
 function answerText(entry: any): string {
   const message = entry?.model?.[0];
   const blocks = Array.isArray(message?.content) ? message.content : [];
@@ -1755,6 +1851,49 @@ const server = Bun.serve({
         } else await deleteSession(id);
         return Response.json({ success: true, current: current.id });
       }).catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
+    }
+
+    // The transcript itself, as text. The page fetches this to copy a session to the clipboard,
+    // and it is also the honest download endpoint: the same bytes the export writes to disk.
+    const transcriptRoute = url.pathname.match(/^\/api\/sessions\/(\d+)\/transcript$/);
+    if (transcriptRoute && req.method === "GET") {
+      const row = sessions.get(Number(transcriptRoute[1]));
+      if (!row) return Response.json({ error: "No such session" }, { status: 404 });
+      const asJson = url.searchParams.get("format") === "json";
+      const flag = (name: string) => url.searchParams.get(name) !== "0";
+      return transcriptFor(row, { thinking: flag("thinking"), tools: flag("tools") })
+        .then(({ messages, meta }) => {
+          const body = asJson ? transcriptToJson(messages, meta) : transcriptToMarkdown(messages, meta);
+          const name = `${transcriptFileName(row.title)}.${asJson ? "json" : "md"}`;
+          return new Response(body, {
+            headers: {
+              "Content-Type": asJson ? "application/json; charset=utf-8" : "text/markdown; charset=utf-8",
+              "Content-Disposition": `attachment; filename="${name}"`,
+              "Cache-Control": "no-store",
+            },
+          });
+        })
+        .catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 }));
+    }
+
+    // Write the transcript to shared storage as Markdown and JSON.
+    const exportRoute = url.pathname.match(/^\/api\/sessions\/(\d+)\/export$/);
+    if (exportRoute && req.method === "POST") {
+      const row = sessions.get(Number(exportRoute[1]));
+      if (!row) return Response.json({ error: "No such session" }, { status: 404 });
+      return req.json().catch(() => ({})).then((body: { thinking?: boolean; tools?: boolean }) =>
+        transcriptFor(row, { thinking: body.thinking, tools: body.tools }).then(({ messages, meta }) => {
+          const paths = saveTranscript(row, messages, meta);
+          console.log(`[pidroid] exported session ${row.id} transcript to ${paths.join(", ")}`);
+          return Response.json({
+            success: true,
+            paths,
+            dir: dirname(paths[0]),
+            counts: countMessages(messages),
+            bytes: paths.map(p => statSync(p).size),
+          });
+        }),
+      ).catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 }));
     }
 
     // --- Live chat ---
