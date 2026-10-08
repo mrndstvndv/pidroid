@@ -220,7 +220,8 @@
             </button>
           </div>
         </div>
-        <p class="description">Every agent turn is checkpointed. Undo reverts just that turn's changes; Restore returns every file to how it was right after it. Undoing an undo brings the change back.</p>
+        <p class="description">The agent checkpoints the changes it has finished, and the app checkpoints anything that changed while no agent was running. Undo reverts just that checkpoint's changes (and first saves any uncommitted edits, so nothing is lost); Restore returns every file to how it was right after it. Undoing an undo brings the change back.</p>
+        <div id="update-panel" class="update-panel" hidden></div>
         <div id="changes-list"><p>Loading changes...</p></div>
       </section>
 

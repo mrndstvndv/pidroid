@@ -20,9 +20,10 @@ function ago(ts) {
   return new Date(ts).toLocaleDateString();
 }
 
-const KIND_LABEL = { init: "shipped", external: "external", edits: "manual", turn: "agent", undo: "undo" };
+const KIND_LABEL = { init: "shipped", external: "external", edits: "manual", turn: "agent", update: "update", undo: "undo" };
 
 async function loadChanges() {
+  loadUpdate();
   try {
     entries = (await changesApi("/api/changes")).entries;
     renderChanges();
@@ -31,6 +32,71 @@ async function loadChanges() {
   }
 }
 window.loadChanges = loadChanges;
+
+/* ---------- app update ----------
+   The app shipped a new bundle that changes files the agent has also changed. Nothing from the update is applied
+   until the user picks one of three answers; the server holds the state and these buttons are its answers. Merge
+   opens a session that runs the shipped agent, which resolves the files and calls complete_merge. */
+const updatePanel = document.getElementById("update-panel");
+
+async function loadUpdate() {
+  try {
+    renderUpdate(await changesApi("/api/update"));
+  } catch {
+    updatePanel.hidden = true;
+  }
+}
+
+function renderUpdate(status) {
+  updatePanel.hidden = !status.stage;
+  if (!status.stage) {
+    updatePanel.innerHTML = "";
+    return;
+  }
+  const files = status.conflicts.map((path) => `<li><code>${escapeHtml(path)}</code></li>`).join("");
+  if (status.stage === "merging") {
+    updatePanel.innerHTML = `
+      <h3>Merging app update ${escapeHtml(status.stamp ?? "")}</h3>
+      <p>A merge session is resolving these files. Finish it there; it calls complete_merge when every file is done.</p>
+      <ul>${files}</ul>
+      <div class="provider-actions">
+        <button class="btn-secondary" data-update="cancel">Cancel merge</button>
+      </div>
+      <p class="description">Cancelling saves the merge's work as an edit in the history, then asks for a choice again.</p>`;
+    return;
+  }
+  updatePanel.innerHTML = `
+    <h3>App update ${escapeHtml(status.stamp ?? "")}</h3>
+    <p>This update changes files the agent has also changed. Until you choose, none of the update is applied.</p>
+    <ul>${files}</ul>
+    <div class="provider-actions">
+      <button class="btn-secondary" data-update="keep">Keep mine</button>
+      <button class="btn-secondary" data-update="bundled">Use bundled</button>
+      <button class="btn-primary" data-update="merge">Merge in a session</button>
+    </div>
+    <p class="description">Keep mine and Use bundled decide only the files above; the rest of the update is applied either way. Merge opens a session running the shipped agent, which combines the two versions of each file.</p>`;
+}
+
+updatePanel.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-update]");
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    if (btn.dataset.update === "merge") {
+      const begun = await changesApi("/api/update/merge", "POST");
+      await newSession(); // sessions.js: creates a session and switches to it
+      await sendText(begun.prompt); // chat.js: the merge session's first message
+      showScreen("chat");
+    } else {
+      await changesApi(`/api/update/${btn.dataset.update}`, "POST");
+    }
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    btn.disabled = false;
+    loadChanges();
+  }
+});
 
 function renderChanges() {
   changesList.innerHTML = entries.map((e, i) => `
@@ -243,7 +309,7 @@ document.getElementById("undo-latest-btn").addEventListener("click", async () =>
   }
 });
 
-// The server announces new checkpoints (turn finished, undo from the native menu, ...).
+// The server announces new checkpoints (the agent's checkpoint, undo from the native menu, ...).
 window.onChangesEvent = () => {
   if (document.getElementById("tab-changes").classList.contains("active")) loadChanges();
 };

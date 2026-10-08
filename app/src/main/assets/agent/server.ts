@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { join, dirname, resolve, extname, sep, basename } from "path";
+import { join, dirname, resolve, extname, relative, sep, basename } from "path";
 import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync, statSync, cpSync, rmSync, mkdirSync, realpathSync } from "fs";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -40,14 +40,17 @@ import { SKIP_DIRS, SKIP_FILES, SKIP_SUFFIXES, writeBundle } from "./bundles.ts"
 const PORT = Number(process.env.PORT) || 8765;
 /** The app itself: the server, the UI and the git checkpoint journal. */
 const APP_DIR = process.cwd();
-const WWW_DIR = join(APP_DIR, "www");
+// The recovery server (the shipped bundle, PIDROID_RECOVERY set by the app) serves the shipped web UI. The agent's own www/
+// may be what broke, or may predate an update that is being applied, so the recovery UI must not come from there.
+const SHIPPED_WWW_DIR = join(dirname(APP_DIR), "agent-bundle", "www");
+const WWW_DIR = process.env.PIDROID_RECOVERY && existsSync(SHIPPED_WWW_DIR) ? SHIPPED_WWW_DIR : join(APP_DIR, "www");
 const DB_PATH = join(APP_DIR, "pidroid.sqlite");
 const ModelChangeEntry = defineEntry(MODEL_CHANGE_ENTRY_KIND);
 const ThinkingChangeEntry = defineEntry(THINKING_CHANGE_ENTRY_KIND);
 
 /**
  * One directory per session, so sessions stop fighting over the same files. It is a sibling of the
- * app directory on purpose: changes.ts checkpoints the whole app tree after every turn, and session
+ * app directory on purpose: changes.ts checkpoints the whole app tree, and session
  * scratch work has no business in that journal (or in the Changes tab, or in a saved bundle). The
  * cost is that the harness code is no longer the working directory, so the agent reaches it by
  * absolute path ($PIDROID_APP_DIR).
@@ -259,12 +262,9 @@ function watchingUi(): boolean {
   return false;
 }
 
-// Every agent turn is bracketed by git checkpoints so changes can be inspected and undone.
+// Changes are committed when the agent calls `checkpoint`, not per turn; the startup capture is started
+// with the boot state below, once it is known whether this start follows a planned restart.
 const changes = new Changes(process.cwd());
-// Scanning the whole app tree for the startup checkpoint is slow on a phone, and nothing below needs
-// it: every git operation goes through Changes' serial queue, so the first turn's snapshot simply
-// waits behind it. Don't hold the server back for it.
-changes.init().catch((err) => console.warn("[pidroid] startup checkpoint failed:", err));
 
 // --- pi-durable agent ---------------------------------------------------
 const context = BACKGROUND_CONTEXT;
@@ -529,11 +529,105 @@ const restartServerTool = defineTool({
     api.output(
       "Preflight passed, so the restart is committed and cannot be called off. " +
         "This process exits in about a second; the app relaunches the server, which resumes this run from here. " +
-        "Your file edits are already on disk, so nothing has to be redone. " +
+        "Your file edits are already on disk, so nothing has to be redone. They are not checkpointed yet: checkpoint them once the restarted server has shown they work. " +
         "Make this the last tool call of the turn: any command run after it dies with the old process. " +
         "Finish anything left by writing files, not by running them.",
     );
     scheduleRestart(1500);
+    return {};
+  },
+});
+
+/** A stamp file the app or this server wrote, trimmed; undefined when there is none. */
+function readStamp(file: string): string | undefined {
+  try {
+    return readFileSync(file, "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The Changes tab's answer to a choice about an app update: the outcome, or the error. */
+function updateReply(work: Promise<unknown>): Promise<Response> {
+  return work
+    .then((outcome) => {
+      broadcast("changes", {});
+      return Response.json(outcome as object);
+    })
+    .catch((err) => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
+}
+
+/** The first message of a merge session: what the update changed, where the shipped copies are, and what to do. */
+function mergePrompt(conflicts: string[], mergeDir: string): string {
+  return [
+    "An app update changed files you had also edited, and the user chose to merge them in this session.",
+    `Conflicting files: ${conflicts.join(", ")}.`,
+    `Each one is still your version in place. The app's new version is beside it in ${join(APP_DIR, mergeDir)}/<path>, unless the update deleted the file.`,
+    "For each file, write the version that should exist: keep your change where it still matters, take the update's fix where it matters, and combine the two where both do. Delete the file if neither version should stay. Read each file back after editing it.",
+    "Do not checkpoint or restart until every file is done. Then call complete_merge with a one-line summary of what you kept and what you took.",
+  ].join("\n\n");
+}
+
+const checkpointTool = defineTool({
+  name: "checkpoint",
+  description:
+    "Commit chosen changes to the app as one checkpoint, which the user can see and undo in the Changes tab. " +
+    "Nothing is committed for you: pending_changes lists what is uncommitted, and `paths` names what this checkpoint takes (a file, or a directory for everything under it). " +
+    "Whatever is not named stays uncommitted for a later checkpoint, so one checkpoint should be one coherent, finished change. " +
+    "Call it when a change is verified (the build passes, or a restart has shown it working), and before a risky step you may want to back out of.",
+  parameters: Type.Object({
+    summary: Type.String({ description: "One line on what the change does, as the Changes tab shows it" }),
+    paths: Type.Array(Type.String(), { description: "Files or directories to commit, relative to the app directory" }),
+    detail: Type.Optional(Type.String({ description: "Optional note: why the change was made, and what to check if it is undone" })),
+  }),
+  replay: "safe",
+  execute: async (args, api) => {
+    const paths = args.paths.map((p) => relative(APP_DIR, resolve(APP_DIR, p)) || ".");
+    if (!args.paths.length) throw new Error("Name the files to checkpoint in paths.");
+    const summary = args.summary.replace(/\s+/g, " ").trim().slice(0, 80);
+    const detail = args.detail?.trim();
+    const title = sessions.list().find((row) => row.conversationId === api.conversationId)?.title ?? "(unknown session)";
+    const model = pickDefaultModel();
+    const message = `[turn] ${summary}\n\n${detail ? `${detail}\n\n` : ""}session: ${title}\nmodel: ${model.provider}/${model.modelId}`;
+    const oid = await changes.snapshot(message, paths);
+    if (!oid) {
+      api.output(`Nothing to checkpoint: ${paths.join(", ")} has no changes since the last checkpoint.`);
+      return {};
+    }
+    const files = await changes.files(oid);
+    broadcast("changes", { oid });
+    api.output(`Checkpointed ${oid.slice(0, 7)}: ${summary}\n${files.map((f) => `${f.status} ${f.path}`).join("\n")}`);
+    return {};
+  },
+});
+
+const pendingChangesTool = defineTool({
+  name: "pending_changes",
+  description: "List the app's files changed since the last checkpoint (A added, M modified, D deleted), so you can choose what the next checkpoint takes.",
+  parameters: Type.Object({}),
+  replay: "safe",
+  execute: async (_args, api) => {
+    const pending = await changes.pendingChanges();
+    const code = (status: string) => (status === "added" ? "A" : status === "deleted" ? "D" : "M");
+    api.output(pending.length ? pending.map((p) => `${code(p.status)} ${p.path}`).join("\n") : "Nothing uncommitted: every change is checkpointed.");
+    return {};
+  },
+});
+
+const completeMergeTool = defineTool({
+  name: "complete_merge",
+  description:
+    "Finish a merge of an app update, started from the Changes tab: commit the files as they now stand, with the app's new version and your changes both in history. " +
+    "Fails when no merge is in progress. Afterwards call restart_server so the merged code runs.",
+  parameters: Type.Object({
+    summary: Type.String({ description: "One line: what you kept from your version and what you took from the update" }),
+  }),
+  replay: "safe",
+  execute: async (args, api) => {
+    const summary = args.summary.replace(/\s+/g, " ").trim().slice(0, 80);
+    const oid = await changes.completeMerge(`[update] Merged app update: ${summary}`);
+    broadcast("changes", { oid });
+    api.output(`Merged ${oid.slice(0, 7)}: ${summary}. Call restart_server so the merged code runs.`);
     return {};
   },
 });
@@ -626,7 +720,7 @@ const ImageAwareCodingTools = defineExtension({
 
 const SelfModify = defineExtension({
   name: "pidroid",
-  tools: [reloadUiTool, reloadExtensionsTool, restartServerTool, showTool],
+  tools: [reloadUiTool, reloadExtensionsTool, restartServerTool, checkpointTool, pendingChangesTool, completeMergeTool, showTool],
   sections: [
     section(
       "pidroid",
@@ -646,7 +740,8 @@ const SelfModify = defineExtension({
         "vendor/ holds prebuilt dependencies and is not editable; only the packages mapped in tsconfig.json can be imported. " +
         `Files the user attaches from the phone are saved under ${UPLOADS_DIR} (also $PIDROID_UPLOADS). Composer image attachments are labeled [Image #N] and sent as image inputs in that order; use those labels to distinguish multiple images. The read tool also supports image files and sends them as image input to vision-capable models. If a file path is shown in the message, it is absolute and should be used as given. ` +
         "The UI is black (AMOLED) themed; keep it that way. " +
-        "Every turn is checkpointed to git, so the user can undo your changes to the app (the workspace is not). If the server fails to start repeatedly the app falls back to a safe-mode server, so a broken edit can be undone from the Changes tab. " +
+        "Nothing is committed to git automatically. Your edits take effect on disk at once, but the user can undo them only once you checkpoint them: call checkpoint with the paths of one finished, verified change (pending_changes lists what is uncommitted; the rest stays uncommitted for later). The workspace is not version controlled. If the server fails to start repeatedly the app falls back to a safe-mode server, and an edit that was never checkpointed is still captured at the next start, so it can be undone from the Changes tab. " +
+        "When an app update changes a file you also edited, the user chooses in the Changes tab: keep yours, use the bundled version, or merge in a session that runs the shipped agent and finishes with complete_merge. " +
         "The Android shell around the web view (Kotlin) is not part of your sandbox and cannot be edited from here; if a feature needs it, say so instead of searching the device. " +
         "The shell userland on this phone is Android's toybox/mksh, not GNU: expect missing or different flags (cat -A is unsupported; use cat -etv, od -c, or read the file with the read tool; prefer small portable commands). " +
         "grep, egrep and fgrep are the exception: they are GNU grep 3.12, bundled in the APK and first on PATH ahead of toybox. Use it through the bash tool like any other command -- the whole GNU flag set works (-P, -o, -w, -v, -m, -A/-B/-C, --include=, --exclude=, --exclude-dir=, --group-separator=), with GNU exit codes. Two things to know: GNU grep has no --stats option (it never did), and -r descends into .git, node_modules, .tmp and sqlite files, so pass --exclude-dir=.git --exclude-dir=node_modules and -I when you walk a source tree. " +
@@ -890,6 +985,24 @@ if (getState("workspaces") !== WORKSPACES_DIR) {
   const userStopped = getState("planned_stop") === "1";
   setState("planned_restart", "0");
   setState("planned_stop", "0");
+  // Startup capture: commit whatever changed while no agent was running (app update, reset, crash, manual edits),
+  // unless this start follows a planned restart, whose uncommitted edits the agent will checkpoint itself. The scan
+  // of the whole app tree is slow on a phone, so it runs in the background: every git operation goes through
+  // Changes' serial queue, so a turn that starts meanwhile simply waits behind it.
+  changes.init(!planned).catch((err) => console.warn("[pidroid] startup checkpoint failed:", err));
+  // An app update: the bundle the app staged at install is reconciled with the agent's files (changes.ts). It is queued
+  // after the startup capture, so the agent's uncommitted edits are already in history when the update compares them.
+  const bundleDir = join(dirname(APP_DIR), "agent-bundle");
+  const stagedStamp = readStamp(join(bundleDir, ".stamp"));
+  if (stagedStamp && stagedStamp !== readStamp(join(APP_DIR, ".applied_stamp"))) {
+    changes.importBundle(bundleDir, stagedStamp)
+      .then((outcome) => {
+        console.log(`[pidroid] app update ${stagedStamp}: ${outcome.status}, ${outcome.conflicts.length} conflict(s)`);
+        // Applied, so this recovery run has done its job: a planned restart lets the app start the agent's own server.
+        if (outcome.status === "applied") scheduleRestart(500);
+      })
+      .catch((err) => console.warn("[pidroid] app update failed:", err));
+  }
   const boots: number[] = JSON.parse(getState("boots") ?? "[]").filter((t: number) => now - t < 120_000);
   if (userStopped) {
     console.log("[pidroid] previous process was stopped by the user; aborting unfinished runs");
@@ -1700,8 +1813,6 @@ const server = Bun.serve({
         if (session.title === DEFAULT_TITLE) scheduleTitleGeneration(session.id, visibleText);
         sessions.touch(session.id);
         noteRunStarted(session.conversationId); // the row switches to "running" until this settles
-        // Capture manual edits first so the turn commit holds only what the agent changed.
-        await changes.snapshot("[edits] Changes made outside the agent").catch(() => {});
         try {
           // A message sent while the agent is working is "steered": it is placed after the current step (model response and its
         // tool calls) and joins the running work, instead of waiting for the entire run to finish.
@@ -1717,10 +1828,6 @@ const server = Bun.serve({
           replyText = `Agent error: ${err instanceof Error ? err.message : String(err)}`;
         }
         markRunFinished(session.conversationId); // done, aborted or errored: the run is over either way
-        const turnOid = await changes
-          .snapshot(`[turn] ${visibleText.replace(/\s+/g, " ").slice(0, 80)}\n\nsession: ${session.title}\nmodel: ${pickDefaultModel().provider}/${pickDefaultModel().modelId}`)
-          .catch(() => null);
-        if (turnOid) broadcast("changes", { oid: turnOid });
         db.query("INSERT INTO messages (role, content) VALUES (?, ?)").run("assistant", replyText);
         broadcast("message", { role: "assistant", content: replyText });
 
@@ -2171,6 +2278,28 @@ const server = Bun.serve({
       return changes.undoLatest()
         .then(result => { broadcast("changes", {}); return Response.json(result); })
         .catch(err => Response.json({ error: String(err) }, { status: 500 }));
+    }
+
+    // An app update the agent's files conflict with (changes.ts): its state, and the three ways to resolve it.
+    if (url.pathname === "/api/update" && req.method === "GET") {
+      return changes.updateStatus().then(status => Response.json(status)).catch(err => Response.json({ error: String(err) }, { status: 500 }));
+    }
+    // A resolved choice ends the recovery run (the app relaunches the agent's own server), so these restart the server.
+    if (url.pathname === "/api/update/keep" && req.method === "POST") {
+      return updateReply(changes.keepAgent().then((outcome) => { scheduleRestart(500); return outcome; }));
+    }
+    if (url.pathname === "/api/update/bundled" && req.method === "POST") {
+      return updateReply(changes.useBundled().then((outcome) => { scheduleRestart(500); return outcome; }));
+    }
+    if (url.pathname === "/api/update/cancel" && req.method === "POST") return updateReply(changes.cancelMerge());
+    if (url.pathname === "/api/update/merge" && req.method === "POST") {
+      // The Changes tab then opens a session with `prompt` as its first message (see changes.js).
+      return changes.beginMerge()
+        .then(({ conflicts, dir }) => {
+          broadcast("changes", {});
+          return Response.json({ conflicts, prompt: mergePrompt(conflicts, dir) });
+        })
+        .catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
     }
 
     // Attachments from the composer's file picker. The Android picker hands the WebView a

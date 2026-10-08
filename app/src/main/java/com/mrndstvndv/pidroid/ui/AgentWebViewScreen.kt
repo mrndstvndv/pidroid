@@ -29,7 +29,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -51,7 +50,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.mrndstvndv.pidroid.agent.AgentProcessManager
-import com.mrndstvndv.pidroid.agent.ConflictChoice
 import com.mrndstvndv.pidroid.service.AgentForegroundService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -101,7 +99,6 @@ fun AgentWebViewScreen() {
     // True while the current load hit a main-frame error (e.g. the server isn't up yet). WebViewClient still calls
     // onPageFinished for Chrome's error page, so without this the failed page would count as "loaded" and never retry.
     val pageFailed = remember { BooleanArray(1) }
-    val conflicts by AgentProcessManager.conflicts.collectAsState()
 
     // <input type="file"> in the web UI (the agent's attach button) does nothing unless the app answers the WebView's
     // file-chooser request. Android hands back content:// URIs the WebView can read itself, so no storage permission
@@ -117,39 +114,6 @@ fun AgentWebViewScreen() {
 
     LaunchedEffect(Unit) {
         AgentForegroundService.start(context)
-    }
-
-    // An app update changed files the agent had also edited: ask which version wins.
-    if (conflicts.isNotEmpty()) {
-        AlertDialog(
-            onDismissRequest = {},
-            containerColor = Color(0xFF0D0D0D),
-            title = { Text("Update conflicts with the agent's edits", color = Color.White) },
-            text = {
-                Column {
-                    Text(
-                        "This update changes files the agent has modified. Pick which version to use. " +
-                            "The other one stays in the Changes history.",
-                        color = Color(0xFF9CA3AF),
-                        fontSize = 13.sp
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    conflicts.forEach {
-                        Text(it, color = Color(0xFFE5E7EB), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { AgentProcessManager.resolveConflicts(context, ConflictChoice.KEEP_AGENT) }) {
-                    Text("Keep agent's version", color = Color(0xFF6366F1))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { AgentProcessManager.resolveConflicts(context, ConflictChoice.USE_SHIPPED) }) {
-                    Text("Use new app version", color = Color.White)
-                }
-            }
-        )
     }
 
     Column(

@@ -20,7 +20,10 @@ import java.net.URL
 import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 
-/** PRIMARY runs the (agent-editable) server.ts; SAFE runs the shipped, known-good bundle after repeated startup failures. */
+/**
+ * PRIMARY runs the (agent-editable) server.ts. SAFE runs the shipped bundle (the recovery server): after repeated startup
+ * failures, and while an app update waits for the server to reconcile it with the agent's files (see AssetExtractor).
+ */
 enum class AgentMode { PRIMARY, SAFE }
 
 object AgentProcessManager {
@@ -32,10 +35,6 @@ object AgentProcessManager {
 
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
-
-    /** Files the agent edited that an app update also changed; the UI asks which version to keep. */
-    private val _conflicts = MutableStateFlow<List<String>>(emptyList())
-    val conflicts: StateFlow<List<String>> = _conflicts.asStateFlow()
 
     private val _mode = MutableStateFlow(AgentMode.PRIMARY)
     val mode: StateFlow<AgentMode> = _mode.asStateFlow()
@@ -51,21 +50,14 @@ object AgentProcessManager {
     val logs: StateFlow<List<String>> = _logs.asStateFlow()
 
     @Synchronized
-    fun startAgent(context: Context, choice: ConflictChoice? = null, force: Boolean = false): Boolean {
+    fun startAgent(context: Context): Boolean {
         if (process != null && process?.isAlive == true) {
             Log.d(TAG, "Agent process already running.")
             return true
         }
 
         try {
-            val extracted = AssetExtractor.extractAgentAssets(context, choice, force)
-            if (extracted.conflicts.isNotEmpty()) {
-                appendLog("[INFO] Waiting for you to resolve ${extracted.conflicts.size} update conflict(s) with the agent's edits")
-                _conflicts.value = extracted.conflicts
-                return false
-            }
-            _conflicts.value = emptyList()
-            val agentDir = extracted.dir
+            val agentDir = AssetExtractor.extractAgentAssets(context)
             val nativeDir = context.applicationInfo.nativeLibraryDir
             val bunBinary = File(nativeDir, "libbun.so")
 
@@ -75,8 +67,10 @@ object AgentProcessManager {
             }
 
             // Primary: the editable TypeScript source, with dependencies prebuilt in vendor/ (see tsconfig.json paths).
-            // Safe mode: a full bundle of the shipped server, built by bundleAgent, used if edits keep breaking startup.
-            val serverScript = if (_mode.value == AgentMode.SAFE) File(agentDir, "fallback/server.js") else File(agentDir, "server.ts")
+            // Safe mode: a full bundle of the shipped server, built by bundleAgent. It runs after repeated startup failures,
+            // and while an app update waits to be reconciled: the agent's own server does not yet hold the update's files.
+            val useRecovery = _mode.value == AgentMode.SAFE || AssetExtractor.updatePending(context)
+            val serverScript = if (useRecovery) File(agentDir, "fallback/server.js") else File(agentDir, "server.ts")
             if (!serverScript.exists()) {
                 appendLog("[ERROR] ${serverScript.absolutePath} not found")
                 return false
@@ -93,6 +87,8 @@ object AgentProcessManager {
                 environment()["PORT"] = SERVER_PORT.toString()
                 environment()["TMPDIR"] = context.cacheDir.absolutePath
                 environment()["HOME"] = context.filesDir.absolutePath
+                // The recovery server serves the shipped web UI from the staged bundle (see server.ts WWW_DIR).
+                if (useRecovery) environment()["PIDROID_RECOVERY"] = "1"
                 environment()["PIDROID_BRIDGE_SOCKET"] = AndroidBridge.socketPath(context)
                 // bun / bunx / ssh / ssh-keygen on PATH: the agent's bash tool can run scripts and install packages with
                 // Bun, and pi-env finds the OpenSSH client (from Termux, packaged as native libs) by name.
@@ -205,21 +201,6 @@ object AgentProcessManager {
             fastFailures = 0
             _mode.value = AgentMode.PRIMARY
             startAgent(context.applicationContext)
-        }
-    }
-
-    /** Apply the user's choice for update conflicts, then start the agent. */
-    fun resolveConflicts(context: Context, choice: ConflictChoice) {
-        scope.launch { startAgent(context, choice) }
-    }
-
-    /** Overwrite every shipped file (and drop extras under www/), then restart. The server checkpoints the result to git. */
-    fun resetToShipped(context: Context) {
-        scope.launch {
-            val old = process
-            stopAgent()
-            old?.waitFor(5, TimeUnit.SECONDS)
-            startAgent(context, force = true)
         }
     }
 

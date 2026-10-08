@@ -195,10 +195,15 @@ async function checkServerMode() {
     const status = await response.json();
     fallbackBanner.hidden = status.mode === "full";
     if (!fallbackBanner.hidden) {
+      // An app update waiting on the user is the usual reason the recovery server is up, so say so here.
+      const update = await fetch("/api/update", { cache: "no-store" }).then(r => r.json()).catch(() => ({}));
+      const waiting = update.stage === "pending" ? " An app update is waiting for your choice in Changes."
+        : update.stage === "merging" ? " A merge of an app update is in progress."
+        : "";
       fallbackBanner.querySelector("span:nth-child(2)").textContent =
-        status.mode
+        (status.mode
           ? `Recovery server (${status.mode}). Some features are limited until the agent restarts.`
-          : "Recovery server active. Some features are limited until the agent restarts.";
+          : "Recovery server active. Some features are limited until the agent restarts.") + waiting;
     }
   } catch {
     // A failed probe says nothing about which server this is; leave the banner as it was.
