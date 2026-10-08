@@ -387,6 +387,18 @@
           <input type="search" id="sidebar-search" class="field" placeholder="Search sessions..." autocomplete="off" aria-label="Search sessions" />
         </div>
       </div>
+      <!-- Selection mode: a long press on a session row puts the list in this state and fills the
+           bar with a count and the one action it is for. Hidden until a press happens. -->
+      <div class="sidebar-select-bar" id="sidebar-select-bar" role="toolbar" aria-label="Selection" hidden>
+        <span class="sidebar-select-count" id="sidebar-select-count">Select sessions</span>
+        <button type="button" class="sidebar-select-all" id="sidebar-select-all" aria-label="Select all shown sessions">All</button>
+        <button type="button" class="icon-btn" id="sidebar-select-clear" aria-label="Cancel selection" title="Cancel selection">
+          <span data-icon="x" data-size="18"></span>
+        </button>
+        <button type="button" class="icon-btn danger" id="sidebar-select-delete" aria-label="Delete selected" title="Delete selected" disabled>
+          <span data-icon="trash-2" data-size="18"></span>
+        </button>
+      </div>
       <div class="sidebar-list" id="sidebar-session-list"></div>
       <div class="sidebar-foot">
         <div class="sidebar-actions">

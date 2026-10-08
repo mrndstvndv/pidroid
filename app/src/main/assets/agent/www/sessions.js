@@ -28,29 +28,125 @@ function sessionAgo(ts) {
   return new Date(ts).toLocaleDateString();
 }
 
+/* ---------- selection mode ----------
+   The row menu deletes one session per trip, which on a phone means walking the list one ⋮ tap at
+   a time. A long press on a row starts selecting instead: from then on a tap marks a session rather
+   than opening it, the ⋮ button steps aside, and a bar over the list carries the count plus the one
+   action the mode exists for. Back or Escape leaves it. */
+const selectBar = document.getElementById("sidebar-select-bar");
+const selectCount = document.getElementById("sidebar-select-count");
+const selectDelete = document.getElementById("sidebar-select-delete");
+const selectClear = document.getElementById("sidebar-select-clear");
+const selectAll = document.getElementById("sidebar-select-all");
+const selectedIds = new Set();
+let selectMode = false;
+
+function setSelectMode(on) {
+  if (selectMode === on) return;
+  selectMode = on;
+  if (!on) selectedIds.clear();
+  if (selectBar) selectBar.hidden = !on;
+  sidebarList?.classList.toggle("selecting", on);
+  renderSessions();
+}
+
+/** The rows the list is actually showing, filter applied. Everything that acts on "all" acts on
+    these, never on the whole list: while a search box has a word in it, the user is looking at a
+    handful of sessions and means those. */
+function shownSessions() {
+  return sessionData.sessions.filter(s => !sessionQuery || s.title.toLowerCase().includes(sessionQuery));
+}
+
+function updateSelectBar() {
+  const n = selectedIds.size;
+  if (selectCount) selectCount.textContent = n ? `${n} selected` : "Select sessions";
+  if (selectDelete) selectDelete.disabled = !n;
+  if (selectAll) {
+    // One button for both directions, because what the user means is "all of them": once every
+    // shown row is marked it reads None, and tapping it drops the selection rather than re-adding it.
+    const shown = shownSessions();
+    const everyMarked = shown.length > 0 && shown.every((s) => selectedIds.has(s.id));
+    selectAll.textContent = everyMarked ? "None" : "All";
+    selectAll.disabled = !shown.length;
+    const what = sessionQuery ? "the matching sessions" : "every session";
+    selectAll.title = everyMarked ? `Clear the selection` : `Select ${what}`;
+    selectAll.setAttribute("aria-label", everyMarked ? "Clear selection" : `Select ${what}`);
+  }
+}
+
+function toggleSelect(id) {
+  if (selectedIds.has(id)) selectedIds.delete(id);
+  else selectedIds.add(id);
+  updateSelectBar();
+  renderSessions();
+}
+
+/** Mark every shown row, or clear them all if they are already marked. */
+function toggleSelectAll() {
+  const shown = shownSessions();
+  const everyMarked = shown.length > 0 && shown.every((s) => selectedIds.has(s.id));
+  shown.forEach((s) => (everyMarked ? selectedIds.delete(s.id) : selectedIds.add(s.id)));
+  updateSelectBar();
+  renderSessions();
+}
+
+/** Delete every selected session, deepest branch first. The server refuses to delete a session that
+    still has branches -- it would empty their inherited history -- so the branches have to go before
+    their parent; a parent and its branch picked together must not fail just because of the order the
+    rows happen to be listed in. One refusal does not stop the rest: the names of what survived are
+    said out loud, because a session that quietly stayed behind is the worst outcome here. */
+async function deleteSelected() {
+  const ids = [...selectedIds];
+  if (!ids.length) return;
+  const rows = ids.map((id) => sessionData.sessions.find((s) => s.id === id)).filter(Boolean);
+  const what = rows.length === 1 ? `"${rows[0].title}"` : `${rows.length} sessions`;
+  const tail = rows.length === 1 ? "Any run in it is stopped. Its transcript and every file in its workspace are deleted"
+                               : "Any run in them is stopped. Their transcripts and every file in their workspaces are deleted";
+  if (!confirm(`Delete ${what}? ${tail} for good -- this cannot be undone.`)) return;
+  rows.sort((a, b) => (b.depth || 0) - (a.depth || 0));
+  let deleted = 0;
+  const refused = [];
+  for (const s of rows) {
+    try {
+      await sessionsApi(`/api/sessions/${s.id}/delete`, "POST");
+      deleted++;
+    } catch (err) {
+      refused.push(err.message);
+    }
+  }
+  setSelectMode(false);
+  await loadSessions();
+  if (refused.length) flash(`${deleted} deleted, ${refused.length} kept: ${refused[0]}`, true);
+  else flash(`Deleted ${deleted} session${deleted === 1 ? "" : "s"}`);
+}
+
 function renderSessions() {
   if (!sidebarList) return;
   // Client-side filter: the whole list is already in memory, and the box should stay
   // responsive while a name is still being typed. Filtering flattens the tree, so a branch can
   // show without the session it came from — the indent then reads as nesting that isn't there,
   // which is the lesser evil compared to hiding a session that matched.
-  const shown = sessionData.sessions.filter(s => !sessionQuery || s.title.toLowerCase().includes(sessionQuery));
+  const shown = shownSessions();
   // A session that was working reads "running" until its run ends, then "done" until it is opened again.
   const mark = (s) => s.busy
     ? `${icon("circle-dot", 11, "ico-inline")} running`
     : s.done ? `${icon("check", 11, "ico-inline")} done` : "";
+  // The open session keeps its accent border while selecting -- it is a fact about the list, not a
+  // choice -- and a marked row adds a tick on top, so both read at a glance.
   sidebarList.innerHTML = shown.map(s => `
-    <div class="session-row${s.id === sessionData.current ? " selected" : ""}${s.depth ? " child" : ""}" data-id="${s.id}" style="--depth:${s.depth || 0}">
+    <div class="session-row${s.id === sessionData.current ? " selected" : ""}${selectedIds.has(s.id) ? " checked" : ""}${s.depth ? " child" : ""}" data-id="${s.id}" style="--depth:${s.depth || 0}"${selectedIds.has(s.id) ? ' aria-selected="true"' : ""}>
       <button type="button" class="model-row" data-act="switch">
+        ${selectMode ? `<span class="select-tick" aria-hidden="true">${icon(selectedIds.has(s.id) ? "check" : "square", 15)}</span>` : ""}
         <span class="model-name">${s.depth ? `<span class="branch-glyph" aria-label="branch">${icon("git-compare", 12, "ico-inline")}</span>` : ""}${escapeHtml(s.title)}</span>
         <span class="session-meta">
           <span class="busy-dot${s.done && !s.busy ? " done" : ""}">${mark(s)}</span>
           <span class="session-ago">${sessionAgo(s.updatedAt)}</span>
         </span>
       </button>
-      <button type="button" class="icon-btn session-more-btn" data-act="menu" title="Session actions" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false">${icon("ellipsis", 16)}</button>
+      ${selectMode ? "" : `<button type="button" class="icon-btn session-more-btn" data-act="menu" title="Session actions" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false">${icon("ellipsis", 16)}</button>`}
     </div>`).join("")
     || (sessionQuery ? `<p class="description">No sessions match "${escapeHtml(sessionQuery)}".</p>` : '<p class="description">No sessions.</p>');
+  updateSelectBar();
 }
 
 // Search box: re-render the rows on every keystroke, and clear it on Escape.
@@ -217,6 +313,69 @@ async function exportTranscript(id) {
   }
 }
 
+/* ---------- long press to select ----------
+   A press is timed, not measured, because there is nothing to measure against: the finger may be
+   resting on a title or on the row's padding. Movement cancels it (a press that slides is a scroll,
+   and on a phone the list scrolls under a resting finger), as does lifting before the timer fires --
+   which is what keeps an ordinary tap on a session an ordinary tap. */
+const LONG_PRESS_MS = 450;
+const PRESS_SLOP = 10;
+let pressTimer = null;
+let pressId = null;
+let pressX = 0;
+let pressY = 0;
+/** Set when a press turned into a selection: the tap the finger's lift then produces belongs to
+    that gesture and must not also open the session underneath it. Held for a moment rather than
+    cleared on pointerup, because the click arrives after it, and given an expiry so a stray long
+    press can never swallow the next genuine tap. */
+let suppressClickUntil = 0;
+
+function cancelPress() {
+  clearTimeout(pressTimer);
+  pressTimer = null;
+  pressId = null;
+}
+
+sidebarList?.addEventListener("pointerdown", (e) => {
+  const row = e.target.closest(".session-row");
+  if (!row || e.target.closest(".session-more-btn")) return;
+  cancelPress();
+  pressId = Number(row.dataset.id);
+  pressX = e.clientX;
+  pressY = e.clientY;
+  pressTimer = setTimeout(() => {
+    const id = pressId;
+    pressId = null;
+    pressTimer = null;
+    navigator.vibrate?.(15);
+    setSelectMode(true);
+    toggleSelect(id);
+    suppressClickUntil = Date.now() + 700;
+  }, LONG_PRESS_MS);
+});
+sidebarList?.addEventListener("pointermove", (e) => {
+  if (pressTimer && Math.hypot(e.clientX - pressX, e.clientY - pressY) > PRESS_SLOP) cancelPress();
+});
+// pointercancel is what a scroll and a system gesture send; pointerup is a plain lift.
+sidebarList?.addEventListener("pointerup", cancelPress);
+sidebarList?.addEventListener("pointercancel", cancelPress);
+sidebarList?.addEventListener("pointerleave", cancelPress);
+// Android still raises its own long-press menu on a row after a while; the row's gesture is ours.
+// (-webkit-touch-callout is already off app-wide, this is the right-click / context menu path.)
+sidebarList?.addEventListener("contextmenu", (e) => e.preventDefault());
+
+selectDelete?.addEventListener("click", deleteSelected);
+selectAll?.addEventListener("click", toggleSelectAll);
+selectClear?.addEventListener("click", () => setSelectMode(false));
+// Escape and Android back leave selection mode before they close the sidebar itself.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && selectMode) {
+    e.stopPropagation();
+    setSelectMode(false);
+  }
+});
+registerBackLayer(85, () => selectMode, () => setSelectMode(false));
+
 sidebarList?.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-act]");
   if (!btn) return;
@@ -225,6 +384,9 @@ sidebarList?.addEventListener("click", async (e) => {
   try {
     if (btn.dataset.act === "switch") {
       closeSessionMenu();
+      // The tap that ends a long press is already spoken for.
+      if (Date.now() < suppressClickUntil) return;
+      if (selectMode) return toggleSelect(id);
       if (id !== sessionData.current) await sessionsApi(`/api/sessions/${id}/switch`, "POST");
       window.closeSidebar?.();
       setTimeout(() => window.scrollChatToBottom?.(), 100);
@@ -284,6 +446,16 @@ registerBackLayer(90, () => sessionMenu && !sessionMenu.hidden, closeSessionMenu
 window.onSessionsEvent = () => {
   if (sidebar?.classList.contains("open")) loadSessions();
 };
+
+// A selection is a thing in a sidebar that is no longer there, so closing the sidebar drops it --
+// reopening should not find a bar over the list with rows still marked from an earlier trip in.
+const leaveSelectMode = () => setSelectMode(false);
+if (typeof window.onSidebarClosed === "function") {
+  const afterClose = window.onSidebarClosed;
+  window.onSidebarClosed = () => { leaveSelectMode(); afterClose(); };
+} else {
+  window.onSidebarClosed = leaveSelectMode;
+}
 
 window.onSessionInfo = (session) => {
   if (session) sessionTitle.textContent = session.title;

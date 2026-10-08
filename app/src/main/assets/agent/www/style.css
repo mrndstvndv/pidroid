@@ -2864,6 +2864,69 @@ a.ws-item .ws-title { color: var(--accent-text-strong); }
 
 p.empty { padding: 24px 8px; text-align: center; }
 
+/* Session selection: a long press on a row starts marking rows, and the bar over the list is the
+   mode's only control surface -- how many are marked, leave, delete. It sits between the filter and
+   the rows so the count stays put while they scroll. */
+.sidebar-select-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px 4px 16px;
+  border-bottom: 1px solid var(--border);
+  background-color: var(--bg-primary);
+}
+
+.sidebar-select-count {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* All / None: a small pill rather than an icon, because the word is the whole message here --
+   which way the button goes changes with what is already marked. */
+.sidebar-select-all {
+  flex: none;
+  margin-right: 4px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--accent-text-strong, var(--accent));
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.sidebar-select-all:active { background-color: var(--row-fill); }
+.sidebar-select-all:disabled { opacity: 0.35; pointer-events: none; }
+
+/* The tick is taken out of the flow and pinned to the row's left edge, so marking a session does
+   not reflow the title -- a row that jumps sideways as it is tapped is a row you mis-tap. The rows
+   make room for it with padding, and only while the mode is on. */
+.session-row { position: relative; }
+
+.sidebar-list.selecting .session-row { padding-left: 22px; }
+
+.select-tick {
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  color: var(--text-secondary);
+}
+
+.session-row.checked .select-tick { color: var(--accent-text-strong, var(--accent)); }
+.session-row.checked { background-color: var(--row-fill); }
+
+.sidebar-select-bar .icon-btn:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
 /* Sessions */
 .session-btn { max-width: 68%; }
 
