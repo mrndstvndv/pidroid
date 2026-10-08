@@ -425,6 +425,11 @@ const TAIL_PX = 120;
 
 function followTail() {
   if (!tailPinned || messagesEl.offsetParent === null) return;
+  // A reader who is scrolling up has moved the list above where we last left it. That scroll's event
+  // has not been delivered yet, so tailPinned still says "following". Snapping back here would write
+  // the bottom as if it were ours, and the event would then read it as our own write and never
+  // unpin. Leave the offset alone: noteReaderScroll decides the intent when the event arrives.
+  if (readerTouching || (readerIsScrolling() && messagesEl.scrollTop < readerTop - 1)) return;
   const bottom = listBottom();
   if (Math.abs(bottom - messagesEl.scrollTop) < ARRIVED_PX) return;
   window.__perf?.scrollBack(bottom - messagesEl.scrollTop);
@@ -2181,6 +2186,17 @@ function renderNow() {
   const switched = sessionId !== renderedSessionId;
   if (switched) {
     renderedSessionId = sessionId;
+    // The pacer starts from nothing, rate included: the last session's speed says nothing about this one.
+    pacer.samples = [];
+    pacer.carry = 0;
+    pacer.rate = 0;
+    pacer.last = 0;
+    // A reply already streaming when the session opens (or the page loads) appears in full at once.
+    // Only text that arrives after this point is paced. pacerNote ran before this, but this reset
+    // comes after it, so the counts set here are the ones the next tick reads.
+    const openLive = payload.view.live?.blocks || [];
+    pacer.shown = openLive.map((b) => (isLiveText(b) ? b.text.length : 0));
+    pacerTypes = openLive.map((b) => b.type);
     lastHistoryKey = null;
     historyHasContent = false;
     itemsEl.replaceChildren();
@@ -2218,7 +2234,12 @@ function renderNow() {
   // glide on its way down, leaving the session open at its first message. Landing here, in the
   // same task, means that event reads the offset we set and is recognised as our own.
   if (switched) setPinned(true);
-  renderMessages(payload.view, sessionId);
+  // The streaming partial is revealed at a paced rate. Reduced motion draws it as it arrives.
+  const pacing = !reduceMotion.matches && Boolean(payload.view.live?.blocks?.length);
+  const behind = pacing && pacerTick(performance.now());
+  renderMessages(pacing ? { ...payload.view, live: pacedLive(payload.view.live) } : payload.view, sessionId);
+  // While text is waiting, the next frame draws more of it. Once caught up the page goes idle again.
+  if (behind && !frame) frame = requestAnimationFrame(render);
   if (switched) {
     const bottom = listBottom();
     setScrollTop(messagesEl, bottom);
@@ -2245,6 +2266,7 @@ let awaitingResync = false;
 window.onAgentView = (data) => {
   awaitingResync = false;
   payload = data;
+  pacerNote(payload.view?.live ?? null);
   statsDirty = true;
   controlsDirty = true;
   if (!frame) frame = requestAnimationFrame(render);
@@ -2280,6 +2302,7 @@ window.onAgentUpdate = (data) => {
   }
   payload.rev = data.rev;
   current.live = stitched;
+  pacerNote(stitched ?? null);
   current.tools = Array.isArray(update.tools) ? update.tools : [];
   current.busy = Boolean(update.busy);
   current.runStartedAt = update.runStartedAt == null ? undefined : update.runStartedAt;
@@ -2292,6 +2315,129 @@ window.onAgentUpdate = (data) => {
   if (!frame) frame = requestAnimationFrame(render);
 };
 window.scrollChatToBottom = jumpToBottom;
+
+/* ---------- paced reveal ----------
+   The server pushes the streaming partial at most every 50 ms, and a model emits tokens in bursts,
+   so drawing each arrival as it lands makes the text appear in clumps. The pacer keeps its own count
+   of how much live text has been shown and reveals it at a smoothed, steady rate: at the arrival
+   rate while the backlog is small, and faster once the backlog passes PACE_SLACK_S seconds of text.
+   So the lag stays near PACE_SLACK_S (about 0.12 s) of text, and a burst drains instead of piling up.
+   The partial itself is never changed; pacedLive hands the renderer a copy cut to what is shown. */
+
+// Backlog, in seconds of text at the current rate, the reveal absorbs before it speeds up.
+const PACE_SLACK_S = 0.12;
+const pacer = { shown: [], rate: 0, carry: 0, last: 0, samples: [] };
+// The block types the last partial had, so a block that changes type starts its count again.
+let pacerTypes = [];
+
+const isLiveText = (b) => b.type === "text" || b.type === "thinking";
+
+/** Called with every partial the page receives. When a partial commits, the snapshot has no live
+ *  part and the committed message arrives in full, so whatever is still unrevealed shows at once.
+ *  That is normally under a quarter second of text, so the jump is small. */
+function pacerNote(live) {
+  if (!live) {
+    pacer.shown = [];
+    pacer.samples = [];
+    pacer.carry = 0;
+    pacer.last = 0;
+    pacerTypes = [];
+    return;
+  }
+  const blocks = live.blocks || [];
+  const now = performance.now();
+  let total = 0;
+  for (const b of blocks) if (isLiveText(b)) total += b.text.length;
+  pacer.samples.push([now, total]);
+  // Only the last second says what the arrival rate is now; older bursts would hold the speed up.
+  while (pacer.samples.length && now - pacer.samples[0][0] > 1000) pacer.samples.shift();
+  blocks.forEach((b, i) => {
+    if (pacerTypes[i] !== b.type) pacer.shown[i] = 0;
+    if (!isLiveText(b)) return;
+    // Text that shrank (a rewritten partial) cannot have more shown than it now holds.
+    const shown = Math.min(pacer.shown[i] ?? 0, b.text.length);
+    // Reduced motion has no reveal. Keeping shown at the full length means turning the setting off
+    // mid-reply does not replay the text that was already on screen.
+    pacer.shown[i] = reduceMotion.matches ? b.text.length : shown;
+  });
+  pacer.shown.length = blocks.length;
+  pacerTypes = blocks.map((b) => b.type);
+}
+
+/** Advances the reveal to `now` (performance.now()) and returns whether text is still waiting. */
+function pacerTick(now) {
+  // The first tick after a reset has no previous time to measure from, so it assumes one frame.
+  const dt = pacer.last ? Math.min(0.05, (now - pacer.last) / 1000) : 1 / 60;
+  pacer.last = now;
+  const s = pacer.samples;
+  if (s.length >= 2) {
+    const span = (s[s.length - 1][0] - s[0][0]) / 1000;
+    // A window under 50 ms is too short to give a rate, so the last smoothed rate stands.
+    if (span >= 0.05) {
+      const arrival = (s[s.length - 1][1] - s[0][1]) / span;
+      pacer.rate += (Math.max(arrival, 30) - pacer.rate) * (1 - Math.exp(-dt / 0.3));
+    }
+  }
+  const blocks = payload?.view?.live?.blocks || [];
+  let backlog = 0;
+  blocks.forEach((b, i) => {
+    if (isLiveText(b)) backlog += Math.max(0, b.text.length - (pacer.shown[i] ?? 0));
+  });
+  // A rate of 0 (a fresh pacer, before any arrivals) would divide by zero and never reveal, so the
+  // speed is taken from at least 30 characters a second. Below the slack the reveal runs at the
+  // arrival rate; only the backlog beyond it speeds the reveal up, in proportion.
+  const rate = Math.max(pacer.rate, 30);
+  const speed = rate * (1 + Math.max(0, backlog / (rate * PACE_SLACK_S) - 1));
+  pacer.carry += speed * dt;
+  let budget = Math.floor(pacer.carry);
+  let revealed = 0;
+  let stopped = -1;
+  for (let i = 0; i < blocks.length && budget > 0; i++) {
+    const b = blocks[i];
+    if (!isLiveText(b)) continue;
+    const have = pacer.shown[i] ?? 0;
+    const take = Math.min(budget, b.text.length - have);
+    if (take <= 0) continue;
+    pacer.shown[i] = have + take;
+    budget -= take;
+    revealed += take;
+    // A block with text still waiting holds back every block after it, so the reply reads in order.
+    if (pacer.shown[i] < b.text.length) {
+      stopped = i;
+      break;
+    }
+  }
+  // Stopping in the middle of a word would draw it in two halves, so the reveal runs on to the next
+  // whitespace when that is at most 12 characters away. The extra is charged to carry, which may go
+  // negative: the reveal pays that back over the next frames.
+  if (stopped >= 0) {
+    const text = blocks[stopped].text;
+    const at = pacer.shown[stopped];
+    if (at > 0 && !/\s/.test(text[at - 1]) && !/\s/.test(text[at])) {
+      for (let j = at; j < text.length && j - at <= 12; j++) {
+        if (!/\s/.test(text[j])) continue;
+        revealed += j - at;
+        pacer.shown[stopped] = j;
+        break;
+      }
+    }
+  }
+  pacer.carry -= revealed;
+  const behind = blocks.some((b, i) => isLiveText(b) && (pacer.shown[i] ?? 0) < b.text.length);
+  // Nothing waiting means nothing to bank. Otherwise a pause would store up credit, and the next
+  // burst would be drawn at once instead of paced.
+  if (!behind) pacer.carry = 0;
+  return behind;
+}
+
+/** The live partial as the renderer should draw it this frame: a copy cut to what has been revealed.
+ *  payload is left alone, so the next frame and the transcript still see the whole partial. */
+function pacedLive(live) {
+  return {
+    ...live,
+    blocks: live.blocks.map((b, i) => (isLiveText(b) ? { ...b, text: b.text.slice(0, pacer.shown[i] ?? 0) } : b)),
+  };
+}
 
 /* ---------- interaction ---------- */
 
