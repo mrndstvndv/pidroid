@@ -20,6 +20,7 @@ const filesSummary = document.getElementById("files-summary");
 const filesSearch = document.getElementById("files-search");
 const filesCollapseBtn = document.getElementById("files-collapse-btn");
 const filesExpandBtn = document.getElementById("files-expand-btn");
+const exportBundleBtn = document.getElementById("export-bundle-btn");
 
 let fileTree = null;
 /** Directories the user has opened, as a Set of paths. Survives a refresh so the tree does not
@@ -262,6 +263,50 @@ document.getElementById("refresh-files-btn")?.addEventListener("click", () => {
   closePreview();
   loadFilesTree();
 });
+
+/* ---------- export ---------- */
+
+/* The escape hatch as a button. The server route and the save_bundle tool call the same
+   writeBundle (bundles.ts), so this writes exactly the tree the tab above is showing -- no agent
+   turn, no model, and it works while a session is idle.
+
+   The button is disabled for the whole run: bundling copies and re-hashes every source file, which
+   on this phone takes a second or two, and a second tap in that window would start a second tar of
+   the same tree for no reason. The label says what is happening instead, since a greyed-out button
+   on its own reads as broken. */
+
+let exporting = false;
+
+async function exportBundle() {
+  if (!exportBundleBtn || exporting) return;
+  exporting = true;
+  const label = exportBundleBtn.querySelector(".btn-label");
+  const was = label ? label.textContent : "";
+  exportBundleBtn.disabled = true;
+  if (label) label.textContent = "Exporting…";
+  try {
+    const response = await fetch("/api/files/bundle", { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) throw new Error(data.error || response.statusText);
+    // The archive name is long and carries a path; the toast is one line on a phone, so it gets the
+    // filename and the size, and the full path is the server's log (and the Files app's own path).
+    const name = String(data.path || "").split("/").pop();
+    toast("info", `Bundle saved: ${name} · ${formatBytes(Number(data.bytes) || 0)}`);
+    // A torn snapshot is worth saying out loud rather than burying in a toast that scrolls away.
+    if (data.unstable?.length) {
+      toast("error", `${data.unstable.length} file(s) changed while exporting — the snapshot is torn. Export again with other sessions closed.`, 9000);
+    }
+    loadFilesTree();
+  } catch (error) {
+    toast("error", `Export failed: ${error instanceof Error ? error.message : error}`, 8000);
+  } finally {
+    exporting = false;
+    exportBundleBtn.disabled = false;
+    if (label) label.textContent = was;
+  }
+}
+
+exportBundleBtn?.addEventListener("click", exportBundle);
 
 document.getElementById("file-modal-close")?.addEventListener("click", closePreview);
 registerBackLayer(100, () => document.getElementById("file-modal")?.hidden === false, closePreview);
