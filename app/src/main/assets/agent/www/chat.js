@@ -11,13 +11,18 @@ const dynamicEl = document.createElement("div");
 dynamicEl.className = "chat-message-live";
 // The list follows the tail by native scroll anchoring to a sentinel at its end (see style.css).
 // Anchoring needs a real box to pick, so the transcript sits in a flex column of its own, and the
-// sentinel is the last child of that column. Nothing may remove or replace the sentinel.
+// sentinel is the last child of that column. Nothing may remove or replace the sentinel. The
+// messages sit in bodyEl, a sibling of the sentinel rather than its ancestor: the arrival slide
+// transforms bodyEl, and a transform on an ancestor of the anchor suppresses scroll anchoring.
 const contentEl = document.createElement("div");
 contentEl.className = "chat-content";
+const bodyEl = document.createElement("div");
+bodyEl.className = "chat-body";
+bodyEl.append(historyEl, dynamicEl);
 const tailAnchor = document.createElement("div");
 tailAnchor.className = "tail-anchor";
 tailAnchor.setAttribute("aria-hidden", "true");
-contentEl.append(historyEl, dynamicEl, tailAnchor);
+contentEl.append(bodyEl, tailAnchor);
 messagesEl.replaceChildren(contentEl);
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
@@ -203,6 +208,14 @@ const ARRIVED_PX = 1;
 
 const clampScroll = (el, v) => Math.max(0, Math.min(v, el.scrollHeight - el.clientHeight));
 
+/** Where the list's bottom is by layout alone: transforms on the content (the arrival
+ *  animation) stretch scrollHeight while they run, and must not move the follow's target. */
+function listBottom() {
+  const cs = getComputedStyle(messagesEl);
+  const h = parseFloat(cs.paddingTop) + contentEl.offsetHeight + parseFloat(cs.paddingBottom);
+  return Math.max(0, h - messagesEl.clientHeight);
+}
+
 /* A scroll event does not say who caused it, and the list is written to by the viewport follow
    and the session-switch snap. Scroll anchoring also moves the offset, but that is not a write
    of ours, so it is left to the reader-input check below rather than marked here. Mark our own
@@ -306,6 +319,9 @@ let readerInputAt = -Infinity;
 function cancelGlides(e) {
   readerInputAt = performance.now();
   if (e.type === "touchstart") readerTouching = true;
+  // Text still sliding in is finished where it is, so the finger grabs the text as it really
+  // is rather than a point partway along its arrival.
+  for (const a of bodyEl.getAnimations()) if (a.id === "arrive") a.finish();
   const inner = e.target?.closest?.(".think-body, .tool-out");
   if (inner) stopGlide(inner);
 }
@@ -366,7 +382,7 @@ function noteReaderScroll() {
   }
   if (top < readerTop - 1 && readerIsScrolling()) {
     setPinned(false);
-  } else if (messagesEl.scrollHeight - top - messagesEl.clientHeight <= TAIL_PX) {
+  } else if (listBottom() - top <= TAIL_PX) {
     setPinned(true);
   }
   readerTop = top;
@@ -385,14 +401,14 @@ const unpinnedBodies = new Set();
 const bodyScrollTop = new Map();
 
 function updateJumpBottom() {
-  jumpBottomBtn.hidden = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <= 120;
+  jumpBottomBtn.hidden = listBottom() - messagesEl.scrollTop <= 120;
 }
 
 messagesEl.addEventListener("scroll", updateJumpBottom, { passive: true });
 // A deliberate jump: the reader is back at the tail, so the list follows again from here on.
 function jumpToBottom() {
   setPinned(true);
-  messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: reduceMotion.matches ? "auto" : "smooth" });
+  messagesEl.scrollTo({ top: listBottom(), behavior: reduceMotion.matches ? "auto" : "smooth" });
 }
 jumpBottomBtn.addEventListener("click", jumpToBottom);
 
@@ -412,11 +428,60 @@ const TAIL_PX = 120;
 
 function followTail() {
   if (!tailPinned || messagesEl.offsetParent === null) return;
-  const bottom = clampScroll(messagesEl, Infinity);
+  const bottom = listBottom();
   if (Math.abs(bottom - messagesEl.scrollTop) < ARRIVED_PX) return;
   window.__perf?.scrollBack(bottom - messagesEl.scrollTop);
   setScrollTop(messagesEl, bottom);
   readerTop = bottom;
+}
+
+/* ---------- arrivals under a following reader ----------
+   While the tail is followed, a new line makes the whole transcript jump up by its height in one
+   frame: scroll anchoring holds the sentinel still, so everything above it moves. Anchoring does
+   this in layout, so nothing here can pre-empt it. Instead this plays the content back from the
+   same distance to rest on the compositor, so the text starts where it was and slides up. A
+   transform writes no scrollTop and costs no layout.
+
+   The slide transforms bodyEl, which is a sibling of the sentinel and not its ancestor. A transform
+   on an ancestor of the anchor is a suppression trigger for scroll anchoring: with the slide on
+   contentEl, the next line that landed mid-slide went unanchored, so the list ended up short of
+   the bottom and was snapped there with no slide at all.
+
+   Arrivals add up (composite "add") so a burst of lines is one continuous slide rather than a
+   series of restarts, for the same reason the inner glides carry velocity between passes. */
+let contentHeight = 0; // last layout height of the transcript; offsetHeight ignores transforms
+// Starts true: the first reading (on load, or after a session switch) only records the height.
+let skipArrival = true;
+const ADDITIVE = (() => {
+  try { return new KeyframeEffect(null, [], { composite: "add" }).composite === "add"; } catch { return false; }
+})();
+
+if (typeof ResizeObserver !== "undefined") {
+  // This observer is created before the follow observer below on purpose. Observers are notified
+  // in creation order, so this one reads the list as anchoring left it. Read after followTail has
+  // snapped the list down, a list that had just grown past the viewport would look as if it was
+  // already at the bottom, and the slide would play a distance the list never moved.
+  const arrivals = new ResizeObserver(() => {
+    const h = contentEl.offsetHeight;
+    const d = h - contentHeight;
+    contentHeight = h;
+    if (skipArrival) { skipArrival = false; return; }
+    if (d <= 0 || !tailPinned || messagesEl.offsetParent === null) return;
+    if (reduceMotion.matches || !bodyEl.animate || readerTouching) return;
+    // A block or a whole history appearing is an arrival, not a line of text, and sliding it in
+    // would read as a scroll.
+    if (d > messagesEl.clientHeight * 0.75) return;
+    // Only growth that anchoring moved the list for is an arrival. At offset 0 anchoring does not
+    // run, so a list still shorter than the viewport has not moved at all.
+    if (messagesEl.scrollTop <= 0 || listBottom() - messagesEl.scrollTop > 1) return;
+    if (!ADDITIVE) for (const a of bodyEl.getAnimations()) if (a.id === "arrive") a.cancel();
+    const { duration, easing } = M3Motion.spring("follow");
+    const anim = bodyEl.animate([{ transform: `translateY(${d}px)` }, { transform: "none" }], {
+      duration, easing, composite: ADDITIVE ? "add" : "replace",
+    });
+    anim.id = "arrive";
+  });
+  arrivals.observe(contentEl);
 }
 
 if (typeof ResizeObserver !== "undefined") {
@@ -1970,6 +2035,11 @@ function renderNow() {
       cancelAnimationFrame(glideFrame);
       glideFrame = 0;
     }
+    // A new session is not growth to slide in: drop any arrival still playing, and let the first
+    // size reading after this render only record the height (see the arrivals observer).
+    for (const a of bodyEl.getAnimations()) if (a.id === "arrive") a.cancel();
+    contentHeight = 0;
+    skipArrival = true;
   }
 
   // Another session opens at its newest message, whatever the reader was doing in the last one.
@@ -1980,7 +2050,7 @@ function renderNow() {
   if (switched) setPinned(true);
   renderMessages(payload.view, sessionId);
   if (switched) {
-    const bottom = clampScroll(messagesEl, Infinity);
+    const bottom = listBottom();
     setScrollTop(messagesEl, bottom);
     readerTop = bottom;
     updateJumpBottom();

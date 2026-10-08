@@ -17,6 +17,9 @@
     effectsFast: { damping: 1, stiffness: 3800 },
     effectsDefault: { damping: 1, stiffness: 1600 },
     effectsSlow: { damping: 1, stiffness: 800 },
+    // Text arriving under a reader who follows the tail. Critically damped, so the text never
+    // bounces: an overshoot would read as the line landing twice.
+    follow: { damping: 1, stiffness: 520 },
   };
 
   /** Position of a spring released at 0 towards 1, at time t (seconds). */

@@ -525,13 +525,22 @@ body {
   -webkit-touch-callout: default;
 }
 
-/* The transcript column. It is the list's only child, and the flex column (with the spacing
-   between messages) lives here, so the sentinel below is a real box for anchoring to pick. */
+/* The transcript column. It is the list's only child, and holds the messages body and the sentinel
+   below as siblings, so the sentinel is a real box for anchoring to pick. */
 .chat-content {
   display: flex;
   flex-direction: column;
-  gap: 12px;
   flex-shrink: 0;
+  min-width: 0;
+}
+
+/* The messages. It is a sibling of the sentinel, not an ancestor of it: a transform on an ancestor
+   of the anchor suppresses scroll anchoring, and the arrival slide transforms this box. The flex
+   column with the spacing between messages lives here. */
+.chat-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -545,16 +554,16 @@ body {
 /* Scroll anchoring follows the tail. Only the sentinel at the end of the list may be the anchor:
    while it is in view, layout keeps it where it is as content grows above it, in the same frame
    and with no script. Every message below is excluded, because an anchor picked inside the live
-   tail is what pulled the list back up. The wrapper is left out of the exclusion, since an
-   element that opts out also hides its whole subtree from the search, sentinel included.
+   tail is what pulled the list back up. The outer wrapper (`.chat-content`) is left out of the
+   exclusion, since an element that opts out also hides its whole subtree from the search,
+   sentinel included. The messages body (`.chat-body`) is not an ancestor of the sentinel, so it
+   can opt out like any message does, and it is excluded here too.
    `.reading` (the reader has scrolled away) switches the sentinel off too, so growth below the
    fold moves nothing. */
 .chat-messages *:not(.chat-content) { overflow-anchor: none; }
 .chat-messages .tail-anchor {
   overflow-anchor: auto;
   height: 1px;
-  /* Cancels the flex gap above it, so the sentinel adds no visible space. */
-  margin-top: -12px;
   flex-shrink: 0;
 }
 .chat-messages.reading .tail-anchor { overflow-anchor: none; }
