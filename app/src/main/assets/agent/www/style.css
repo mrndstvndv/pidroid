@@ -2006,6 +2006,33 @@ html[data-mode="light"] .shimmer {
 
 .queue-bar[hidden] { display: none; }
 
+/* The dock: the live status line and the queued messages, fixed above the composer card. Quiet
+   chrome, not a card. Display-only, so it passes drags through to the list behind it. */
+.chat-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 6px 6px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.chat-dock[hidden] { display: none; }
+.composer > .chat-dock { pointer-events: none; }
+
+.dock-status { display: flex; align-items: baseline; gap: 6px; }
+/* Same look as the status row's clock used to have; the gap above already spaces it. */
+.dock-status .dur { margin-left: 0; padding-left: 0; }
+
+.dock-queued { display: flex; align-items: center; gap: 6px; min-width: 0; }
+
+.dock-queued-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Stop is the same button as send (see #send-btn): no red fill, just a slightly heavier
    neutral tint so the cut action still reads as the active one. */
 .stop-btn {
@@ -2246,12 +2273,6 @@ details.work[data-want-open="1"] > summary .work-chev { transform: rotate(90deg)
   border: none;
   border-top: 1px solid var(--border);
   background: var(--bg-primary); /* as .artifact-frame: the card's canvas, not a white plate */
-}
-
-.message.queued {
-  opacity: 0.6;
-  border: 1px dashed var(--accent);
-  background-color: transparent;
 }
 
 .message.error { border-color: #ef4444; color: var(--danger-text); }

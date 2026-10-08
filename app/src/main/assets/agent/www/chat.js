@@ -14,6 +14,9 @@ const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const sendBtn = document.getElementById("send-btn");
 const queueBar = document.getElementById("queue-bar");
+// Status and queued messages live here, outside the list, so a line added under streaming text
+// does not move them. It sits above the composer card, which the list already reserves room for.
+const dockEl = document.getElementById("chat-dock");
 const ctxLabel = document.getElementById("ctx-label");
 const ctxFill = document.getElementById("ctx-fill");
 const cacheLabel = document.getElementById("cache-label");
@@ -29,6 +32,7 @@ const userClosed = new Set();
 let payload = null;
 let lastModel = "";
 let lastQueueCount = -1;
+let lastDockKey = null;
 let frame = 0;
 let renderedSessionId = null;
 let lastHistoryKey = null;
@@ -461,15 +465,21 @@ function durHtml(ms, at) {
 }
 
 /** Only the running spans are touched, and only while something is running. During a stream
- *  inspect the changed tail; the one-second timer may scan the whole history when needed. */
+ *  inspect the changed tail; the one-second timer may scan the whole history when needed. The
+ *  dock is outside the list, so the timer covers it too: the status clock lives there. */
 function tickDurations(root = messagesEl) {
   const now = Date.now();
-  let live = false;
-  root.querySelectorAll(".dur-live[data-since]").forEach((el) => {
-    el.textContent = fmtDur(now - Number(el.dataset.since));
-    live = true;
-  });
+  const tick = (scope) => {
+    let any = false;
+    scope.querySelectorAll(".dur-live[data-since]").forEach((el) => {
+      el.textContent = fmtDur(now - Number(el.dataset.since));
+      any = true;
+    });
+    return any;
+  };
+  let live = tick(root);
   if (root === messagesEl) {
+    live = tick(dockEl) || live;
     if (live !== ticking) {
       ticking = live;
       clearInterval(durTimer);
@@ -1360,7 +1370,7 @@ function itemSpecs(items, sessionId) {
     const failed = entries.filter((e) => e.type === "tool" && e.result?.isError).length;
     // Nothing in flight takes over the summary, a running tool included: it counts the moment it
     // starts, so the line only ever grows ("Read 5 files" → "Read 6 files"), and what is happening
-    // right now is said once, by the status row below (see statusSpec).
+    // right now is said once, by the status line in the dock above the composer (see statusSpec).
     const label = escapeHtml(groupLabel(entries));
     const head = `<span class="work-label">${label}</span>` +
       (failed ? `<span class="work-failed">· ${failed} failed</span>` : "") +
@@ -1433,7 +1443,7 @@ window.chatShownArtifacts = () => {
 };
 
 /* ---------- live tail patching ----------
-   The tail (the pending tool message, the streaming partial, the queue) used to be thrown away
+   The tail (the pending tool message, the streaming partial) used to be thrown away
    and re-parsed from innerHTML on every update, several times a second, even though only the
    last block of it had changed. It is now a list of slots, each remembering the html it last
    produced for every block; a block whose html is unchanged keeps its node (and with it its
@@ -1578,7 +1588,9 @@ function stampAnimPhase() {
   const phase = (Math.round(performance.now() / 1000 / ANIM_PHASE_STEP) * ANIM_PHASE_STEP).toFixed(2);
   if (phase === lastPhase) return;
   lastPhase = phase;
+  // The dock is not inside the list, so it inherits nothing from it: the shimmer needs its own.
   messagesEl.style.setProperty("--anim-phase", `${phase}s`);
+  dockEl.style.setProperty("--anim-phase", `${phase}s`);
 }
 
 /** The bodies about to be replaced hold the only live copy of their offsets — including a
@@ -1709,25 +1721,47 @@ const RUNNING_VERBS = {
 };
 
 /**
- * The one status row under a busy run. It keeps a single key for the whole run, so a change of
- * phase rewrites the row in place: removing it and adding another a moment later shrank the list
- * by a row in between, which a reader at the bottom saw as a jump. Only answer text streaming in
- * replaces it, because by then the text itself shows the run is alive.
+ * The one status line under a busy run, in the dock above the composer. It is shown for the whole
+ * run, answer text included, so the dock only changes height when a run starts or ends or the
+ * queue changes. Collapsing it while text streamed shrank the composer, and the list's bottom
+ * padding with it, which made a reader at the bottom jolt.
  *
  * The clock is always the run's. Timing each phase on its own made the number leap about
  * ("Thinking… 3s", then "Working… 34s") as the label changed under it.
  */
 function statusSpec(view, activeItem) {
   const blocks = view.live?.blocks;
-  if (blocks?.length && blocks[blocks.length - 1].type === "text") return null;
+  const writing = blocks?.length && blocks[blocks.length - 1].type === "text";
   const entries = activeItem?.entries ?? [];
   const last = entries[entries.length - 1];
   const runningTool = [...entries].reverse().find((e) => e.type === "tool" && !e.result);
-  const label = last?.type === "thinking" && last.streaming ? "Thinking"
+  const label = writing ? "Writing"
+    : last?.type === "thinking" && last.streaming ? "Thinking"
     : runningTool ? RUNNING_VERBS[runningTool.call?.name] || "Working"
     : "Working";
   const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";
-  return { key: "status", html: `<div class="message assistant thinking"><div class="message-content"><span class="shimmer">${label}…</span>${since}</div></div>` };
+  return `<div class="dock-status"><span class="shimmer">${label}…</span>${since}</div>`;
+}
+
+/** The live clock span, which changes every second and so is left out of the dock's change key. */
+const LIVE_DUR_RE = /<span class="dur dur-live"[^>]*>[^<]*<\/span>/;
+
+/** Fills the dock with the status line and the queued messages. It runs every frame while a run
+ *  streams, so it rewrites the dock only when something other than the clock changed: a rewrite
+ *  restarts the shimmer. The clock is ticked in place by tickDurations. Returns the dock's html. */
+function renderDock(view, activeItem) {
+  const status = view.busy ? statusSpec(view, activeItem) : null;
+  const queue = view.queue || [];
+  const queued = queue.map((q) => `<div class="dock-queued">${iconTag("clock", 12, "dim")}<span class="dock-queued-text">${escapeHtml(q.text)}</span></div>`);
+  const html = (status || "") + queued.join("");
+  const key = `${(status || "").replace(LIVE_DUR_RE, "")}|${view.runStartedAt ?? ""}|${JSON.stringify(queue.map((q) => q.text))}`;
+  if (key !== lastDockKey) {
+    lastDockKey = key;
+    dockEl.innerHTML = html;
+  }
+  dockEl.hidden = !html;
+  tickDurations(dockEl);
+  return html;
 }
 
 /** Group numbering where history stops, so the tail's groups continue it (see makeFlow). */
@@ -1791,13 +1825,9 @@ function renderMessages(view, sessionId) {
   const lastItem = items[items.length - 1];
   const activeItem = view.busy && lastItem?.kind === "group" ? lastItem : null;
   const tailSpecs = itemSpecs(items, sessionId);
-  const status = view.busy ? statusSpec(view, activeItem) : null;
-  if (status) tailSpecs.push(status);
-
-  (view.queue || []).forEach((q, n) => {
-    tailSpecs.push({ key: `q${n}`, html: `<div class="message user queued"><div class="message-content">${escapeHtml(q.text)}</div><div class="message-meta">${iconTag("clock", 12, "dim")} queued · sends after the current step</div></div>` });
-  });
-  if (!historyHasContent && !tailSpecs.length) {
+  // Status and queue are in the dock, not the list, so the empty hint waits for both to be empty.
+  const dockHtml = renderDock(view, activeItem);
+  if (!historyHasContent && !tailSpecs.length && !dockHtml) {
     tailSpecs.push({ key: "empty", html: '<p class="description empty">Give the agent a task. It can read, write and edit its own UI and files, and run commands.</p>' });
   }
   const created = patchList(dynamicEl, tailSpecs, tailState);
@@ -1911,6 +1941,9 @@ function renderNow() {
     historyHasContent = false;
     historyEl.replaceChildren();
     dynamicEl.replaceChildren();
+    lastDockKey = null;
+    dockEl.replaceChildren();
+    dockEl.hidden = true;
     tailState.slots = [];
     historyState.slots = [];
     historyEnd = { userId: "0", n: 0 };
