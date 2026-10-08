@@ -2134,16 +2134,7 @@ html[data-mode="light"] .shimmer {
 
 .attachment-remove:active { transform: scale(0.92); }
 
-.queue-bar {
-  padding: 0 14px 6px;
-  font-size: 0.72rem;
-  color: var(--warn);
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
 
-.queue-bar[hidden] { display: none; }
 
 /* The dock: the live status line and the queued messages, fixed above the composer card. Quiet
    chrome, not a card. Display-only, so it passes drags through to the list behind it. */

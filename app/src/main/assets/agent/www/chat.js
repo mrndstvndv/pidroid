@@ -25,7 +25,7 @@ messagesEl.replaceChildren(contentEl);
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const sendBtn = document.getElementById("send-btn");
-const queueBar = document.getElementById("queue-bar");
+
 // Status and queued messages live here, outside the list, so a line added under streaming text
 // does not move them. It sits above the composer card, which the list already reserves room for.
 const dockEl = document.getElementById("chat-dock");
@@ -43,7 +43,7 @@ const userClosed = new Set();
 
 let payload = null;
 let lastModel = "";
-let lastQueueCount = -1;
+
 let lastDockKey = null;
 let frame = 0;
 let renderedSessionId = null;
@@ -2150,17 +2150,7 @@ document.addEventListener("click", (e) => {
 function renderControls(data) {
   const view = data.view;
   updateComposerAction();
-  const queueCount = view.queue.length;
-  if (queueCount) {
-    queueBar.hidden = false;
-    if (queueCount !== lastQueueCount) {
-      queueBar.innerHTML = `${iconTag("clock", 13)} ${queueCount} message${queueCount > 1 ? "s" : ""} queued`;
-      lastQueueCount = queueCount;
-    }
-  } else {
-    queueBar.hidden = true;
-    lastQueueCount = 0;
-  }
+  
 
   const { levels, current } = data.thinking;
   const effort = levels.length < 2 ? "" : effortLabel(current);
