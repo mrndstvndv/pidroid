@@ -28,7 +28,7 @@
  * tar runs as a child process and is awaited, so the caller's event loop is not blocked.
  */
 
-import { readdir, mkdir, copyFile, writeFile, rm } from "node:fs/promises";
+import { readdir, mkdir, copyFile, writeFile, rm, rmdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
 /** The agent directory: the parent of this file (bundles.ts lives beside extensions/). */
@@ -59,8 +59,21 @@ export const SKIP_DIRS = new Set([
   "uploads",
 ]);
 
-/** Files never included: credentials, installed-state markers, the shipped hash map. */
-export const SKIP_FILES = new Set(["auth.json", "auth.json.tmp", ".installed_version", ".shipped_manifest.json"]);
+/**
+ * Files never included: credentials, installed-state markers, the shipped hash map.
+ *
+ * The last three are installer and runtime state, like .installed_version: the app regenerates
+ * them, so they are not the agent's work. changes.ts ignores the same names for the same reason.
+ */
+export const SKIP_FILES = new Set([
+  "auth.json",
+  "auth.json.tmp",
+  ".installed_version",
+  ".shipped_manifest.json",
+  ".install_stamp",
+  "pidroid-models.json",
+  "pidroid-models.json.tmp",
+]);
 
 /** Session/history databases and their write-ahead logs. */
 export const SKIP_SUFFIXES = [".sqlite", ".sqlite-shm", ".sqlite-wal"];
@@ -181,7 +194,7 @@ export async function writeBundle(name?: string): Promise<BundleResult> {
           generatedAt: new Date().toISOString(),
           agentDir: AGENT_DIR,
           baseline: ".shipped_manifest.json (sha256 map of the app's shipped files)",
-          counts: { included: selected.length, modified, notShipped: added, deleted: 0 },
+          counts: { included: selected.length, modified, notShipped: added, deleted: records.filter((r) => r.status === "deleted").length },
           note: "Full source snapshot of the agent's files, without the uploads/ directory.",
           statusLegend: {
             modified: "hash differs from the shipped baseline",
@@ -198,7 +211,7 @@ export async function writeBundle(name?: string): Promise<BundleResult> {
             "generated bundles",
             "uploads/ (images attached to chat sessions)",
           ],
-          files: selected.sort((a, b) => a.path.localeCompare(b.path)),
+          files: records.sort((a, b) => a.path.localeCompare(b.path)),
           unstableDuringCopy: unstable,
         },
         null,
@@ -216,7 +229,7 @@ export async function writeBundle(name?: string): Promise<BundleResult> {
     const err = await new Response(proc.stderr).text();
     if (code !== 0) throw new Error(`tar exited ${code}: ${err.trim() || "no stderr"}`);
 
-    const size = (await Bun.file(outPath).arrayBuffer()).byteLength;
+    const size = Bun.file(outPath).size;
     return {
       path: outPath,
       bytes: size,
@@ -236,6 +249,14 @@ export async function writeBundle(name?: string): Promise<BundleResult> {
       ],
     };
   } finally {
-    await rm(join(AGENT_DIR, ".bundle-staging"), { recursive: true, force: true });
+    // Remove only this run's stage: a concurrent export may be copying into a sibling stage under
+    // the same parent right now. The parent goes only if it is empty; rmdir refuses otherwise.
+    await rm(stage, { recursive: true, force: true });
+    try {
+      await rmdir(join(AGENT_DIR, ".bundle-staging"));
+    } catch {
+      // Housekeeping only: a non-empty parent (another export is running) or a missing one is
+      // fine, and a throw here must not replace the export's result or tar's real error.
+    }
   }
 }

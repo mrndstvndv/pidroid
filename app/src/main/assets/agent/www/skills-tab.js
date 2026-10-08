@@ -9,7 +9,9 @@ function escapeSkillHtml(value) {
 
 function renderSkills(data) {
   if (skillsLocation) {
-    skillsLocation.innerHTML = `${iconTag("folder", 14, "dim")} <span>Shared skills folder</span> <code>${escapeSkillHtml(data.directory)}</code>`;
+    // The label must stay on one line on a phone; the full path goes in a tooltip because the
+    // visible path is truncated.
+    skillsLocation.innerHTML = `${iconTag("folder", 14, "dim")} <span class="skills-location-label">Shared skills folder</span> <code title="${escapeSkillHtml(data.directory)}">${escapeSkillHtml(data.directory)}</code>`;
   }
 
   const skills = Array.isArray(data.skills) ? data.skills : [];

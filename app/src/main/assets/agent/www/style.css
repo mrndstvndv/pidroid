@@ -956,6 +956,11 @@ textarea {
   white-space: nowrap;
   color: var(--text-muted);
 }
+/* Keep the label on one line; the path is what gives way when the row is narrow. */
+.skills-location-label {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 .skills-list {
   display: flex;
   flex-direction: column;

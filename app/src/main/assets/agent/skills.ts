@@ -16,13 +16,27 @@ const MAX_DESCRIPTION_LENGTH = 1024;
 const MAX_SCAN_DEPTH = 6;
 const MAX_SCAN_DIRECTORIES = 2000;
 
-mkdirSync(SKILLS_DIR, { recursive: true });
+// server.ts imports this module, so a failed mkdir here must not stop the server from starting.
+// discoverSkills already returns an empty list when the folder is missing.
+try {
+  mkdirSync(SKILLS_DIR, { recursive: true });
+} catch (error) {
+  console.warn(`[pidroid] could not create skills folder ${SKILLS_DIR}: ${error instanceof Error ? error.message : String(error)}`);
+}
 
 interface SkillMetadata {
   name: string;
   description: string;
   location: string;
 }
+
+/**
+ * Parsed results keyed by SKILL.md path. The prompt re-scans skills on every model request, and
+ * reading and parsing every file each time is wasted work when almost nothing has changed. A file
+ * is re-parsed only when its mtime or size moves; the directory scan still runs every time, so new
+ * skills are picked up without a restart. Invalid files are cached too (as undefined).
+ */
+const metadataCache = new Map<string, { mtimeMs: number; size: number; result: SkillMetadata | undefined }>();
 
 const reported = new Set<string>();
 
@@ -43,9 +57,24 @@ function escapeXml(value: string): string {
 }
 
 function metadataFrom(filePath: string, folderName: string): SkillMetadata | undefined {
+  let stats;
+  try {
+    stats = statSync(filePath);
+  } catch (error) {
+    warnOnce(filePath, `could not read SKILL.md: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+  const cached = metadataCache.get(filePath);
+  if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) return cached.result;
+
+  const result = parseSkillFile(filePath, folderName, stats.size);
+  metadataCache.set(filePath, { mtimeMs: stats.mtimeMs, size: stats.size, result });
+  return result;
+}
+
+function parseSkillFile(filePath: string, folderName: string, size: number): SkillMetadata | undefined {
   let raw: string;
   try {
-    const size = statSync(filePath).size;
     if (size > MAX_SKILL_FILE_BYTES) {
       warnOnce(filePath, `SKILL.md is larger than ${MAX_SKILL_FILE_BYTES} bytes; skipping`);
       return undefined;
@@ -123,8 +152,12 @@ export function discoverSkills(root = SKILLS_DIR): SkillMetadata[] {
       return;
     }
 
+    // A SKILL.md at the root would otherwise claim the whole tree and hide every real skill, so
+    // the root is never a skill. Its children are still scanned below.
     const skillEntry = entries.find((entry) => entry.name === "SKILL.md" && entry.isFile());
-    if (skillEntry) {
+    if (skillEntry && depth === 0) {
+      warnOnce(join(directory, skillEntry.name), "SKILL.md directly in the skills folder is ignored; put each skill in its own folder");
+    } else if (skillEntry) {
       const skillFile = join(directory, skillEntry.name);
       const skill = metadataFrom(skillFile, directory.split(/[\\/]/).pop() ?? directory);
       if (skill) {
