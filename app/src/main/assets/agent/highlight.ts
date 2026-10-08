@@ -229,7 +229,64 @@ function toLines(tokens: Token[][]): HighlightLine[] {
  * not shipped, the input is too large, or anything at all goes wrong -- callers fall back to
  * plain escaped text, which is exactly what they did before highlighting existed.
  */
-export async function highlight(code: string, lang: string): Promise<HighlightResult | null> {
+/**
+ * Fence tag -> language, for code blocks embedded in Markdown. Keys are lowercased and looked up
+ * after stripping anything after the first space or brace, so ```ts title="x" lands on `ts`.
+ *
+ * `js` maps to typescript on purpose: same grammar, and Shiki's javascript grammar is a re-export
+ * of it anyway. A tag we do not ship (```rs, ```go) simply keeps the flat Markdown colour.
+ */
+const FENCE_LANG: Record<string, string> = {
+  ts: "typescript", typescript: "typescript", tsx: "typescript",
+  js: "typescript", javascript: "typescript", mjs: "typescript", node: "typescript",
+  json: "json", jsonc: "json",
+  html: "html", xml: "html", svg: "html",
+  css: "css", scss: "css",
+  md: "markdown", markdown: "markdown",
+  py: "python", python: "python",
+  sh: "shell", bash: "shell", shell: "shell", zsh: "shell", console: "shell", terminal: "shell",
+  diff: "diff", patch: "diff",
+  yaml: "yaml", yml: "yaml",
+};
+
+/**
+ * Replace the contents of fenced code blocks with the *fenced language's* tokens.
+ *
+ * Without this a Markdown file highlights uniformly but badly: the Markdown grammar scopes a whole
+ * fence as `markup.fenced_code`, so every line inside comes out one flat colour. The fence tag is
+ * the only place a document states what its embedded code is, so this is the one place it can be
+ * honoured. Lines are spliced one-for-one, which keeps the line numbering of the document intact.
+ */
+async function spliceFences(code: string, lines: HighlightLine[], depth: number): Promise<HighlightLine[]> {
+  const src = code.split("\n");
+  const out = lines.slice();
+  let i = 0;
+  while (i < src.length) {
+    const open = /^(\s*)(`{3,}|~{3,})\s*([A-Za-z0-9_+#.-]*)/.exec(src[i]);
+    if (!open) { i++; continue; }
+    const fence = open[2];
+    const close = new RegExp(`^\\s*${fence[0] === "`" ? "`" : "~"}{${fence.length},}\\s*$`);
+    let j = i + 1;
+    while (j < src.length && !close.test(src[j])) j++;
+    const lang = FENCE_LANG[open[3].toLowerCase()];
+    const inner = src.slice(i + 1, j);
+    if (lang && depth < 2 && inner.length) {
+      const body = inner.join("\n");
+      if (body.trim() && body.length <= MAX_HIGHLIGHT_BYTES) {
+        const lit = await highlight(body, lang, depth + 1);
+        if (lit) {
+          for (let k = 0; k < Math.min(lit.lines.length, inner.length); k++) {
+            out[i + 1 + k] = { n: i + 2 + k, text: inner[k], html: lit.lines[k].html };
+          }
+        }
+      }
+    }
+    i = j + 1;
+  }
+  return out;
+}
+
+export async function highlight(code: string, lang: string, depth = 0): Promise<HighlightResult | null> {
   if (code.length > MAX_HIGHLIGHT_BYTES || isCompact(code)) return null;
   let hl: Highlighter;
   try {
@@ -251,7 +308,10 @@ export async function highlight(code: string, lang: string): Promise<HighlightRe
     if (cache.size > 64) cache.clear();
     cache.set(code, tokens);
   }
-  return { lang, lines: toLines(tokens) };
+  const lines = toLines(tokens);
+  // Markdown is the one language that contains other languages; honour their fence tags.
+  if (lang === "markdown" && depth < 2) return { lang, lines: await spliceFences(code, lines, depth) };
+  return { lang, lines };
 }
 
 /** Work out the language from a path and highlight in one call. Always returns a promise, even
