@@ -184,20 +184,21 @@ async function openPreview(path) {
   if (!modal || !body) return;
 
   title.textContent = path;
-  body.innerHTML = "<p>Loading...</p>";
   modal.hidden = false;
 
-  try {
-    const data = await fetch(`/api/files/read?path=${encodeURIComponent(path)}`).then((r) => r.json());
-    if (previewPath !== path) return; // a second tap landed while this one was in flight
-    if (data.error) {
-      body.innerHTML = `<p class="files-empty">${escapeHtml(data.error)}</p>`;
-      return;
-    }
-    body.innerHTML = `<pre class="file-preview">${escapeHtml(data.content)}</pre>`;
-  } catch (e) {
-    body.innerHTML = `<p class="files-empty">Could not read the file: ${escapeHtml(String(e.message || e))}</p>`;
-  }
+  // Shared code surface (code-view.js): loading state, syntax colouring when the server recognises
+  // the language, plain escaped text when it does not, and a guard against a slow load landing
+  // after the user has already opened a different file.
+  const pre = document.createElement("pre");
+  body.replaceChildren(pre);
+  await window.CodeView.load(pre, {
+    highlightUrl: `/api/files/read?path=${encodeURIComponent(path)}`,
+    url: `/api/files/read?path=${encodeURIComponent(path)}`,
+    stillCurrent: () => previewPath === path,
+    errorLabel: "Could not read the file",
+  });
+  // Keep the modal's own chrome: the code block brings its own className, so re-apply the frame.
+  pre.classList.add("file-preview");
 }
 
 function closePreview() {

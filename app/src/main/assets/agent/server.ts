@@ -28,6 +28,7 @@ import { FileCredentialStore, LoginManager } from "./auth.ts";
 import { bridgeAvailable, bridgeCall } from "./bridge.ts";
 import { Changes } from "./changes.ts";
 import { showTool } from "./artifacts.ts";
+import { assemble, foldContext } from "./diffrows.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
 import { ChatViewBuilder, clampLevel, liveDelta, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
@@ -1976,7 +1977,16 @@ const server = Bun.serve({
         }).catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
       if (action === "files" && req.method === "GET") return respond(changes.files(oid).then(files => ({ files })));
       if (action === "diff" && req.method === "GET") {
-        return respond(changes.diff(oid, url.searchParams.get("path") ?? "").then(diff => ({ diff })));
+        return respond(
+          changes.diff(oid, url.searchParams.get("path") ?? "").then((d) => {
+            // The rows are the patch laid out one per line, with the +/- counts; the viewer colours
+            // them by kind. Long unchanged runs are folded here so a one-line change in a big file
+            // does not ship the whole file. Each placeholder keeps the rows it stands for, so
+            // expanding it in the viewer needs no second request.
+            const { rows, added, removed } = assemble(d.patch, null, null);
+            return { patch: d.patch, binary: !!d.binary, tooLarge: !!d.tooLarge, lang: null, rows: foldContext(rows, 3, 6), added, removed };
+          }),
+        );
       }
       if (action === "undo" && req.method === "POST") return respond(changes.undo(oid));
       if (action === "restore" && req.method === "POST") return respond(changes.restore(oid));

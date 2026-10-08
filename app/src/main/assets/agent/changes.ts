@@ -18,6 +18,16 @@ import { join } from "node:path";
 
 export type ChangeKind = "init" | "external" | "edits" | "turn" | "undo";
 
+/** One file's change in one commit. The flags are set for binary and oversized files. */
+export interface FileDiff {
+  patch: string;
+  binary?: boolean;
+  tooLarge?: boolean;
+}
+
+const BINARY_NOTE = "(binary file)";
+const TOO_LARGE_NOTE = "(file too large to diff)";
+
 export interface ChangeEntry {
   oid: string;
   kind: ChangeKind;
@@ -149,14 +159,18 @@ export class Changes {
     }
   }
 
-  /** Unified diff of one file in one commit. */
-  diff(oid: string, filepath: string): Promise<string> {
+  /** A file's diff in one commit, as a unified patch with every line of context. */
+  diff(oid: string, filepath: string): Promise<FileDiff> {
     return this.run(async () => {
       const [before, after] = await Promise.all([this.blobAt(await this.parentOf(oid), filepath), this.blobAt(oid, filepath)]);
-      if ((before && isBinary(before)) || (after && isBinary(after))) return "(binary file)";
-      if ((before?.length ?? 0) > MAX_DIFF_BYTES || (after?.length ?? 0) > MAX_DIFF_BYTES) return "(file too large to diff)";
+      if ((before && isBinary(before)) || (after && isBinary(after))) return { patch: BINARY_NOTE, binary: true };
+      if ((before?.length ?? 0) > MAX_DIFF_BYTES || (after?.length ?? 0) > MAX_DIFF_BYTES) return { patch: TOO_LARGE_NOTE, tooLarge: true };
       const text = (bytes?: Uint8Array) => (bytes ? Buffer.from(bytes).toString("utf8") : "");
-      return createTwoFilesPatch(`a/${filepath}`, `b/${filepath}`, text(before), text(after), "", "", { context: 3 });
+      // Full-file context, deliberately. With 3 lines of context an unchanged run can never be longer
+      // than the gap between two nearby changes, so there is nothing for the viewer to fold. Emitting
+      // everything and folding afterwards (diffrows.foldContext, keep 3) keeps the 3-line margin
+      // around each change and adds a placeholder for whatever was skipped.
+      return { patch: createTwoFilesPatch(`a/${filepath}`, `b/${filepath}`, text(before), text(after), "", "", { context: Number.MAX_SAFE_INTEGER }) };
     });
   }
 

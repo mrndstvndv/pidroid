@@ -211,6 +211,7 @@ async function showFile(node, mode) {
   viewer.hidden = false;
   sourceBtn.hidden = !toggleable;
   title.textContent = node.name;
+  window.CodeView.syncWrapButton(wrapBtn);
 
   const url = fileUrl(node);
 
@@ -238,21 +239,11 @@ async function showFile(node, mode) {
     viewer.innerHTML = `<p class="description artifacts-empty">${esc(node.name)} (${formatBytes(node.size)}) has no inline preview.</p>`;
     return;
   }
-  viewer.innerHTML = `<p class="description artifacts-empty">Loading...</p>`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(res.statusText);
-    const text = await res.text();
-    if (openFile?.node !== node) return; // navigated away while loading
-    if (text.slice(0, 4096).includes("\u0000")) {
-      viewer.innerHTML = `<p class="description artifacts-empty">Binary file, no preview.</p>`;
-      return;
-    }
-    viewer.innerHTML = `<pre class="artifact-source"></pre>`;
-    viewer.firstChild.textContent = text;
-  } catch (err) {
-    viewer.innerHTML = `<p class="description artifacts-empty">Could not open file: ${esc(err.message || err)}</p>`;
-  }
+  viewer.innerHTML = `<pre class="artifact-source code-block"></pre>`;
+  await window.CodeView.load(viewer.firstChild, {
+    url,
+    stillCurrent: () => openFile?.node === node, // navigated away while tokenising
+  });
 }
 
 function closeFile() {
@@ -263,6 +254,19 @@ function closeFile() {
   sourceBtn.hidden = true;
   renderList();
 }
+
+const wrapBtn = document.getElementById("artifacts-wrap-btn");
+
+wrapBtn.addEventListener("click", () => {
+  // Only meaningful while a file is open; the preference itself is stored by CodeView.
+  if (!openFile) return;
+  const on = window.CodeView.toggleWrap();
+  window.CodeView.syncWrapButton(wrapBtn);
+  wrapBtn.setAttribute("aria-pressed", String(on));
+});
+
+// Reflect the stored preference on load, and whenever a file is opened.
+window.CodeView.syncWrapButton(wrapBtn);
 
 sourceBtn.addEventListener("click", () => {
   if (!openFile) return;

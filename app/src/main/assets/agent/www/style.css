@@ -1,4 +1,5 @@
 :root {
+  --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", "Roboto Mono", "Droid Sans Mono", Menlo, Consolas, monospace;
   --bg-primary: #000000;
   --bg-secondary: #000000;
   --bg-card: #000000;
@@ -17,6 +18,12 @@
   --accent-text: #a5b4fc;
   --accent-text-strong: #c7d2fe;
   --accent-edge: #2b2b52;
+  /* A ring that stays visible when --accent is close to --bg-primary (the floating
+     jump-to-latest button on a flat preset). Recomputed in theme.js from --accent. */
+  --accent-ring: #2b2b52;
+  /* Foreground for text sitting on a solid --accent fill (the user bubble, primary buttons).
+     Recomputed in theme.js whenever --accent changes: a light accent needs dark text. */
+  --on-accent: #ffffff;
   /* On black these have to be lighter than the light-mode pair, or they vanish. */
   --danger-text: #f87171;
   --warn: #fbbf24;
@@ -40,6 +47,8 @@ html[data-mode="light"] {
   --accent-text: #4338ca;
   --accent-text-strong: #3730a3;
   --accent-edge: #c7d2fe;
+  --accent-ring: #c7d2fe;
+  --on-accent: #ffffff;
   --danger-text: #dc2626;
   --warn: #b45309;
   --text-muted: #6b7280;
@@ -471,19 +480,28 @@ body {
   place-items: center;
   width: 44px;
   height: 44px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--accent-ring);
   border-radius: 50%;
-  background: var(--bg-card);
+  /* Translucent so the blur above it has something to actually frost: a solid fill would
+     hide the messages scrolling underneath and leave backdrop-filter doing nothing. */
+  background: color-mix(in srgb, var(--bg-card) 72%, transparent);
   color: var(--accent-text);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
   cursor: pointer;
   touch-action: none;
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  backdrop-filter: blur(12px) saturate(160%);
 }
 
 .chat-jump-bottom[hidden] {
   display: none;
+}
+
+/* Theme > Effects: frosted backdrops off means solid chrome, here as everywhere else. */
+html[data-blur="off"] .chat-jump-bottom {
+  background: var(--bg-card);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .chat-jump-bottom:active {
@@ -511,16 +529,18 @@ body {
 .message.user {
   align-self: flex-end;
   background-color: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 
+/* Sized like the work lines it sits under (details.work), so a turn's "Worked" reads as one of
+   them rather than as a footnote on the answer. */
 .message-meta {
-  font-size: 0.7rem;
+  font-size: 0.85rem;
   color: var(--text-secondary);
-  margin-top: 4px;
+  margin-top: 6px;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
 }
 
 .message.model-event {
@@ -736,7 +756,7 @@ body {
   background-color: var(--bg-primary);
   border: 1px solid var(--border);
   border-radius: 8px;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 0.72rem;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -878,7 +898,7 @@ textarea {
 
 .btn-primary {
   background-color: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 
 .btn-secondary {
@@ -1073,7 +1093,7 @@ textarea {
   margin-bottom: 10px;
   border-radius: 8px;
   background-color: var(--accent);
-  color: white;
+  color: var(--on-accent);
   text-align: center;
   font-weight: 600;
   text-decoration: none;
@@ -1945,7 +1965,9 @@ details.work > summary.work-head {
   transition: transform 0.15s ease;
 }
 
-details.work[open] > summary .work-chev { transform: rotate(90deg); }
+/* The chevron follows the state the fold is heading for (data-want-open), not the attribute the
+   tween has not flipped yet, so the arrow and the rows move together. */
+details.work[data-want-open="1"] > summary .work-chev { transform: rotate(90deg); }
 
 .work-body {
   display: flex;
@@ -2141,7 +2163,7 @@ details.work[open] > summary .work-chev { transform: rotate(90deg); }
   width: 100%;
   border: none;
   border-top: 1px solid var(--border);
-  background: #fff;
+  background: var(--bg-primary); /* as .artifact-frame: the card's canvas, not a white plate */
 }
 
 .message.queued {
@@ -3058,9 +3080,13 @@ html[data-blur="off"] .sidebar-scrim {
 .artifact-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .artifact-size { flex: none; font-size: 0.72rem; color: var(--text-secondary); }
 .artifacts-viewer { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
-.artifact-frame { flex: 1; width: 100%; border: none; background: #fff; }
+/* The frame's own background is the canvas the previewed document paints onto: a document that
+   sets its own background covers it, one that does not inherits it. It used to be hardcoded #fff,
+   which is what the browser showed between creating the iframe and the page's first paint -- a
+   white flash on every open, in the light theme and in the dark one alike. */
+.artifact-frame { flex: 1; width: 100%; border: none; background: var(--bg-primary); }
 /* The markdown viewer paints itself with the app's own colours (it is handed the theme variables),
-   so the white preview background would only show as a flash before the document loads. */
+   so it matches this either way; the class stays as the hook the viewer keys off. */
 .artifact-md-frame { background: var(--bg-primary); }
 .artifact-image { flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 12px; }
 .artifact-image img { max-width: 100%; max-height: 100%; object-fit: contain; }
@@ -3077,6 +3103,177 @@ html[data-blur="off"] .sidebar-scrim {
   tab-size: 2;
 }
 
+/* ---------- code surface (code-view.js) ----------
+   One row per line: a sticky gutter number and the line's content. The gutter is sticky so the
+   numbers stay put while a long line scrolls horizontally, which is the whole reason for numbering
+   them; that only works if the row is a block and the number is an inline-block inside it. */
+
+.code-block {
+  margin: 0;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  tab-size: 2;
+  color: var(--text-primary);
+  white-space: pre;
+  -webkit-text-size-adjust: none;
+}
+
+/* Soft wrap is for reading prose-y files on a narrow screen; the default stays `pre` so code keeps
+   its shape and the gutter stays meaningful. */
+.code-block.is-wrapped {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.code-row {
+  display: block;
+  min-height: 1lh;
+}
+
+.code-ln {
+  display: inline-block;
+  width: 3.5ch;
+  margin-right: 1.25ch;
+  text-align: right;
+  color: var(--text-secondary);
+  opacity: 0.45;
+  font-variant-numeric: tabular-nums;
+  -webkit-user-select: none;
+  user-select: none;
+  position: sticky;
+  left: 0;
+  background: var(--bg-primary);
+}
+
+.code-block.is-wrapped .code-ln {
+  /* A wrapped line's number should travel with its first row of text, not pin to the viewport. */
+  position: static;
+}
+
+.code-status {
+  margin: 0;
+  padding: 12px 16px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.code-status.is-error {
+  color: #f87171;
+}
+
+/* Toggle buttons that reflect a sticky preference (e.g. soft wrap) read as "on" when active. */
+.icon-btn.is-active {
+  color: var(--accent);
+  background: var(--bg-card);
+}
+
+/* ---------- diff rows ----------
+   Two gutters (old then new line number) and a change marker, so a row reads unambiguously as
+   "this was line 12, it is now line 13". The marker and gutters are dimmed on context lines, which
+   is what makes a changed block findable by scrolling rather than by reading. */
+
+.code-block .code-ln-pair {
+  width: auto;
+  margin-right: 0.5ch;
+  display: inline-flex;
+  gap: 0.75ch;
+  justify-content: flex-end;
+}
+
+.code-ln-pair .is-old,
+.code-ln-pair .is-new {
+  min-width: 3ch;
+  text-align: right;
+}
+
+/* Tool previews show one number per row. The shared gutter is sized for the Changes tab's wider
+   layout, which left a wide empty band before the code here; size it to the digits instead. */
+.tool-diff .code-ln {
+  width: auto;
+  min-width: 2.5ch;
+  margin-right: 1ch;
+}
+
+.tool-diff .code-mk {
+  width: 1ch;
+}
+
+.code-mk {
+  display: inline-block;
+  width: 1.5ch;
+  text-align: center;
+  opacity: 0.7;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.code-row.is-add {
+  background: rgba(63, 185, 80, 0.12);
+}
+
+.code-row.is-add .code-mk {
+  color: #3fb950;
+  opacity: 1;
+}
+
+.code-row.is-del {
+  background: rgba(248, 81, 73, 0.12);
+}
+
+.code-row.is-del .code-mk {
+  color: #f85149;
+  opacity: 1;
+}
+
+.code-row.is-ctx .code-ln,
+.code-row.is-ctx .code-mk {
+  opacity: 0.28;
+}
+
+.code-row.is-meta {
+  color: var(--text-secondary);
+  background: var(--bg-inset, #0a0a0a);
+}
+
+.code-row.is-meta .code-lc {
+  font-size: 0.92em;
+}
+
+/* A fold placeholder is a real button so it is reachable by keyboard and announced as tappable. */
+.code-fold {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+  background: var(--bg-inset, #0a0a0a);
+  color: var(--text-secondary);
+  font: inherit;
+  text-align: left;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.code-fold .code-lc {
+  font-size: 0.92em;
+  opacity: 0.8;
+}
+
+.change-file-stat {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 0.8em;
+}
+
+.change-file > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 html[data-mode="light"] { color-scheme: light; }
 
 /* Mode switch (Theme > Appearance) */
@@ -3091,7 +3288,7 @@ html[data-mode="light"] { color-scheme: light; }
   cursor: pointer;
 }
 .mode-seg button + button { border-left: 1px solid var(--border); }
-.mode-seg button.selected { background: var(--accent); color: #fff; }
+.mode-seg button.selected { background: var(--accent); color: var(--on-accent); }
 
 /* Errors reported by an HTML preview: a bottom sheet of selectable, scrollable text. */
 .artifact-errors {
