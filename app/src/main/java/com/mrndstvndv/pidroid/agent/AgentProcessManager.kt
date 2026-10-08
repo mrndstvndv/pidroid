@@ -243,11 +243,12 @@ object AgentProcessManager {
     /**
      * Command-line tools the agent's shell (and pi-env) expect by name. Android only lets an app execute files from its
      * native library directory, where they live as lib*.so (libbun.so is the complete Bun CLI; libopenssh_*.so is
-     * OpenSSH). Link them under their real names into filesDir/bin, which the caller puts on PATH. The link target
-     * moves with every install, so the links are recreated on each start. Returns that directory, or null if no tool
-     * could be linked.
+     * OpenSSH; libgrep.so is GNU grep). Link them under their real names into filesDir/bin, which the caller puts on
+     * PATH. The link target moves with every install, so the links are recreated on each start. Returns that directory,
+     * or null if no tool could be linked.
      *
-     * `bunx` is the same binary: Bun switches to its `x` mode when started under that name.
+     * `bunx` is the same binary: Bun switches to its `x` mode when started under that name. `egrep` and `fgrep` are
+     * libgrep.so too: grep switches to -E or -F when started under that name.
      */
     private fun prepareTools(context: Context): String? {
         val nativeDir = File(context.applicationInfo.nativeLibraryDir)
@@ -257,6 +258,9 @@ object AgentProcessManager {
             "bunx" to "libbun.so",
             "ssh" to "libopenssh_ssh.so",
             "ssh-keygen" to "libopenssh_keygen.so",
+            "grep" to "libgrep.so",
+            "egrep" to "libgrep.so",
+            "fgrep" to "libgrep.so",
         )
         var linked = 0
         for ((name, lib) in tools) {

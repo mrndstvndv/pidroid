@@ -1,0 +1,8 @@
+# Inputs (Termux apt, aarch64; gnu.org) and outputs (jniLibs/arm64-v8a); regenerate with build.py
+input  grep 3.12-3 sha256=a2819b49c621b61567e39c5c647d5ed6fe9d51eab71ed73eebf18be76719457d
+input  pcre2 10.49 sha256=c27995e5f52b8ecc9b8b3e662eb08e49f82a18bfd3f34343936acc7b23964724
+input  libandroid-support 29-1 sha256=f2f145d6135ad4843ac9670153be3e3944dc1e6f1736d46d2306c28f2b86f517
+input  gpl-3.0.txt sha256=3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
+output libandroid-support.so sha256=b85cf4366fa2f2babbba65919aaaeaddd9d06c8f760e94d926e1de473f975b76
+output libgrep.so sha256=a8c3e1e22e6322d774f01aa06b7ade62644bbea6f3d1cb5289caac1cb3802840
+output libpcre2-8.so sha256=c377920ae65a2459379855f436d0fa794840e87f04102696998336b7134727b7
