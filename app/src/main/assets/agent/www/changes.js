@@ -76,7 +76,7 @@ function diffRowHtml(r, index) {
 }
 
 function paintDiff(pre) {
-  window.CodeView.surface(pre, { wrap: window.CodeView.prefersWrap(), highlighted: false });
+  window.CodeView.surface(pre, { wrap: window.CodeView.prefersWrap(), highlighted: true });
   pre.innerHTML = pre._rows.map(diffRowHtml).join("");
 }
 

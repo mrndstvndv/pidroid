@@ -635,28 +635,115 @@ const DIFF_MARK = { 0: "-", 1: " ", 2: "+" };
 /**
  * Rows for a tool-call diff, in the same markup and CSS as the Changes-tab viewer (code-view.js
  * owns the surface; the `.code-row` / `.code-mk` / `.code-ln` rules do the rest).
+ *
+ * `colours` is the server's tokenised output for the two sides, when it has arrived. Without it
+ * this renders exactly as it always did -- escaped plain text -- and `paintDiffColours` upgrades
+ * the block in place afterwards, so a slow or failing highlight never delays the transcript.
  */
-function rowsHtml(rows) {
+function rowsHtml(rows, colours) {
+  const pick = (side, line) => (colours && side && line ? side[line - 1] : null);
   return rows.map(row => {
     if (row.hunk) return `<span class="code-row is-meta"><span class="code-ln"></span><span class="code-lc">⋯ ${row.s} unchanged line${row.s === 1 ? "" : "s"}</span></span>`;
+    const html = pick(colours?.newRows, row.n) ?? pick(colours?.oldRows, row.o);
     const label = row.t === 0 ? row.o : row.n;
     return `<span class="code-row ${DIFF_CLASS[row.t]}">` +
       `<span class="code-ln">${label ?? ""}</span>` +
       `<span class="code-mk">${DIFF_MARK[row.t]}</span>` +
-      `<span class="code-lc">${escapeHtml(row.s)}</span></span>`;
+      `<span class="code-lc">${html ?? escapeHtml(row.s)}</span></span>`;
   }).join("");
 }
 
+/** Previews waiting for their colours, keyed by the id embedded in the rendered markup. */
+let diffColourSeq = 0;
+const pendingDiffColours = new Map();
+
+/**
+ * Ask the server to tokenise both sides of a tool-call diff and repaint the blocks in place.
+ *
+ * One request per preview, and only for previews whose path we recognise. A pre-existing
+ * conversation re-renders often, so blocks are marked once painted and never refetched.
+ */
+async function paintDiffColours(root) {
+  const blocks = [...(root || document).querySelectorAll("pre[data-diff-key]:not([data-diff-painted])")];
+  await Promise.all(blocks.map(async (el) => {
+    const job = pendingDiffColours.get(el.dataset.diffKey);
+    if (!job) { el.dataset.diffPainted = "1"; return; }
+    el.dataset.diffPainted = "1";
+    el._rows = job.rows; // so a later repaint does not need to re-diff
+    try {
+      const res = await fetch("/api/diff/colours", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ before: job.before, after: job.after, path: job.path }),
+      });
+      if (!res.ok) return;
+      const { oldRows, newRows } = await res.json();
+      if (!oldRows && !newRows) return;
+      el.innerHTML = rowsHtml(el._rows, { oldRows, newRows });
+      el.classList.add("is-highlighted");
+    } catch { /* highlighting is decoration; the plain diff stays */ }
+  }));
+}
+
+/**
+ * The transcript is re-parsed on most updates (messagesEl.replaceChildren), so there is no single
+ * "after render" point to call this from. A debounced observer covers every path -- streaming,
+ * history load, re-render -- without threading a call through each one, and the `:not([data-diff-
+ * painted])` guard inside means a repaint costs one querySelector and nothing else.
+ */
+/**
+ * Colour the fenced code blocks in a reply. The fence's language is in its class (`language-ts`), and
+ * the block's text is sent as it is, so the coloured lines are the same text the reply already shows.
+ * A block is painted once per text: a streamed reply grows its text, and the grown text is repainted.
+ */
+async function paintFenceColours(root) {
+  const blocks = [...(root || document).querySelectorAll('pre > code[class*="language-"]')];
+  await Promise.all(blocks.map(async (code) => {
+    const text = code.textContent;
+    if (code._paintedText === text) return;
+    code._paintedText = text;
+    const lang = (code.className.match(/language-([\w+#.-]+)/) || [])[1];
+    if (!lang) return;
+    try {
+      const res = await fetch("/api/highlight", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: text, lang }),
+      });
+      if (!res.ok) return;
+      const { rows } = await res.json();
+      // Only swap in colours for the text that is still there: the reply may have grown meanwhile.
+      if (!rows || code.textContent !== text) return;
+      code.innerHTML = rows.join("\n");
+      code.classList.add("is-highlighted");
+    } catch { /* colour is decoration; the plain code stays */ }
+  }));
+}
+
+let colourPaintTimer = null;
+new MutationObserver(() => {
+  if (colourPaintTimer) return;
+  colourPaintTimer = setTimeout(() => {
+    colourPaintTimer = null;
+    paintDiffColours(messagesEl);
+    paintFenceColours(messagesEl);
+  }, 120);
+}).observe(messagesEl, { childList: true, subtree: true });
+
 /** A unified diff of before -> after, with "+n −m" in the label. Falls back to a count-only
  *  note when the two sides are too big to diff, rather than hanging or dumping raw text. */
-function diffPreview(before, after) {
+function diffPreview(before, after, path) {
   const rows = diffRows(before, after);
   const added = rows ? rows.filter(r => r.t === 2).length : after.split("\n").length;
   const removed = rows ? rows.filter(r => r.t === 0).length : before.split("\n").length;
   const stats = `<span class="diff-stat"><span class="add">+${added}</span> <span class="del">−${removed}</span></span>`;
   if (!rows) return { stats, html: `<p class="tool-note">Too large to diff here (${removed} lines out, ${added} in).</p>` };
   const hunks = toHunks(rows);
-  return { stats, html: `<pre class="diff tool-diff code-block">${rowsHtml(hunks)}</pre>` };
+  // A recognised path gets a key and a colour job; anything else renders exactly as before.
+  const key = path ? `d${++diffColourSeq}` : "";
+  if (key) pendingDiffColours.set(key, { before, after, path, rows: hunks });
+  const attrs = key ? ` data-diff-key="${key}"` : "";
+  return { stats, html: `<pre class="diff tool-diff code-block"${attrs}>${rowsHtml(hunks)}</pre>` };
 }
 
 function toolLabel(text, extra = "") {
@@ -674,7 +761,7 @@ function editPreview(args) {
       : [];
   if (!edits.length) return "";
   const body = edits.map((edit, idx) => {
-    const { stats, html } = diffPreview(String(edit.oldText ?? ""), String(edit.newText ?? ""));
+    const { stats, html } = diffPreview(String(edit.oldText ?? ""), String(edit.newText ?? ""), args.path);
     const head = edits.length > 1 ? ` ${idx + 1}/${edits.length}` : "";
     return toolLabel(`diff${head}`, ` ${stats}`) + html;
   }).join("");

@@ -29,6 +29,7 @@ import { bridgeAvailable, bridgeCall } from "./bridge.ts";
 import { Changes } from "./changes.ts";
 import { showTool } from "./artifacts.ts";
 import { assemble, foldContext } from "./diffrows.ts";
+import { highlight, highlightPath, languageFor, warm as warmHighlighter } from "./highlight.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
 import { ChatViewBuilder, clampLevel, liveDelta, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
@@ -172,6 +173,11 @@ const TREE_SKIP_SUFFIXES = [".sqlite", ".sqlite-shm", ".sqlite-wal"];
 
 /** Largest file the tree preview will render. Above this the tab shows the size and nothing else. */
 const MAX_READ_BYTES = 512 * 1024;
+
+/** Above this the preview shows plain text. Tokenising costs roughly a second per 100 KB on this
+ *  phone, and the markup is ~10x the file size on the wire -- past this point that stops being a
+ *  good trade for a file someone is only skimming. */
+const MAX_HIGHLIGHT_BYTES = 200 * 1024;
 
 function sha256Hex(buf: Uint8Array): string {
   return new Bun.CryptoHasher("sha256").update(buf).digest("hex");
@@ -1406,6 +1412,10 @@ if (existsSync(WWW_DIR)) {
   }
 }
 
+// Compile the wasm engine and the common grammars now, off the request path, so the first file
+// someone opens does not eat the ~0.5s cold start. Fire-and-forget: highlighting is optional.
+warmHighlighter();
+
 const server = Bun.serve({
   port: PORT,
   fetch(req, server) {
@@ -1960,6 +1970,42 @@ const server = Bun.serve({
       }).catch(err => Response.json({ error: String(err) }, { status: 500 }));
     }
 
+    // Tokenise both sides of a tool-call diff so the chat preview can colour it. The chat's diff is
+    // computed in the browser from tool arguments, not read from git, so there is no patch to walk
+    // here -- just two blobs of text and the path that says what language they are.
+    if (url.pathname === "/api/diff/colours" && req.method === "POST") {
+      const MAX_SIDE = 200 * 1024;
+      return req.json()
+        .then((body: { before?: unknown; after?: unknown; path?: unknown }) => {
+          const before = typeof body.before === "string" ? body.before : "";
+          const after = typeof body.after === "string" ? body.after : "";
+          const lang = typeof body.path === "string" ? languageFor(body.path) : null;
+          if (!lang) return { lang: null, oldRows: null, newRows: null };
+          if (before.length > MAX_SIDE || after.length > MAX_SIDE) return { lang, oldRows: null, newRows: null };
+          return Promise.all([highlight(before, lang), highlight(after, lang)]).then(([oldLit, newLit]) => ({
+            lang,
+            oldRows: oldLit ? oldLit.lines.map((l) => l.html) : null,
+            newRows: newLit ? newLit.lines.map((l) => l.html) : null,
+          }));
+        })
+        .then((payload: object) => Response.json(payload))
+        .catch(() => Response.json({ lang: null, oldRows: null, newRows: null }));
+    }
+
+    // Syntax colours for a code fence in a chat reply. The language is the fence's name (ts, python...),
+    // and the answer is one HTML string per line, or null when there is nothing to colour.
+    if (url.pathname === "/api/highlight" && req.method === "POST") {
+      return req.json()
+        .then(async (body: { code?: unknown; lang?: unknown }) => {
+          const code = typeof body.code === "string" ? body.code : "";
+          const lang = typeof body.lang === "string" ? languageFor(`snippet.${body.lang}`) : null;
+          const lit = lang ? await highlight(code, lang) : null;
+          return { lang, rows: lit ? lit.lines.map((l) => l.html) : null };
+        })
+        .then((payload: object) => Response.json(payload))
+        .catch(() => Response.json({ lang: null, rows: null }));
+    }
+
     // --- Change tracking ---
     if (url.pathname === "/api/changes" && req.method === "GET") {
       return changes.list(Number(url.searchParams.get("limit")) || 60)
@@ -1977,14 +2023,32 @@ const server = Bun.serve({
         }).catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
       if (action === "files" && req.method === "GET") return respond(changes.files(oid).then(files => ({ files })));
       if (action === "diff" && req.method === "GET") {
+        const filepath = url.searchParams.get("path") ?? "";
+        // Both sides are tokenised with the file's own grammar so `+` lines get new-file colours
+        // and `-` lines get old-file ones; see diffrows.ts. Anything that cannot be tokenised
+        // (binary, too large, unknown language) degrades to the patch on its own, which is what
+        // this endpoint always returned before.
         return respond(
-          changes.diff(oid, url.searchParams.get("path") ?? "").then((d) => {
-            // The rows are the patch laid out one per line, with the +/- counts; the viewer colours
-            // them by kind. Long unchanged runs are folded here so a one-line change in a big file
-            // does not ship the whole file. Each placeholder keeps the rows it stands for, so
-            // expanding it in the viewer needs no second request.
-            const { rows, added, removed } = assemble(d.patch, null, null);
-            return { patch: d.patch, binary: !!d.binary, tooLarge: !!d.tooLarge, lang: null, rows: foldContext(rows, 3, 6), added, removed };
+          changes.diff(oid, filepath).then(async (d) => {
+            const base = { patch: d.patch, binary: !!d.binary, tooLarge: !!d.tooLarge };
+            const lang = d.binary || d.tooLarge ? null : languageFor(filepath);
+            const plain = () => {
+              // Without colours the rows are still the rows: the patch laid out per line, folded the same
+              // way, just with escaped text where the colours would be. Only a binary or oversized file has
+              // no rows to show, and its patch is a one-line note that renders as meta.
+              const { rows, added, removed } = assemble(d.patch, null, null);
+              return { ...base, lang, rows: foldContext(rows, 3, 6), added, removed };
+            };
+            if (!lang || d.before === undefined || d.after === undefined) return plain();
+            const [oldLit, newLit] = await Promise.all([highlight(d.before, lang), highlight(d.after, lang)]);
+            if (!oldLit && !newLit) return plain();
+            const oldRows = oldLit ? oldLit.lines.map((l) => l.html) : null;
+            const newRows = newLit ? newLit.lines.map((l) => l.html) : null;
+            const { rows, added, removed } = assemble(d.patch, oldRows, newRows);
+            // Fold long unchanged runs here rather than shipping them: a one-line change in a big
+            // file would otherwise carry the whole file across the wire. Each placeholder keeps the
+            // rows it stands for, so expanding it in the viewer needs no second request.
+            return { ...base, lang, rows: foldContext(rows, 3, 6), added, removed };
           }),
         );
       }
@@ -2227,6 +2291,37 @@ const server = Bun.serve({
       return Response.json({ path: url.searchParams.get("path"), size, html });
     }
 
+    // Coloured version of one workspace file, for the Files screen's source viewer. Same guards as
+    // the markdown route above, and the same contract as /api/files/read: `html` is absent when the
+    // language is unknown or tokenising failed, and the client falls back to the plain text it
+    // already has. Returns a promise rather than awaiting inline, like that route, because the
+    // fetch handler is sync (see the WebSocket upgrade branch).
+    if (url.pathname === "/api/workspace/highlight" && req.method === "GET") {
+      const requested = url.searchParams.get("path") || "";
+      const ws = workspaceFor(url.searchParams.get("session"));
+      if (!ws) return Response.json({ error: "No such session" }, { status: 404 });
+      const real = insideWorkspace(ws.dir, requested);
+      if (!real || !statSync(real).isFile()) return Response.json({ error: "Not found" }, { status: 404 });
+      const size = statSync(real).size;
+      if (size > MAX_READ_BYTES) {
+        return Response.json({ error: `Too large to preview (${(size / 1024).toFixed(0)} KB)`, size });
+      }
+      const buffer = readFileSync(real);
+      if (buffer.subarray(0, 4096).includes(0)) return Response.json({ error: "Binary file, no preview" }, { status: 415 });
+      const content = buffer.toString("utf-8");
+      const base = { path: requested, size, content };
+      if (size > MAX_HIGHLIGHT_BYTES) return Response.json({ ...base, lang: null });
+      return highlightPath(content, requested).then(
+        (lit) =>
+          Response.json({
+            ...base,
+            lang: lit?.lang ?? null,
+            rows: lit ? lit.lines.map((l) => l.html) : undefined,
+          }),
+        () => Response.json({ ...base, lang: null }),
+      );
+    }
+
     if (url.pathname.startsWith("/workspace/") && (req.method === "GET" || req.method === "HEAD")) {
       const [, , sid, ...parts] = url.pathname.split("/");
       const ws = workspaceFor(sid);
@@ -2282,7 +2377,25 @@ const server = Bun.serve({
       if (buffer.subarray(0, 4096).includes(0)) {
         return Response.json({ error: "Binary file, no preview", path: name, size });
       }
-      return Response.json({ path: name, size, content: buffer.toString("utf-8") });
+      const content = buffer.toString("utf-8");
+      // Syntax highlighting rides along with the text. It is decoration, so every failure mode
+      // here just omits `html` and the client renders the plain `content` it always had. Chained
+      // rather than awaited: this handler is sync, because the WebSocket upgrade branch above
+      // returns a bare `undefined` to signal success, which an async handler would turn into a
+      // promise and change what Bun sees.
+      const base = { path: name, size, content };
+      if (size > MAX_HIGHLIGHT_BYTES) return Response.json({ ...base, lang: null });
+      return highlightPath(content, name).then(
+        (lit) =>
+          Response.json({
+            ...base,
+            lang: lit?.lang ?? null,
+            // One already-escaped HTML string per line, so the client can build a gutter without
+            // re-splitting a blob (and without JSON-quoting every token again on the way).
+            rows: lit ? lit.lines.map((l) => l.html) : undefined,
+          }),
+        () => Response.json({ ...base, lang: null }),
+      );
     }
 
     // Static frontend files from www/

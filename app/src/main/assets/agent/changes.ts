@@ -18,9 +18,11 @@ import { join } from "node:path";
 
 export type ChangeKind = "init" | "external" | "edits" | "turn" | "undo";
 
-/** One file's change in one commit. The flags are set for binary and oversized files. */
+/** One file's change in one commit. `before`/`after` are absent for binary and oversized files. */
 export interface FileDiff {
   patch: string;
+  before?: string;
+  after?: string;
   binary?: boolean;
   tooLarge?: boolean;
 }
@@ -159,18 +161,32 @@ export class Changes {
     }
   }
 
-  /** A file's diff in one commit, as a unified patch with every line of context. */
+  /**
+   * A file's diff in one commit, as a unified patch plus both file versions.
+   *
+   * The patch alone is not enough to colour a diff properly: to paint a `-` line with the grammar
+   * that applies to the file, you need the *old* file tokenised, and to paint a `+` line you need
+   * the new one. Both sides are returned so the caller can do that with one grammar instead of
+   * falling back to highlighting the patch itself, which only knows it is "a diff".
+   */
   diff(oid: string, filepath: string): Promise<FileDiff> {
     return this.run(async () => {
       const [before, after] = await Promise.all([this.blobAt(await this.parentOf(oid), filepath), this.blobAt(oid, filepath)]);
       if ((before && isBinary(before)) || (after && isBinary(after))) return { patch: BINARY_NOTE, binary: true };
       if ((before?.length ?? 0) > MAX_DIFF_BYTES || (after?.length ?? 0) > MAX_DIFF_BYTES) return { patch: TOO_LARGE_NOTE, tooLarge: true };
       const text = (bytes?: Uint8Array) => (bytes ? Buffer.from(bytes).toString("utf8") : "");
-      // Full-file context, deliberately. With 3 lines of context an unchanged run can never be longer
-      // than the gap between two nearby changes, so there is nothing for the viewer to fold. Emitting
-      // everything and folding afterwards (diffrows.foldContext, keep 3) keeps the 3-line margin
-      // around each change and adds a placeholder for whatever was skipped.
-      return { patch: createTwoFilesPatch(`a/${filepath}`, `b/${filepath}`, text(before), text(after), "", "", { context: Number.MAX_SAFE_INTEGER }) };
+      return {
+        // Full-file context, deliberately. `context: 3` is the right answer for a patch you are
+        // going to read as a wall of text, and the wrong answer for one a viewer will fold: with 3
+        // lines of context an unchanged run can never be longer than the gap between two nearby
+        // changes, so there is nothing to collapse. Emitting everything and folding afterwards
+        // (diffrows.foldContext, keep 3) gives the same 3-line margin around each change *plus* a
+        // placeholder for whatever was skipped -- and costs no extra work here, because both files
+        // are tokenised in full anyway to colour the two sides.
+        patch: createTwoFilesPatch(`a/${filepath}`, `b/${filepath}`, text(before), text(after), "", "", { context: Number.MAX_SAFE_INTEGER }),
+        before: text(before),
+        after: text(after),
+      };
     });
   }
 

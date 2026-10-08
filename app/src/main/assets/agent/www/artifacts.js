@@ -241,6 +241,7 @@ async function showFile(node, mode) {
   }
   viewer.innerHTML = `<pre class="artifact-source code-block"></pre>`;
   await window.CodeView.load(viewer.firstChild, {
+    highlightUrl: `/api/workspace/highlight?${new URLSearchParams({ session: String(data.session), path: node.path })}`,
     url,
     stillCurrent: () => openFile?.node === node, // navigated away while tokenising
   });
