@@ -67,6 +67,11 @@
       "--text-primary": "#2a1418", "--text-secondary": "#85616a", "--accent": "#e11d48", "--accent-hover": "#be123c",
       "--success": "#16a34a",
     },
+    "Mono": {
+      "--bg-primary": "#fafafa", "--bg-secondary": "#fafafa", "--bg-card": "#fafafa", "--border": "#dcdcdc",
+      "--text-primary": "#171717", "--text-secondary": "#5f5f5f", "--accent": "#3f3f3f", "--accent-hover": "#1f1f1f",
+      "--success": "#525252",
+    },
   };
 
   const PRESETS = {
@@ -104,6 +109,11 @@
       "--accent": "#4f46e5", "--accent-hover": "#4338ca",
       "--bg-primary": "#241f1a", "--bg-secondary": "#241f1a", "--bg-card": "#241f1a", "--border": "#3a332b",
       "--text-primary": "#efe9e1", "--text-secondary": "#9a9086",
+    },
+    "Mono": {
+      "--accent": "#d4d4d4", "--accent-hover": "#a3a3a3",
+      "--bg-primary": "#000000", "--bg-secondary": "#000000", "--bg-card": "#000000", "--border": "#262626",
+      "--text-primary": "#e5e5e5", "--text-secondary": "#8f8f8f", "--success": "#a3a3a3",
     },
   };
 
@@ -229,7 +239,70 @@
     return "#000000";
   }
 
+  // --- derived accent colors -------------------------------------------------
+  // The accent tints used for text/icons on the page background are computed from the
+  // accent itself, so a preset or hand-picked accent never leaves indigo text behind.
+  const rgb = (hex) => {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const hex = (c) => "#" + c.map((v) => Math.round(Math.min(255, Math.max(0, v))).toString(16).padStart(2, "0")).join("");
+  const luminance = (c) => {
+    const lin = (v) => {
+      const s = v / 255;
+      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]);
+  };
+  const contrast = (a, b) => {
+    const la = luminance(a), lb = luminance(b);
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+  };
+  const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+
+  // Walk the accent toward the page background until it is readable on it (or the other
+  // way, toward the text color, for text that must sit on a pale page).
+  function tune(accent, bg, ratio) {
+    const toward = luminance(bg) > 0.5 ? [0, 0, 0] : [255, 255, 255];
+    let best = accent;
+    for (let t = 0; t <= 1.0001; t += 0.05) {
+      const c = mix(accent, toward, t);
+      if (contrast(c, bg) >= ratio) return c;
+      best = c;
+    }
+    return best;
+  }
+
+  function syncDerived() {
+    const accent = rgb(toHex(readVar("--accent")));
+    const bg = rgb(toHex(readVar("--bg-primary")));
+    const root = document.documentElement.style;
+    const set = (name, value) => {
+      const v = hex(value);
+      if (root.getPropertyValue(name).trim() !== v) root.setProperty(name, v);
+    };
+    set("--accent-text", tune(accent, bg, 4.5));
+    set("--accent-text-strong", tune(accent, bg, 7));
+    // Faint but real edge/ring colors: mixing *toward* the page color converges on the page
+    // color (invisible), so walk away from it until the fill still separates. These sit on
+    // --bg-card, which a flat preset sets equal to --bg-primary, and on --bg-primary itself.
+    set("--accent-edge", tune(accent, bg, 1.35));
+    const onCard = rgb(toHex(readVar("--bg-card")));
+    set("--accent-ring", tune(accent, onCard, 1.6));
+    syncOnAccent();
+  }
+
+  function syncOnAccent() {
+    const c = rgb(toHex(readVar("--accent")));
+    const white = 1.05 / (luminance(c) + 0.05), black = (luminance(c) + 0.05) / 0.05;
+    const fg = black >= white ? "#000000" : "#ffffff";
+    if (document.documentElement.style.getPropertyValue("--on-accent").trim() !== fg) {
+      document.documentElement.style.setProperty("--on-accent", fg);
+    }
+  }
+
   function syncInputs() {
+    syncDerived();
     document.querySelectorAll("[data-var]").forEach((el) => {
       const hex = toHex(readVar(el.dataset.var));
       if (el.value !== hex) el.value = hex;

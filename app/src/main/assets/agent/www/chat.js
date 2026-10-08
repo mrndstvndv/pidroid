@@ -591,17 +591,20 @@ function diffRows(before, after) {
   }
 
   const rows = [];
-  for (let i = 0; i < head; i++) rows.push({ t: 1, s: a[i] });
+  // `o` and `n` are the 1-based line numbers on each side. The Changes-tab viewer gets these from
+  // the server; here the diff is computed in the browser, so they are tracked while walking it --
+  // which is what lets the same markup show a gutter and pick the right token row per side.
+  for (let i = 0; i < head; i++) rows.push({ t: 1, s: a[i], o: i + 1, n: i + 1 });
   let i = 0;
   let j = 0;
   while (i < midA.length && j < midB.length) {
-    if (midA[i] === midB[j]) { rows.push({ t: 1, s: midA[i] }); i++; j++; }
-    else if (dp[(i + 1) * width + j] >= dp[i * width + j + 1]) { rows.push({ t: 0, s: midA[i] }); i++; }
-    else { rows.push({ t: 2, s: midB[j] }); j++; }
+    if (midA[i] === midB[j]) { rows.push({ t: 1, s: midA[i], o: head + i + 1, n: head + j + 1 }); i++; j++; }
+    else if (dp[(i + 1) * width + j] >= dp[i * width + j + 1]) { rows.push({ t: 0, s: midA[i], o: head + i + 1, n: null }); i++; }
+    else { rows.push({ t: 2, s: midB[j], o: null, n: head + j + 1 }); j++; }
   }
-  while (i < midA.length) rows.push({ t: 0, s: midA[i++] });
-  while (j < midB.length) rows.push({ t: 2, s: midB[j++] });
-  for (let k = tailA; k < a.length; k++) rows.push({ t: 1, s: a[k] });
+  while (i < midA.length) { rows.push({ t: 0, s: midA[i], o: head + i + 1, n: null }); i++; }
+  while (j < midB.length) { rows.push({ t: 2, s: midB[j], o: null, n: head + j + 1 }); j++; }
+  for (let k = tailA; k < a.length; k++) rows.push({ t: 1, s: a[k], o: k + 1, n: tailB + (k - tailA) + 1 });
   return rows;
 }
 
@@ -626,15 +629,22 @@ function toHunks(rows, context = DIFF_CONTEXT) {
   return out;
 }
 
-const DIFF_CLASS = { 0: "del", 1: "", 2: "add" };
+const DIFF_CLASS = { 0: "is-del", 1: "is-ctx", 2: "is-add" };
 const DIFF_MARK = { 0: "-", 1: " ", 2: "+" };
 
+/**
+ * Rows for a tool-call diff, in the same markup and CSS as the Changes-tab viewer (code-view.js
+ * owns the surface; the `.code-row` / `.code-mk` / `.code-ln` rules do the rest).
+ */
 function rowsHtml(rows) {
-  return rows.map(row =>
-    row.hunk
-      ? `<span class="hunk">… ${row.s} unchanged line${row.s === 1 ? "" : "s"}</span>`
-      : `<span class="${DIFF_CLASS[row.t]}">${DIFF_MARK[row.t]}${escapeHtml(row.s)}</span>`,
-  ).join("\n");
+  return rows.map(row => {
+    if (row.hunk) return `<span class="code-row is-meta"><span class="code-ln"></span><span class="code-lc">⋯ ${row.s} unchanged line${row.s === 1 ? "" : "s"}</span></span>`;
+    const label = row.t === 0 ? row.o : row.n;
+    return `<span class="code-row ${DIFF_CLASS[row.t]}">` +
+      `<span class="code-ln">${label ?? ""}</span>` +
+      `<span class="code-mk">${DIFF_MARK[row.t]}</span>` +
+      `<span class="code-lc">${escapeHtml(row.s)}</span></span>`;
+  }).join("");
 }
 
 /** A unified diff of before -> after, with "+n −m" in the label. Falls back to a count-only
@@ -646,7 +656,7 @@ function diffPreview(before, after) {
   const stats = `<span class="diff-stat"><span class="add">+${added}</span> <span class="del">−${removed}</span></span>`;
   if (!rows) return { stats, html: `<p class="tool-note">Too large to diff here (${removed} lines out, ${added} in).</p>` };
   const hunks = toHunks(rows);
-  return { stats, html: `<pre class="diff tool-diff">${rowsHtml(hunks)}</pre>` };
+  return { stats, html: `<pre class="diff tool-diff code-block">${rowsHtml(hunks)}</pre>` };
 }
 
 function toolLabel(text, extra = "") {
@@ -1000,13 +1010,25 @@ function groupLabel(entries) {
  * across the split between committed history and the live tail ({userId, n}): a group's key is
  * the prompt it answers plus its ordinal, which stays the same while the run streams and after
  * it commits, so an opened group stays open.
+ *
+ * `settled` on a group is what its open state follows until the reader has an opinion of their
+ * own (see isOpen): work the agent is doing right now lies open, and the group folds away the
+ * moment the agent moves on to saying something. `finish(openLast)` says which the run's own
+ * last group is.
  */
 function makeFlow(ctx, start = { userId: "0", n: 0 }) {
   const items = [];
   let group = null;
   let { userId, n } = start;
-  const seal = () => {
-    if (group) items.push(group);
+  // A group is `settled` — folded by default — once the stretch of work behind it is over, which
+  // is anything that follows it: answer text, an artifact card, a standalone row, the next
+  // prompt, the end of the run. The one exception is `finish(true)`, the tail's growing last
+  // group: that is work happening right now, and it lies open until the agent starts answering.
+  const seal = (settled = true) => {
+    if (group) {
+      if (settled) group.settled = true;
+      items.push(group);
+    }
     group = null;
   };
   return {
@@ -1018,8 +1040,9 @@ function makeFlow(ctx, start = { userId: "0", n: 0 }) {
       if (!group) group = { kind: "group", key: `g${userId}-${n++}`, entries: [] };
       group.entries.push(entry);
     },
-    /** One assistant message: committed (`m` is the message) or the streaming partial (`live`). */
-    assistant(idKey, blocks, live, m) {
+    /** One assistant message: committed (`m` is the message) or the streaming partial (`live`).
+     *  `meta` is the turn's own footer ({ ms }) and only the turn's last message wears it. */
+    assistant(idKey, blocks, live, m, meta) {
       const branch = m?.branchAfter === undefined ? "" : ` data-branch-after="${m.branchAfter}"`;
       // The chip is a sibling of the body, never inside it, so markdown, links and code blocks
       // never see it and `.message-content` still holds exactly what the answer said. A message
@@ -1053,6 +1076,9 @@ function makeFlow(ctx, start = { userId: "0", n: 0 }) {
             this.item({ kind: "html", key, html: why + row });
           } else this.work({ type: "tool", call: b, state: ctx.tools.get(b.id), result });
         } else if (b.text.trim()) {
+          // The agent has stopped working and started answering: fold the stretch of work behind
+          // this text, so the rows give the answer the room it is being read in.
+          seal(true);
           const open = `<div class="message assistant"${branch}>${chip()}<div class="message-content">`;
           this.item(b.html !== undefined
             ? { kind: "html", key, html: `${open}${b.html}</div></div>` }
@@ -1062,13 +1088,13 @@ function makeFlow(ctx, start = { userId: "0", n: 0 }) {
       if (!m) return;
       const error = m.stop === "error" || m.stop === "aborted" ? (m.error || (m.stop === "aborted" ? "Stopped" : "")) : "";
       if (error) this.item({ kind: "html", key: `${idKey}-err`, html: `<div class="message assistant error"><div class="message-content">${escapeHtml(error)}</div></div>` });
-      // How long the model took over an answer. A step that ends in tool calls is part of the work
-      // and is timed on its rows instead, or every step would put a line between the groups.
-      if (m.ms !== undefined && !blocks.some((b) => b.type === "toolCall")) {
-        this.item({ kind: "html", key: `${idKey}-meta`, html: `<div class="message-meta"${branch}>${iconTag("clock", 12, "dim")} Worked ${fmtDur(m.ms)}</div>` });
+      // How long the whole turn took, on the turn's last answer and nowhere else: one line under a
+      // run of steps says more than a line per step, which used to end up between the work groups.
+      if (meta && meta.ms !== undefined) {
+        this.item({ kind: "html", key: `${idKey}-meta`, html: `<div class="message-meta"${branch}>${iconTag("clock", 13, "dim")} Worked ${fmtDur(meta.ms)}</div>` });
       }
     },
-    finish() { seal(); return items; },
+    finish(openLast = false) { seal(!openLast); return items; },
   };
 }
 
@@ -1100,8 +1126,50 @@ function tailStart(messages, busy) {
   return 0;
 }
 
+/** How long a turn's steps took together. Steps run back to back, so the span from the first one
+ *  starting to the last one ending is the turn's own time -- a tool result that lands after the
+ *  next step began is inside both, and counting the steps separately would count it twice. Older
+ *  turns without stamps fall back to the sum of the steps' own durations. */
+function turnMs(steps) {
+  const first = steps[0]?.blocks?.[0]?.at;
+  const last = steps[steps.length - 1];
+  const end = typeof last?.blocks?.[0]?.at === "number" ? last.blocks[0].at + (last.ms ?? 0) : undefined;
+  if (typeof first === "number" && end !== undefined && end > first) return end - first;
+  let sum = 0;
+  let any = false;
+  for (const m of steps) {
+    if (typeof m.ms !== "number") continue;
+    sum += m.ms;
+    any = true;
+  }
+  return any ? sum : undefined;
+}
+
+/** Which assistant message wears each turn's "Worked" line: the last one of the turn, the stretch
+ *  of steps between two prompts. One line per turn, sitting under that turn's final answer --
+ *  except the turn the agent is still in, whose last committed step would otherwise wear a total
+ *  that is still growing ("Worked 15s" -> "Worked 38s") while the run goes on. */
+function turnTotals(messages, busy) {
+  const totals = new Map();
+  const close = (steps, running) => {
+    if (!steps.length || running) return;
+    const ms = turnMs(steps);
+    if (ms !== undefined) totals.set(steps[steps.length - 1].id, ms);
+  };
+  let steps = [];
+  for (const m of messages) {
+    if (m.role === "user") {
+      close(steps, false);
+      steps = [];
+    } else if (m.role === "assistant") steps.push(m);
+  }
+  // Only the last stretch can still be running; everything before it is history.
+  close(steps, busy);
+  return totals;
+}
+
 /** Adds committed messages to a flow. */
-function flowMessages(flow, messages) {
+function flowMessages(flow, messages, totals = new Map()) {
   for (const m of messages) {
     if (m.role === "event" && (m.modelChange || m.thinkingChange)) {
       const change = m.modelChange || m.thinkingChange;
@@ -1116,7 +1184,8 @@ function flowMessages(flow, messages) {
       const chip = fork ? branchChip("before") : "";
       flow.item({ kind: "html", key: `u${m.id}`, html: `<div class="message user" data-key="u${m.id}"${fork}>${chip}<div class="message-content">${escapeHtml(m.text)}</div></div>` });
     } else if (m.role === "assistant") {
-      flow.assistant(`m${m.id}`, m.blocks || [], false, m);
+      const ms = totals.get(m.id);
+      flow.assistant(`m${m.id}`, m.blocks || [], false, m, ms === undefined ? null : { ms });
     }
   }
 }
@@ -1168,10 +1237,15 @@ function itemSpecs(items, sessionId) {
     const head = `<span class="work-label">${label}</span>` +
       (failed ? `<span class="work-failed">· ${failed} failed</span>` : "") +
       `<span class="work-chev">${icon("chevron-right", 15)}</span>`;
-    const open = isOpen(item.key, false);
+    // Work in progress is shown, not summarised away: the group lies open while the agent works
+    // on it and closes itself when it moves on to writing. A hand-opened group is left alone.
+    const open = isOpen(item.key, !item.settled);
     return {
       key: item.key,
-      sig: `${item.key}|${open}`,
+      // The open state is deliberately not part of the signature: folding a group must tween the
+      // rows out (see tweenDetails), which a rebuilt node cannot do. The node is kept and told.
+      sig: item.key,
+      setOpen: open,
       open: `<details class="work" data-key="${item.key}"${open ? " open" : ""}><summary class="work-head">${head}</summary><div class="work-body">`,
       head,
       headInto: ".work-head",
@@ -1246,6 +1320,71 @@ function parseEl(html) {
   return parseTpl.content.firstElementChild;
 }
 
+/* ---------- details tween ----------
+   A group folds itself away the moment the agent starts writing, and a body that is simply gone
+   on the next frame reads as a glitch rather than as a change. <details> has no height of its own
+   to transition, so the body is measured open and its own height tweened, and the `open`
+   attribute only flips once the pixels are. The state being tweened towards lives in data-want,
+   so a render landing mid-tween -- the tail is rebuilt several times a second -- neither starts
+   the same tween again nor undoes a finished one. */
+const TWEEN_MS = 200;
+
+function wantsOpen(el) {
+  return el.dataset.wantOpen === undefined ? el.open : el.dataset.wantOpen === "1";
+}
+
+/** `animate` is false when the change came from a fresh node, which has nothing to tween from. */
+function tweenDetails(el, open, animate = true) {
+  el.dataset.wantOpen = open ? "1" : "0";
+  const body = el.querySelector(".work-body");
+  // A tap in the middle of a fold reverses it: the tween already running has to go, or both
+  // animations write the same height and the older one wins on the frame it finishes. Every
+  // animation on the body is cancelled, not just the one we remember: a `fill: "forwards"`
+  // collapse that outlives its bookkeeping keeps pinning height:0 on the body, and the next
+  // open then draws the whole group at zero height with the rows spilling over its neighbours.
+  for (const a of body?.getAnimations?.() || []) { a.cancel(); }
+  body?.style.removeProperty("overflow");
+  el._tween = null;
+  const plain = () => {
+    body?.style.removeProperty("overflow");
+    el.open = open;
+  };
+  if (!animate || !body?.animate || matchMedia("(prefers-reduced-motion: reduce)").matches) return plain();
+  const ease = "cubic-bezier(0.3, 0, 0.15, 1)";
+  if (open) {
+    el.open = true;
+    const h = body.scrollHeight;
+    if (!h) return plain();
+    body.style.overflow = "hidden";
+    const anim = body.animate([{ height: "0px" }, { height: `${h}px` }], { duration: TWEEN_MS, easing: ease });
+    anim.finished.then(() => {
+      if (el._tween !== anim) return;
+      el._tween = null;
+      body.style.removeProperty("overflow");
+      anim.cancel();
+    }, () => {});
+    el._tween = anim;
+    return;
+  }
+  const from = body.getBoundingClientRect().height;
+  if (!from) return plain();
+  body.style.overflow = "hidden";
+  // No fill: "forwards". The collapse is held up by `open` staying true until the last frame,
+  // and a filled animation outlives its own promise -- if the node is rebuilt or the tween
+  // superseded before `finished` settles, the fill keeps pinning height:0 on a body whose rows
+  // are still in the layout, and they paint straight over the messages below. Without the fill
+  // the worst a lost tween can do is revert to auto.
+  const anim = body.animate([{ height: `${from}px` }, { height: "0px" }], { duration: TWEEN_MS, easing: ease });
+  anim.finished.then(() => {
+    if (el._tween !== anim) return;
+    el._tween = null;
+    if (el.dataset.wantOpen === "0") el.open = false;
+    body.style.removeProperty("overflow");
+    anim.cancel();
+  }, () => {});
+  el._tween = anim;
+}
+
 /** Brings the children of `container` in line with `want`, keeping every node whose html is
  *  unchanged. A wanted part is html, a keyed {key, html}, or a wrapper {key?, open, into?, close,
  *  parts, sig?, head?, headInto?} whose own children are synced the same way. A wrapper is kept
@@ -1266,6 +1405,7 @@ function syncParts(container, have, want, created) {
           h.el.querySelector(w.headInto).innerHTML = w.head;
           h.head = w.head;
         }
+        if (w.setOpen !== undefined && wantsOpen(h.el) !== w.setOpen) tweenDetails(h.el, w.setOpen);
         syncParts(h.target, h.kids, w.parts, created);
       }
       continue;
@@ -1273,6 +1413,10 @@ function syncParts(container, have, want, created) {
     const el = parseEl(leaf ? html : w.open + w.close);
     const entry = { key, sig, el };
     if (!leaf) {
+      if (w.setOpen !== undefined) {
+        el.dataset.wantOpen = w.setOpen ? "1" : "0";
+        el.open = w.setOpen;
+      }
       entry.target = w.into ? el.querySelector(w.into) : el;
       entry.kids = [];
       entry.head = w.head;
@@ -1470,6 +1614,8 @@ function renderMessages(view, sessionId) {
   const ctx = { results, tools, sessionId };
   toolViews = view.toolViews || {};
   const cut = tailStart(messages, view.busy);
+  // Over the whole transcript, not a slice of it: the turn a step belongs to may straddle the cut.
+  const totals = turnTotals(messages, view.busy);
 
   // The transcript is append-only. Its small id signature detects new commits / trims without
   // serializing the entire payload; the stream-only WebSocket patch leaves history untouched.
@@ -1495,7 +1641,7 @@ function renderMessages(view, sessionId) {
     latestShown.clear();
     noteShown(messages, results);
     const flow = makeFlow(ctx);
-    flowMessages(flow, messages.slice(0, cut));
+    flowMessages(flow, messages.slice(0, cut), totals);
     const items = flow.finish();
     historyEnd = flow.state();
     historyHasContent = items.length > 0;
@@ -1509,9 +1655,11 @@ function renderMessages(view, sessionId) {
   // The stretch of the run that can still change, beside the streaming partial, so status and
   // output updates do not force a transcript repaint.
   const flow = makeFlow(ctx, historyEnd);
-  flowMessages(flow, messages.slice(cut));
+  flowMessages(flow, messages.slice(cut), totals);
   if (view.live?.blocks?.length) flow.assistant("live", view.live.blocks, true, null);
-  const items = flow.finish();
+  // A busy run's last group is the work happening now, so it is drawn open; everything the flow
+  // sealed on the way there is already history even though it is still on screen.
+  const items = flow.finish(view.busy);
   const lastItem = items[items.length - 1];
   const activeItem = view.busy && lastItem?.kind === "group" ? lastItem : null;
   const tailSpecs = itemSpecs(items, sessionId);
@@ -1766,6 +1914,16 @@ messagesEl.addEventListener("click", (e) => {
   const details = summary?.parentElement;
   if (!details?.dataset.key) return;
   const key = details.dataset.key;
+  // A work group folds by tween, so the browser's own instant toggle is taken over here: the
+  // state is recorded first (so streaming re-renders agree with the tap) and then eased across.
+  if (details.classList.contains("work")) {
+    e.preventDefault();
+    const open = !wantsOpen(details);
+    if (open) { userClosed.delete(key); userOpen.add(key); }
+    else { userOpen.delete(key); userClosed.add(key); }
+    tweenDetails(details, open);
+    return;
+  }
   if (details.open) { userOpen.delete(key); userClosed.add(key); } // about to close
   else { userClosed.delete(key); userOpen.add(key); }              // about to open
 });
