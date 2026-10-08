@@ -544,10 +544,9 @@ body {
   min-width: 0;
 }
 
-/* JS updates the live tail independently; flatten both holders so their messages remain direct
-   flex items with the transcript's existing spacing and scroll behavior. */
-.chat-message-history,
-.chat-message-live {
+/* JS patches the whole transcript as one list in this holder; flatten it so the messages remain
+   direct flex items with the transcript's existing spacing and scroll behavior. */
+.chat-items {
   display: contents;
 }
 

@@ -3,12 +3,10 @@
 
 const messagesEl = document.getElementById("messages-container");
 const jumpBottomBtn = document.getElementById("chat-jump-bottom");
-// Keep the committed transcript and the streaming tail in separate flattened flex groups. A
-// token update can then replace the tail without tearing down or reparsing the history.
-const historyEl = document.createElement("div");
-historyEl.className = "chat-message-history";
-const dynamicEl = document.createElement("div");
-dynamicEl.className = "chat-message-live";
+// The committed transcript and the streaming tail share one holder and one list. A commit then
+// keeps the nodes the stream already built, and a token update patches only what changed.
+const itemsEl = document.createElement("div");
+itemsEl.className = "chat-items";
 // The list follows the tail by native scroll anchoring to a sentinel at its end (see style.css).
 // Anchoring needs a real box to pick, so the transcript sits in a flex column of its own, and the
 // sentinel is the last child of that column. Nothing may remove or replace the sentinel. The
@@ -18,7 +16,7 @@ const contentEl = document.createElement("div");
 contentEl.className = "chat-content";
 const bodyEl = document.createElement("div");
 bodyEl.className = "chat-body";
-bodyEl.append(historyEl, dynamicEl);
+bodyEl.append(itemsEl);
 const tailAnchor = document.createElement("div");
 tailAnchor.className = "tail-anchor";
 tailAnchor.setAttribute("aria-hidden", "true");
@@ -55,9 +53,8 @@ let statsDirty = true;
 
 /* ---------- copy buttons on code blocks ----------
    The markdown is rendered by the page too (see mdChunks), so the buttons are added here rather
-   than in the renderer: the transcript is rebuilt from innerHTML on every commit, and a wrapper that
-   survives only as long as its block would drop its button mid-read. Re-running this after each
-   rebuild is a few nodes, and `done` markers keep it to a single pass per block.
+   than in the renderer, which only has the markdown. Re-running this on each node the list creates
+   is a few nodes, and `done` markers keep it to a single pass per block.
 
    Only the markdown code boxes inside a message body qualify. Tool bodies and diffs are excluded:
    a diff has no single meaningful "code" to copy, and its own chrome already offers actions. */
@@ -105,8 +102,8 @@ async function copyText(text) {
   }
 }
 
-// One delegated listener: the buttons are thrown away and rebuilt with the transcript, so a
-// listener per button would leak one per commit.
+// One delegated listener: the buttons are made again whenever their block is re-parsed (a streamed
+// reply re-parses its last block on every chunk), so a listener per button would leak one per chunk.
 document.addEventListener("click", async (event) => {
   const button = event.target.closest?.(".code-copy");
   if (!button) return;
@@ -138,7 +135,7 @@ const ANIM_PHASE_STEP = 0.05; // s; anything well under a frame looks continuous
 let lastPhase = "";
 
 /* ---------- streaming text ----------
-   Streamed text renders in one piece, at full opacity: the live tail is rebuilt each frame, so
+   Streamed text renders in one piece, at full opacity: its last piece is re-parsed each frame, so
    anything that tracked a character's age would need per-character inline styles on every
    pass. A long thought instead fades at the edges of its box (`.think-body.overflowing`
    in style.css), which survives the re-render because it is plain CSS on the container.
@@ -159,12 +156,12 @@ let lastPhase = "";
    ever overshooting, so there is no "arrived, correct, overshot, come back" at the end.
 
    It carries velocity between passes. This is the one that matters here, and it is why the
-   state is keyed by block key rather than by node: the live tail is rebuilt from innerHTML on
-   every stream update, so a thinking body is a *different element* each time. Keyed by node, the
-   filter restarted from rest on every pass and the view moved in a visible stutter several
-   times a second — position survived the rebuild, velocity did not, and velocity is what
-   motion is. Keyed by `data-key`, the new node inherits the one its predecessor had, and a
-   burst of streamed text is a single continuous glide instead of a series of restarts.
+   state is keyed by block key rather than by node: a body whose node is replaced (a tool row
+   whose output changes) is a *different element* afterwards. Keyed by node, the filter restarted
+   from rest on every pass and the view moved in a visible stutter several times a second —
+   position survived the rebuild, velocity did not, and velocity is what motion is. Keyed by
+   `data-key`, the new node inherits the one its predecessor had, and a burst of streamed text is
+   a single continuous glide instead of a series of restarts.
 
    Finally, the target itself is low-passed. Tokens arrive in bursts, so the tail is a
    staircase, and a spring chasing a staircase accelerates and brakes once per step — fast,
@@ -394,9 +391,9 @@ messagesEl.addEventListener("scroll", noteReaderScroll, { passive: true });
    0, which left a streaming block frozen at its first line, so open bodies are pushed
    back to the bottom — unless the user scrolled up inside one, in which case that
    position is remembered and restored instead (otherwise reading back is impossible while
-   the agent keeps writing). The offset survives the node: the body is rebuilt every render,
-   so its position is read off the outgoing one first (see harvestBodyScroll), which is also
-   what turns the follow into a glide rather than a fresh jump from the top. */
+   the agent keeps writing). A body that is kept keeps its own offset. One that is replaced has
+   its position read off the outgoing node first (see harvestBodyScroll), so the new one starts
+   where the old one was and the follow glides from there rather than jumping from the top. */
 const unpinnedBodies = new Set();
 const bodyScrollTop = new Map();
 
@@ -552,6 +549,14 @@ function fmtDur(ms) {
 function durHtml(ms, at) {
   if (ms !== undefined && ms !== null) return `<span class="dur">${fmtDur(ms)}</span>`;
   if (at) return `<span class="dur dur-live" data-since="${at}">${fmtDur(Date.now() - at)}</span>`;
+  return "";
+}
+
+/** durHtml for a head that is only rewritten when its string changes. A running span is left empty
+ *  here, because its text moves every second: tickDurations fills it in right after the patch. */
+function durStable(ms, at) {
+  if (ms !== undefined && ms !== null) return durHtml(ms);
+  if (at) return `<span class="dur dur-live" data-since="${at}"></span>`;
   return "";
 }
 
@@ -902,7 +907,7 @@ async function paintDiffColours(root) {
 }
 
 /**
- * The transcript is re-parsed on most updates (messagesEl.replaceChildren), so there is no single
+ * The transcript is patched in place on most updates (see patchList), so there is no single
  * "after render" point to call this from. A debounced observer covers every path -- streaming,
  * history load, re-render -- without threading a call through each one, and the `:not([data-diff-
  * painted])` guard inside means a repaint costs one querySelector and nothing else.
@@ -1163,16 +1168,6 @@ function isOpen(key, byDefault) {
 
 /* ---------- rendering ---------- */
 
-function thinkingBlock(key, block, streaming, openByDefault = streaming) {
-  const open = isOpen(key, openByDefault);
-  const label = streaming ? '<span class="shimmer">Thinking…</span>' : `${icon("brain", 13, "ico-inline")} Thought`;
-  return `
-    <details class="think" data-key="${key}" ${open ? "open" : ""}>
-      <summary>${label}${durHtml(block.ms, streaming ? block.at : undefined)}</summary>
-      <div class="think-body">${mdParts(block.text).join("")}</div>
-    </details>`;
-}
-
 function toolBlockHtml(key, call, state, result) {
   const running = state && state.status !== "done" && !result;
   const failed = result?.isError;
@@ -1353,10 +1348,13 @@ function groupLabel(entries) {
  * moment the agent moves on to saying something. `finish(openLast)` says which the run's own
  * last group is.
  */
-function makeFlow(ctx, start = { userId: "0", n: 0 }) {
+function makeFlow(ctx, start = { userId: "0", n: 0, bn: 0 }) {
   const items = [];
   let group = null;
-  let { userId, n } = start;
+  // `bn` numbers the blocks of the current prompt's turn. A block's key is its ordinal there, not
+  // its message's id: a streaming partial has no message id yet, and its blocks must keep their
+  // keys when the message commits.
+  let { userId, n, bn = 0 } = start;
   // A group is `settled` — folded by default — once the stretch of work behind it is over, which
   // is anything that follows it: answer text, an artifact card, a standalone row, the next
   // prompt, the end of the run. The one exception is `finish(true)`, the tail's growing last
@@ -1370,9 +1368,9 @@ function makeFlow(ctx, start = { userId: "0", n: 0 }) {
   };
   return {
     items,
-    state: () => ({ userId, n }),
+    state: () => ({ userId, n, bn }),
     item(item) { seal(); items.push(item); },
-    user(id) { seal(); userId = String(id); n = 0; },
+    user(id) { seal(); userId = String(id); n = 0; bn = 0; },
     work(entry) {
       if (!group) group = { kind: "group", key: `g${userId}-${n++}`, entries: [] };
       group.entries.push(entry);
@@ -1392,7 +1390,9 @@ function makeFlow(ctx, start = { userId: "0", n: 0 }) {
         return branchChip("after");
       };
       blocks.forEach((b, i) => {
-        const key = `${idKey}-${i}`;
+        // Every block takes an ordinal, including the ones that draw nothing, so the numbering of the
+        // partial and of its committed message line up.
+        const key = `b${userId}-${bn++}`;
         if (b.type === "thinking") {
           // Models that hide their reasoning send thinking blocks with no text. An empty fold reads
           // as broken, so these get no row; a group only exists once it has a row to hold. The dock
@@ -1423,7 +1423,9 @@ function makeFlow(ctx, start = { userId: "0", n: 0 }) {
           const open = `<div class="message assistant"${branch}>${chip()}<div class="message-content">`;
           // Rendered here for committed and streaming text alike, so a reply has the same HTML from
           // its first character to its last.
-          this.item({ kind: "wrap", key, open, into: ".message-content", close: "</div></div>", parts: mdParts(b.text) });
+          // Its shell is the one thing that differs between the partial and the commit (the branch
+          // chip), so the key alone identifies it; syncParts re-shells it when `open` changes.
+          this.item({ kind: "wrap", key, sig: key, open, into: ".message-content", close: "</div></div>", parts: mdParts(b.text) });
         }
       });
       if (!m) return;
@@ -1580,14 +1582,17 @@ function itemSpecs(items, sessionId) {
       `<span class="work-chev">${icon("chevron-right", 15)}</span>`;
     // Work in progress is shown, not summarised away: the group lies open while the agent works
     // on it and closes itself when it moves on to writing. A hand-opened group is left alone.
-    const open = isOpen(item.key, !item.settled);
     return {
       key: item.key,
       // The open state is deliberately not part of the signature: folding a group must tween the
       // rows out (see tweenDetails), which a rebuilt node cannot do. The node is kept and told.
       sig: item.key,
-      setOpen: open,
-      open: `<details class="work" data-key="${item.key}"${open ? " open" : ""}><summary class="work-head">${head}</summary><div class="work-body">`,
+      // Read when the patch asks, not when the spec is built: a committed group's spec is cached,
+      // and a tap the reader made on it since must still count.
+      get setOpen() { return isOpen(item.key, !item.settled); },
+      // The head is not in the shell: it changes with every step, and a shell that changed would be
+      // rebuilt (see syncParts). It is applied to the summary on its own.
+      open: `<details class="work" data-key="${item.key}"><summary class="work-head"></summary><div class="work-body">`,
       head,
       headInto: ".work-head",
       into: ".work-body",
@@ -1599,15 +1604,29 @@ function itemSpecs(items, sessionId) {
   });
 }
 
-/** A committed thought never changes, so its row is reused like a finished tool's (see toolBlock). */
+/** Thoughts that were streaming when this page last drew them. One stays open after it commits:
+ *  closing it at commit shrank the content under a reader at the bottom. A thought first met in
+ *  committed history opens closed, as it always did. */
+const thoughtsSeenLive = new Set();
+
+/** A thought as a wrapper, live or committed alike, so a commit keeps its node (see syncParts).
+ *  The head is rewritten only when its text changes, so a running clock is left empty here and
+ *  tickDurations fills it in right after the patch. */
 function thoughtRow(e) {
-  if (e.live) return thinkingBlock(e.key, e.block, e.streaming, true);
-  const open = userOpen.has(e.key) ? 1 : userClosed.has(e.key) ? 0 : -1;
-  const hit = toolRowCache.get(e.key);
-  if (hit && hit.block === e.block && hit.open === open) return hit.html;
-  const html = thinkingBlock(e.key, e.block, false, false);
-  toolRowCache.set(e.key, { block: e.block, open, html });
-  return html;
+  const { key, block, streaming } = e;
+  if (e.live) thoughtsSeenLive.add(key);
+  const label = streaming ? '<span class="shimmer">Thinking…</span>' : `${icon("brain", 13, "ico-inline")} Thought`;
+  return {
+    key,
+    sig: key,
+    get setOpen() { return isOpen(key, thoughtsSeenLive.has(key)); },
+    open: `<details class="think" data-key="${key}"><summary></summary><div class="think-body">`,
+    head: `${label}${durStable(block.ms, streaming ? block.at : undefined)}`,
+    headInto: "summary",
+    into: ".think-body",
+    close: "</div></details>",
+    parts: mdParts(block.text),
+  };
 }
 
 /** path -> id of the latest show call for it. A file shown again is the same file, so the
@@ -1646,14 +1665,16 @@ window.chatShownArtifacts = () => {
 };
 
 /* ---------- live tail patching ----------
-   The tail (the pending tool message, the streaming partial) used to be thrown away
-   and re-parsed from innerHTML on every update, several times a second, even though only the
-   last block of it had changed. It is now a list of slots, each remembering the html it last
+   The transcript is patched, not rebuilt. It is a list of slots, each remembering the html it last
    produced for every block; a block whose html is unchanged keeps its node (and with it its
    scroll offset, selection, open state and running animation), and only the blocks that differ
-   are re-parsed. A slot is a turn (wrapper + blocks) or a single loose element (no wrapper). */
-const tailState = { slots: [] };
-const historyState = { slots: [] };
+   are re-parsed. Committed history and the streaming tail are one list, so a commit moves the
+   streamed nodes across the cut without building them again. A slot is a turn (wrapper + blocks)
+   or a single loose element (no wrapper). */
+const listState = { slots: [] };
+// The specs of committed history, reused across renders until history itself changes. Their
+// strings and parts are the same objects every time, so patching them costs a comparison each.
+let historySpecs = [];
 const parseTpl = document.createElement("template");
 
 function parseEl(html) {
@@ -1666,7 +1687,7 @@ function parseEl(html) {
    on the next frame reads as a glitch rather than as a change. <details> has no height of its own
    to transition, so the body is measured open and its own height tweened, and the `open`
    attribute only flips once the pixels are. The state being tweened towards lives in data-want,
-   so a render landing mid-tween -- the tail is rebuilt several times a second -- neither starts
+   so a render landing mid-tween -- the list is patched several times a second -- neither starts
    the same tween again nor undoes a finished one. */
 const TWEEN_MS = 200;
 
@@ -1677,7 +1698,7 @@ function wantsOpen(el) {
 /** `animate` is false when the change came from a fresh node, which has nothing to tween from. */
 function tweenDetails(el, open, animate = true) {
   el.dataset.wantOpen = open ? "1" : "0";
-  const body = el.querySelector(".work-body");
+  const body = el.querySelector(":scope > .work-body, :scope > .think-body");
   // A tap in the middle of a fold reverses it: the tween already running has to go, or both
   // animations write the same height and the older one wins on the frame it finishes. Every
   // animation on the body is cancelled, not just the one we remember: a `fill: "forwards"`
@@ -1728,10 +1749,11 @@ function tweenDetails(el, open, animate = true) {
 
 /** Brings the children of `container` in line with `want`, keeping every node whose html is
  *  unchanged. A wanted part is html, a keyed {key, html}, or a wrapper {key?, open, into?, close,
- *  parts, sig?, head?, headInto?} whose own children are synced the same way. A wrapper is kept
- *  while its `sig` (default: its opening html) holds; its `head`, if any, is a header swapped in
- *  place, so a group's line can change without rebuilding the rows inside it. New or replaced
- *  top-level nodes go into `created`. */
+ *  parts, sig?, head?, headInto?, setOpen?} whose own children are synced the same way. A wrapper
+ *  is kept while its `sig` (default: its opening html) holds. Its `head`, if any, is a header
+ *  swapped in place, so a group's line can change without rebuilding the rows inside it. A kept
+ *  wrapper whose opening html has changed gets a new shell around its own children (see reshell).
+ *  New or replaced top-level nodes go into `created`. */
 function syncParts(container, have, want, created) {
   for (let j = 0; j < want.length; j++) {
     const w = want[j];
@@ -1742,6 +1764,7 @@ function syncParts(container, have, want, created) {
     const h = have[j];
     if (h && h.key === key && h.sig === sig) {
       if (!leaf) {
+        if (w.open !== h.open) reshell(h, w, created);
         if (w.head !== undefined && w.head !== h.head) {
           h.el.querySelector(w.headInto).innerHTML = w.head;
           h.head = w.head;
@@ -1752,8 +1775,9 @@ function syncParts(container, have, want, created) {
       continue;
     }
     const el = parseEl(leaf ? html : w.open + w.close);
-    const entry = { key, sig, el };
+    const entry = { key, sig, el, open: leaf ? undefined : w.open };
     if (!leaf) {
+      if (w.head !== undefined) el.querySelector(w.headInto).innerHTML = w.head;
       if (w.setOpen !== undefined) {
         el.dataset.wantOpen = w.setOpen ? "1" : "0";
         el.open = w.setOpen;
@@ -1769,6 +1793,24 @@ function syncParts(container, have, want, created) {
     have[j] = entry;
   }
   for (const gone of have.splice(want.length)) placed(gone.el).remove();
+}
+
+/** A kept wrapper whose shell changed gets a new shell, and its children are moved into it. Moving
+ *  the parsed pieces keeps them: they are not parsed again, so they keep their nodes and their
+ *  height. Only the outer shell, which holds no scroll state, is rebuilt. The new shell is `created`;
+ *  the moved children are not. */
+function reshell(h, w, created) {
+  const el = parseEl(w.open + w.close);
+  const target = w.into ? el.querySelector(w.into) : el;
+  target.append(...h.target.childNodes);
+  if (h.el.dataset.wantOpen !== undefined) {
+    el.dataset.wantOpen = h.el.dataset.wantOpen;
+    el.open = h.el.open;
+  }
+  if (w.head !== undefined) el.querySelector(w.headInto).innerHTML = w.head;
+  h.el.replaceWith(el);
+  created.push(el);
+  Object.assign(h, { el, target, open: w.open, head: w.head });
 }
 
 /** The node actually in the tree for a part: enhanceCodeBlocks moves a streamed code block into
@@ -1805,33 +1847,47 @@ function harvestBodyScroll(root = messagesEl) {
   });
 }
 
-/** `animate` is for the streaming tail. A body in committed history has nothing arriving, so it
- *  is placed at its position outright: gliding every one of them on a page or session load kept
- *  dozens of springs (and a forced layout per spring per frame) running for seconds. */
-function restoreBodyScroll(root, animate = true) {
-  root.querySelectorAll("details[data-key] .think-body, details[data-key] .tool-out").forEach((el) => {
+/** The bodies that scroll on their own (see the sticky inner scroll) and that a patch touched: the
+ *  ones a created node sits in, and the ones created nodes contain. A kept body that nothing new
+ *  reached is left alone, so it is not glided for nothing. */
+const SCROLL_BODY = ".think-body, .tool-out";
+const scrollBodiesInit = new WeakSet();
+
+/** `animate` is false for a bulk patch (a load or a session switch), which places each body at its
+ *  position outright: gliding every one of them kept dozens of springs (and a forced layout per
+ *  spring per frame) running for seconds. A body that is new starts where its predecessor was;
+ *  a kept one only needs its follow. */
+function restoreBodyScroll(created, animate = true) {
+  const bodies = new Set();
+  for (const node of created) {
+    const own = node.closest?.(SCROLL_BODY);
+    if (own) bodies.add(own);
+    node.querySelectorAll?.(SCROLL_BODY).forEach((el) => bodies.add(el));
+  }
+  for (const el of bodies) {
     const key = bodyKey(el);
-    // Start where this body was: the outgoing node's offset is what makes the glide a continuation.
-    el.scrollTop = (key && bodyScrollTop.get(key)) || 0;
+    if (!scrollBodiesInit.has(el)) {
+      // Start where this body was: the outgoing node's offset is what makes the glide a continuation.
+      scrollBodiesInit.add(el);
+      el.scrollTop = (key && bodyScrollTop.get(key)) || 0;
+    }
     if (!key || !unpinnedBodies.has(key)) {
       if (animate) glideTo(el, el.scrollHeight);
       else el.scrollTop = el.scrollHeight;
     }
     if (el.classList.contains("think-body")) el.classList.toggle("overflowing", el.scrollHeight - el.clientHeight > 2);
-  });
+  }
 }
 
 /* ---------- block entrance ----------
    A tool row or a thought that arrives while the list is already settled would otherwise pop
    in between two static blocks. One short fade-and-rise marks it as new without moving
-   anything the eye is reading. These nodes are rebuilt on every render, so — like the shimmer
-   — the animation is stamped from when the key was first seen: the fresh copy resumes where
-   its predecessor was instead of restarting, and streaming never stalls it. */
+   anything the eye is reading. A node that is rebuilt would restart the animation, so — like the
+   shimmer — it is stamped from when the key was first seen: the new copy resumes where its
+   predecessor was instead of restarting, and streaming never stalls it. A block keeps its key from
+   streaming to commit, so it also keeps its first-seen time. */
 const BLOCK_IN_MS = 260;
 const firstSeen = new Map();
-
-/** `m12-0` -> `live-0`: the same block before and after a run is committed. */
-const liveAlias = (key) => key.replace(/^m\d+-/, "live-");
 
 /** Blocks still inside their entrance animation, so a streaming render revisits only those and
  *  the nodes it just created instead of every keyed block in the tail. */
@@ -1844,16 +1900,15 @@ function markFreshIn(created) {
     if (root.dataset?.key) els.add(root);
     root.querySelectorAll?.("[data-key]").forEach((el) => els.add(el));
   }
-  markFreshBlocks(messagesEl, [...els].filter((el) => el.isConnected));
+  markFreshBlocks(itemsEl, [...els].filter((el) => el.isConnected));
 }
 
-function markFreshBlocks(root = messagesEl, only) {
+function markFreshBlocks(root = itemsEl, only) {
   const now = performance.now();
   const rows = [];
   (only || root.querySelectorAll("[data-key]")).forEach((el) => {
     const key = el.dataset.key;
     let t = firstSeen.get(key);
-    if (t === undefined) t = firstSeen.get(liveAlias(key));
     if (t === undefined) { t = now; firstSeen.set(key, t); }
     rows.push({ el, age: now - t });
   });
@@ -1886,9 +1941,7 @@ function markFreshBlocks(root = messagesEl, only) {
 
 function pruneFreshBlocks() {
   const visible = new Set();
-  for (const root of [historyEl, dynamicEl]) {
-    root.querySelectorAll("[data-key]").forEach((el) => visible.add(el.dataset.key));
-  }
+  itemsEl.querySelectorAll("[data-key]").forEach((el) => visible.add(el.dataset.key));
   // Keys for blocks that are gone (a branch switch, another session) would otherwise keep
   // their offsets and first-seen times for the life of the page.
   for (const key of firstSeen.keys()) {
@@ -1898,6 +1951,7 @@ function pruneFreshBlocks() {
     bodyScrollTop.delete(key);
     unpinnedBodies.delete(key);
   }
+  for (const key of thoughtsSeenLive) if (!visible.has(key)) thoughtsSeenLive.delete(key);
 }
 
 let signedViews = null;
@@ -1970,8 +2024,8 @@ function renderDock(view, activeItem) {
   return html;
 }
 
-/** Group numbering where history stops, so the tail's groups continue it (see makeFlow). */
-let historyEnd = { userId: "0", n: 0 };
+/** Group and block numbering where history stops, so the tail's keys continue it (see makeFlow). */
+let historyEnd = { userId: "0", n: 0, bn: 0 };
 
 function renderMessages(view, sessionId) {
   const messages = Array.isArray(view.messages) ? view.messages : [];
@@ -1993,10 +2047,9 @@ function renderMessages(view, sessionId) {
   const historyChanged = signature !== lastHistoryKey;
 
   stampAnimPhase();
-  if (historyChanged) harvestBodyScroll(messagesEl);
-  else harvestBodyScroll(dynamicEl);
+  // Read before the patch: a body that is replaced takes its offset from the node it replaces.
+  harvestBodyScroll(itemsEl);
 
-  let historyCreated = [];
   if (historyChanged) {
     latestShown.clear();
     noteShown(messages, results);
@@ -2005,15 +2058,12 @@ function renderMessages(view, sessionId) {
     const items = flow.finish();
     historyEnd = flow.state();
     historyHasContent = items.length > 0;
-    // A commit appends one message; patching keeps every other node (and its scroll offsets,
-    // selection and open state) instead of re-parsing the whole transcript.
-    historyCreated = patchList(historyEl, itemSpecs(items, sessionId), historyState);
-    enhanceCodeBlocks(historyEl);
+    historySpecs = itemSpecs(items, sessionId);
     lastHistoryKey = signature;
   }
 
-  // The stretch of the run that can still change, beside the streaming partial, so status and
-  // output updates do not force a transcript repaint.
+  // The stretch of the run that can still change. Its numbering picks up where history stops, so
+  // its keys are the ones it will keep once it commits.
   const flow = makeFlow(ctx, historyEnd);
   flowMessages(flow, messages.slice(cut), totals);
   if (view.live?.blocks?.length) flow.assistant("live", view.live.blocks, true, null);
@@ -2028,21 +2078,26 @@ function renderMessages(view, sessionId) {
   if (!historyHasContent && !tailSpecs.length && !dockHtml) {
     tailSpecs.push({ key: "empty", html: '<p class="description empty">Give the agent a task. It can read, write and edit its own UI and files, and run commands.</p>' });
   }
-  const created = patchList(dynamicEl, tailSpecs, tailState);
-  enhanceCodeBlocks(dynamicEl);
+  // One patch for the whole list. The history specs are the cached objects, so every node they
+  // describe is kept unless something in it changed.
+  const created = patchList(itemsEl, [...historySpecs, ...tailSpecs], listState);
+  for (const el of created) enhanceCodeBlocks(el);
 
   updateJumpBottom();
-  for (const el of historyCreated) restoreBodyScroll(el, false);
-  for (const el of created) restoreBodyScroll(el);
+  // A bulk patch (a load, a session switch) places bodies outright; a commit or a stream glides them.
+  restoreBodyScroll(created, created.length <= BULK_PATCH);
   if (historyChanged) {
-    markFreshBlocks(messagesEl);
+    markFreshBlocks(itemsEl);
     pruneFreshBlocks();
     tickDurations(messagesEl);
   } else {
     markFreshIn(created);
-    tickDurations(dynamicEl);
+    tickDurations(itemsEl);
   }
 }
+
+/** More created nodes than this in one patch is a load or a session switch, not a stream. */
+const BULK_PATCH = 20;
 
 /** The context ring: a circle that fills with the share of the context window in use, warm
  *  past 70% and hot past 90%. The exact numbers (and the cache hit rate) are one tap away. */
@@ -2128,14 +2183,14 @@ function renderNow() {
     renderedSessionId = sessionId;
     lastHistoryKey = null;
     historyHasContent = false;
-    historyEl.replaceChildren();
-    dynamicEl.replaceChildren();
+    itemsEl.replaceChildren();
     lastDockKey = null;
     dockEl.replaceChildren();
     dockEl.hidden = true;
-    tailState.slots = [];
-    historyState.slots = [];
-    historyEnd = { userId: "0", n: 0 };
+    listState.slots = [];
+    historySpecs = [];
+    historyEnd = { userId: "0", n: 0, bn: 0 };
+    thoughtsSeenLive.clear();
     toolRowCache.clear();
     diffColourKeys.clear();
     pendingDiffColours.clear();
@@ -2280,6 +2335,9 @@ messagesEl.addEventListener("click", (e) => {
     tweenDetails(details, open);
     return;
   }
+  // The browser flips the state after this handler. Recording the state it is about to reach keeps
+  // a later patch from reading the old one as the reader's wish (see syncParts).
+  details.dataset.wantOpen = details.open ? "0" : "1";
   if (details.open) { userOpen.delete(key); userClosed.add(key); } // about to close
   else { userClosed.delete(key); userOpen.add(key); }              // about to open
 });
