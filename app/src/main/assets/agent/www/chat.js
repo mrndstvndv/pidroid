@@ -54,8 +54,8 @@ let historyHasContent = false;
 let statsDirty = true;
 
 /* ---------- copy buttons on code blocks ----------
-   The markdown is rendered by the server, so the buttons are added here in the page rather than
-   in the renderer: the transcript is rebuilt from innerHTML on every commit, and a wrapper that
+   The markdown is rendered by the page too (see mdChunks), so the buttons are added here rather
+   than in the renderer: the transcript is rebuilt from innerHTML on every commit, and a wrapper that
    survives only as long as its block would drop its button mid-read. Re-running this after each
    rebuild is a few nodes, and `done` markers keep it to a single pass per block.
 
@@ -584,33 +584,142 @@ function tickDurations(root = messagesEl) {
 let ticking = false;
 let durTimer = 0;
 
-/** Minimal markdown: fenced code, inline code, bold. Everything else stays plain text. */
-function md(text) {
-  const parts = String(text).split(/```/);
-  return parts.map((part, i) => {
-    if (i % 2 === 1) return `<pre class="code">${escapeHtml(part.replace(/^[^\n]*\n/, ""))}</pre>`;
-    return escapeHtml(part)
-      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  }).join("");
+/* ---------- markdown ----------
+   One renderer for everything the chat shows: the streaming reply, the committed reply and the
+   thoughts. The server used to render committed text and the page only guessed at the stream, so
+   a reply changed shape, and jumped in height, the moment it committed. Raw HTML in the model's
+   text is shown as the text it is, never parsed. */
+
+const SAFE_URL_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+
+/** The href if it may be used: web and mail links, or a relative one. The browser's own URL parser
+ *  reads the scheme, so spaces, tabs or entities cannot hide a `javascript:` from the check. */
+function safeHref(href) {
+  try {
+    return SAFE_URL_PROTOCOLS.has(new URL(href, "https://relative.invalid/").protocol) ? href : null;
+  } catch {
+    return null;
+  }
 }
 
-/** The same output as md(), as pieces that can be patched independently: a fenced block, or a
- *  paragraph of plain text (cut after each blank line). Inline code and bold never span a newline,
- *  so cutting there cannot change how either renders. While a reply streams, only its last piece
- *  differs from one update to the next, so only that piece is re-parsed. */
+/** Escape for a double-quoted attribute value. */
+function escapeAttr(str) {
+  return escapeHtml(str).replace(/"/g, "&quot;");
+}
+
+const markdown = new marked.Marked({ gfm: true, breaks: false });
+markdown.use({
+  renderer: {
+    // Raw HTML in the text is shown as text. This is deliberately stricter than the server used to be.
+    html(token) {
+      return escapeHtml(token.text);
+    },
+    // Links and images are built here rather than left to marked, whose default does not escape
+    // the href. An entity such as `&#106;` would then reach the browser as a `j` after the check
+    // above had passed it as relative.
+    link(token) {
+      const href = safeHref(token.href);
+      if (href === null) return escapeHtml(token.text);
+      const title = token.title ? ` title="${escapeAttr(token.title)}"` : "";
+      return `<a href="${escapeAttr(href)}"${title}>${this.parser.parseInline(token.tokens)}</a>`;
+    },
+    image(token) {
+      const src = safeHref(token.href);
+      if (src === null) return escapeHtml(token.text);
+      const title = token.title ? ` title="${escapeAttr(token.title)}"` : "";
+      return `<img src="${escapeAttr(src)}" alt="${escapeAttr(token.text)}"${title}>`;
+    },
+    // The shape the server's renderer always gave, which enhanceCodeBlocks and paintFenceColours
+    // look for. Only a plain word can name a language; anything else is dropped rather than
+    // written into the class attribute.
+    code(token) {
+      const lang = String(token.lang || "").trim().split(/\s+/)[0];
+      const cls = lang && /^[\w+#.-]+$/.test(lang) ? ` class="language-${lang}"` : "";
+      return `<pre><code${cls}>${escapeHtml(token.text.replace(/\n$/, ""))}\n</code></pre>`;
+    },
+  },
+});
+
+/** Rendered chunks, keyed by their text. A committed history is re-rendered whenever it changes,
+ *  and nearly all of its chunks are the same as last time. */
+const MD_CACHE_MAX = 400;
+const mdCache = new Map();
+
+function renderMdChunk(text) {
+  let html = mdCache.get(text);
+  if (html !== undefined) return html;
+  html = markdown.parse(text);
+  mdCache.set(text, html);
+  // Map keeps insertion order, so the first key is the oldest chunk.
+  if (mdCache.size > MD_CACHE_MAX) mdCache.delete(mdCache.keys().next().value);
+  return html;
+}
+
+const LIST_ITEM_RE = /^\s*([-*+]|\d+[.)])\s/;
+
+/** Cuts a text into pieces that render to the same thing one at a time as they do whole. A cut
+ *  is made only at a run of blank lines, when the next line starts at the margin and is not a list
+ *  item, and never inside a fenced code block or a raw HTML block (those span blank lines). Each
+ *  piece keeps its own newlines, so the pieces joined back together are the text. */
+function splitMarkdown(text) {
+  // A link definition applies to the whole text, so a text that has one is kept whole.
+  if (/^ {0,3}\[[^\]\n]+\]:/m.test(text)) return [text];
+  const pieces = [];
+  let current = [];
+  let hasText = false;
+  let sawBlank = false;
+  let fence = null; // { ch, len } while inside a fenced code block
+  let raw = null; // the closing pattern while inside a raw HTML block
+  for (const line of text.split("\n")) {
+    if (fence) {
+      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+      if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
+      current.push(line);
+      continue;
+    }
+    if (raw) {
+      if (raw.test(line)) raw = null;
+      current.push(line);
+      continue;
+    }
+    if (line.trim() === "") {
+      sawBlank = true;
+      current.push(line);
+      continue;
+    }
+    if (sawBlank && hasText && !/^\s/.test(line) && !LIST_ITEM_RE.test(line)) {
+      pieces.push(current);
+      current = [];
+      hasText = false;
+    }
+    sawBlank = false;
+    hasText = true;
+    current.push(line);
+    const open = /^[ \t]*(`{3,}|~{3,})/.exec(line);
+    const rawOpen = /^ {0,3}<(?:!--|(pre|script|style|textarea)\b)/i.exec(line);
+    if (open) {
+      fence = { ch: open[1][0], len: open[1].length };
+    } else if (rawOpen) {
+      const closer = rawOpen[1] ? new RegExp(`</${rawOpen[1]}>`, "i") : /-->/;
+      if (!closer.test(line)) raw = closer;
+    }
+  }
+  pieces.push(current);
+  return pieces.map((lines, i) => lines.join("\n") + (i < pieces.length - 1 ? "\n" : ""));
+}
+
+/** A text as rendered HTML, one string per piece (see splitMarkdown). Empty text has no pieces. */
 function mdChunks(text) {
-  const out = [];
-  String(text).split(/```/).forEach((part, i) => {
-    if (i % 2 === 1) {
-      out.push(`<pre class="code">${escapeHtml(part.replace(/^[^\n]*\n/, ""))}</pre>`);
-      return;
-    }
-    for (const chunk of part.match(/[\s\S]*?(?:\n\n+|$)/g) || []) {
-      if (chunk) out.push(`<span>${md(chunk)}</span>`);
-    }
-  });
-  return out;
+  const src = String(text);
+  if (!src.trim()) return [];
+  return splitMarkdown(src).map(renderMdChunk);
+}
+
+/** The pieces of a text, each in its own `.md-chunk` wrapper. The wrapper has no box of its own
+ *  (see style.css), so the pieces lay out as if they were one document. Pieces can then be
+ *  patched on their own while a reply streams. */
+function mdParts(text) {
+  return mdChunks(text).map((html) => `<div class="md-chunk">${html}</div>`);
 }
 
 /* ---------- tool views ----------
@@ -1056,12 +1165,11 @@ function isOpen(key, byDefault) {
 
 function thinkingBlock(key, block, streaming, openByDefault = streaming) {
   const open = isOpen(key, openByDefault);
-  const body = escapeHtml(block.text) || "…";
   const label = streaming ? '<span class="shimmer">Thinking…</span>' : `${icon("brain", 13, "ico-inline")} Thought`;
   return `
     <details class="think" data-key="${key}" ${open ? "open" : ""}>
       <summary>${label}${durHtml(block.ms, streaming ? block.at : undefined)}</summary>
-      <div class="think-body">${body}</div>
+      <div class="think-body">${mdParts(block.text).join("")}</div>
     </details>`;
 }
 
@@ -1286,6 +1394,10 @@ function makeFlow(ctx, start = { userId: "0", n: 0 }) {
       blocks.forEach((b, i) => {
         const key = `${idKey}-${i}`;
         if (b.type === "thinking") {
+          // Models that hide their reasoning send thinking blocks with no text. An empty fold reads
+          // as broken, so these get no row; a group only exists once it has a row to hold. The dock
+          // still says Thinking while one streams (see statusSpec).
+          if (!b.text.trim()) return;
           // A thought still in the streaming partial stays open until its step commits: closing it
           // the moment the answer started shrank an opened group under a list pinned to the bottom.
           this.work({ type: "thinking", key, block: b, streaming: live && i === blocks.length - 1, live });
@@ -1309,9 +1421,9 @@ function makeFlow(ctx, start = { userId: "0", n: 0 }) {
           // this text, so the rows give the answer the room it is being read in.
           seal(true);
           const open = `<div class="message assistant"${branch}>${chip()}<div class="message-content">`;
-          this.item(b.html !== undefined
-            ? { kind: "html", key, html: `${open}${b.html}</div></div>` }
-            : { kind: "wrap", key, open, into: ".message-content", close: "</div></div>", parts: mdChunks(b.text) });
+          // Rendered here for committed and streaming text alike, so a reply has the same HTML from
+          // its first character to its last.
+          this.item({ kind: "wrap", key, open, into: ".message-content", close: "</div></div>", parts: mdParts(b.text) });
         }
       });
       if (!m) return;
@@ -1822,12 +1934,15 @@ const RUNNING_VERBS = {
  */
 function statusSpec(view, activeItem) {
   const blocks = view.live?.blocks;
-  const writing = blocks?.length && blocks[blocks.length - 1].type === "text";
+  const lastBlock = blocks?.[blocks.length - 1];
+  const writing = lastBlock?.type === "text";
   const entries = activeItem?.entries ?? [];
   const last = entries[entries.length - 1];
   const runningTool = [...entries].reverse().find((e) => e.type === "tool" && !e.result);
+  // A thought with no text has no row, so the live partial says whether the model is thinking.
+  const thinking = lastBlock?.type === "thinking" || (last?.type === "thinking" && last.streaming);
   const label = writing ? "Writing"
-    : last?.type === "thinking" && last.streaming ? "Thinking"
+    : thinking ? "Thinking"
     : runningTool ? RUNNING_VERBS[runningTool.call?.name] || "Working"
     : "Working";
   const since = view.runStartedAt ? durHtml(undefined, view.runStartedAt) : "";

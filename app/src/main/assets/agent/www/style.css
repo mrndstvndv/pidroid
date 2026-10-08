@@ -2410,6 +2410,14 @@ pre.code,
 .message-content > *:first-child { margin-top: 0; }
 .message-content > *:last-child { margin-bottom: 0; }
 
+/* A reply is cut into .md-chunk pieces (chat.js, mdChunks). The wrapper has no box of its own, so
+   the pieces lay out exactly as one document would: the outer margin of the first and last block
+   is the reply's, not a piece's. Paragraphs need their own gap, which the reset above removed. */
+.md-chunk { display: contents; }
+.message-content > .md-chunk:first-child > :first-child { margin-top: 0; }
+.message-content > .md-chunk:last-child > :last-child { margin-bottom: 0; }
+.message-content p { margin: 0 0 0.6em; }
+
 .message-content ul, .message-content ol {
   margin: 4px 0;
   padding-left: 20px;
@@ -2488,10 +2496,45 @@ details summary::-webkit-details-marker { display: none; }
   color: var(--text-secondary);
   font-style: italic;
   line-height: 1.45;
-  white-space: pre-wrap;
+  white-space: normal;
   max-height: 240px;
   overflow-y: auto;
 }
+
+/* A thought is markdown too, set quieter than an answer: the same blocks on a tighter rhythm.
+   A heading only adds emphasis here, so it keeps the body's size and italic-free weight. */
+.think-body p, .think-body ul, .think-body ol, .think-body blockquote, .think-body pre {
+  margin: 0 0 0.5em;
+}
+.think-body ul, .think-body ol { padding-left: 20px; }
+.think-body li { margin: 2px 0; }
+.think-body h1, .think-body h2, .think-body h3,
+.think-body h4, .think-body h5, .think-body h6 {
+  margin: 0 0 0.5em;
+  font-size: inherit;
+  font-weight: 600;
+  font-style: normal;
+  line-height: inherit;
+}
+.think-body a { color: var(--accent); }
+.think-body code {
+  font-style: normal;
+  background-color: var(--bg-primary);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.think-body pre {
+  font-style: normal;
+  padding: 6px 8px;
+  background-color: var(--bg-inset);
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.think-body pre code { background: none; padding: 0; }
+.think-body > .md-chunk:first-child > :first-child { margin-top: 0; }
+.think-body > .md-chunk:last-child > :last-child { margin-bottom: 0; }
 
 /* A thought longer than its box fades out at the top and bottom edges instead of each new
    character fading in. The mask covers the padding box, so it stays put while the text

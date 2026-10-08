@@ -47,6 +47,16 @@ describe("ChatViewBuilder", () => {
     expect(streaming.busy).toBe(true);
   });
 
+  test("sends committed text as plain text, the page renders it", () => {
+    const builder = new ChatViewBuilder();
+    const view = builder.build(snapshot([
+      userEntry(1, "Explain"),
+      assistantEntry(2, [{ type: "text", text: "# Heading\n\n**bold**" }]),
+    ]), models);
+
+    expect(view.messages[1].blocks?.[0]).toEqual({ type: "text", text: "# Heading\n\n**bold**" });
+  });
+
   test("appends new messages without mutating the previously published array", () => {
     const builder = new ChatViewBuilder();
     const first = builder.build(snapshot([userEntry(1, "first")]), models);

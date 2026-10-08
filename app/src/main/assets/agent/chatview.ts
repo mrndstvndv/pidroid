@@ -9,7 +9,7 @@ import { blockStartKey, messageEndKey, RUN_KEY, toolEndKey, type TimingLookup } 
 import type { ToolView } from "./extensions.ts";
 
 export type Block =
-  | { type: "text"; text: string; /** Rendered markdown, added after the blocks are built. */ html?: string; at?: number; ms?: number }
+  | { type: "text"; text: string; at?: number; ms?: number }
   | { type: "thinking"; text: string; /** Epoch ms the block started, for a ticking timer while it streams. */ at?: number; /** How long it took, once the next block or the message end is known. */ ms?: number }
   | { type: "toolCall"; id: string; name: string; args: unknown; at?: number; ms?: number };
 
@@ -84,7 +84,8 @@ const MAX_MESSAGES_HTML = 600_000;
  * Bun ships a markdown renderer as `Bun.markdown.html`. Note that its sibling
  * `Bun.markdown.render` returns *terminal-rendered text* (markup stripped), not HTML,
  * so the result is validated before use. If nothing matches we fall back to a
- * minimal renderer and the UI sends no server HTML at all.
+ * minimal renderer. The chat page renders its own text (chat.js), so this serves
+ * only the Artifacts screen.
  */
 type MarkdownFn = (text: string) => string;
 
@@ -135,7 +136,7 @@ function renderHtml(text: string): string {
   if (markdown) {
     try {
       const html = markdown(text);
-      // A pathological message must not bloat every WebSocket push.
+      // A pathological file must not bloat the response it is sent in.
       if (typeof html === "string" && html.length <= MAX_MESSAGES_HTML) return html;
       return fallbackMarkdown(text);
     } catch {
@@ -148,15 +149,6 @@ function renderHtml(text: string): string {
 /** Markdown -> HTML for callers outside the chat (the Artifacts screen previews .md files with it). */
 export function renderMarkdown(text: string): string {
   return renderHtml(text);
-}
-
-const htmlFor = (text: string): { html: string } => ({ html: renderHtml(text) });
-
-/** Text blocks that are safe to pre-render: committed content, not the streaming partial. */
-function committedBlocks(content: unknown): Block[] {
-  return blocksOf(content).map((block) =>
-    block.type === "text" && block.text.trim() ? { ...block, ...htmlFor(block.text) } : block,
-  );
 }
 
 function textOf(content: unknown): string {
@@ -298,7 +290,7 @@ export class ChatViewBuilder {
         added.push({ id: entry.id, role: "user", text: textOf(message.content), branchBefore: before });
       } else if (entry.kind === "pi.assistant") {
         const usage = message.usage ?? {};
-        const blocks = withTimings(entry.id, committedBlocks(message.content), timing);
+        const blocks = withTimings(entry.id, blocksOf(message.content), timing);
         const starts = blocks.map((block) => block.at).filter((at): at is number => at !== undefined);
         const end = timing?.(messageEndKey(entry.id));
         added.push({
