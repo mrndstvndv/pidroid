@@ -9,7 +9,16 @@ const historyEl = document.createElement("div");
 historyEl.className = "chat-message-history";
 const dynamicEl = document.createElement("div");
 dynamicEl.className = "chat-message-live";
-messagesEl.replaceChildren(historyEl, dynamicEl);
+// The list follows the tail by native scroll anchoring to a sentinel at its end (see style.css).
+// Anchoring needs a real box to pick, so the transcript sits in a flex column of its own, and the
+// sentinel is the last child of that column. Nothing may remove or replace the sentinel.
+const contentEl = document.createElement("div");
+contentEl.className = "chat-content";
+const tailAnchor = document.createElement("div");
+tailAnchor.className = "tail-anchor";
+tailAnchor.setAttribute("aria-hidden", "true");
+contentEl.append(historyEl, dynamicEl, tailAnchor);
+messagesEl.replaceChildren(contentEl);
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const sendBtn = document.getElementById("send-btn");
@@ -131,11 +140,13 @@ let lastPhase = "";
    Rendering in one piece also means a markdown construct written across several frames is
    no longer cut in half mid-parse. */
 
-/* ---------- smooth scrolling ----------
-   Streaming rewrites this list several times a second, and pinning scrollTop to the new
-   bottom on every one of those passes reads as a string of jolts rather than as motion.
-   These helpers glide instead, with one filter for every case: a critically damped spring
-   (SmoothDamp's closed form). Two properties are what make it read as smooth.
+/* ---------- smooth scrolling (inner boxes) ----------
+   Thinking bodies and tool output rewrite several times a second as text streams in, and
+   pinning their scrollTop to the new bottom on every pass reads as a string of jolts rather
+   than as motion. These helpers glide those boxes instead, with one filter for every case: a
+   critically damped spring (SmoothDamp's closed form). The message list does not use this; it
+   follows the tail by scroll anchoring (see "following the tail" below). Two properties are
+   what make it read as smooth.
 
    It starts at rest and eases in. An exponential follow — the obvious first choice — has
    infinite acceleration at t=0: the instant a new bit of text lands, the view jumps
@@ -161,7 +172,6 @@ let lastPhase = "";
    Anything the user drives — a finger, a wheel, a key — cancels the glide at once. Fighting
    the finger is worse than the snap it replaces. */
 const glides = new Map(); // block key -> {el, target, aim, aimTau, vel, omega}
-const LIST_KEY = "#list"; // the message list has no block key of its own
 let glideFrame = 0;
 let glidePrev = 0;
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -193,9 +203,10 @@ const ARRIVED_PX = 1;
 
 const clampScroll = (el, v) => Math.max(0, Math.min(v, el.scrollHeight - el.clientHeight));
 
-/* A scroll event does not say who caused it, and the list is written to by the follow glide,
-   the render's bounce guard and the viewport follow. Mark our own writes so the scroll
-   listener can tell them from the reader's hand. */
+/* A scroll event does not say who caused it, and the list is written to by the viewport follow
+   and the session-switch snap. Scroll anchoring also moves the offset, but that is not a write
+   of ours, so it is left to the reader-input check below rather than marked here. Mark our own
+   writes so the scroll listener can tell them from the reader's hand. */
 const ownScrollAt = new WeakMap();
 function setScrollTop(el, v) {
   ownScrollAt.set(el, v);
@@ -203,7 +214,7 @@ function setScrollTop(el, v) {
 }
 
 function glideKey(el) {
-  return el === messagesEl ? LIST_KEY : bodyKey(el) || el;
+  return bodyKey(el) || el;
 }
 
 function glideStep(now) {
@@ -297,7 +308,6 @@ function cancelGlides(e) {
   if (e.type === "touchstart") readerTouching = true;
   const inner = e.target?.closest?.(".think-body, .tool-out");
   if (inner) stopGlide(inner);
-  stopGlide(messagesEl);
 }
 for (const ev of ["pointerdown", "wheel", "touchstart"]) {
   messagesEl.addEventListener(ev, cancelGlides, { passive: true, capture: true });
@@ -312,7 +322,6 @@ const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home
 window.addEventListener("keydown", (e) => {
   if (!SCROLL_KEYS.has(e.key)) return;
   readerInputAt = performance.now();
-  stopGlide(messagesEl);
 }, { passive: true });
 
 /* ---------- following the tail: intent, not position ----------
@@ -326,7 +335,16 @@ window.addEventListener("keydown", (e) => {
    So record the intent instead. Any upward movement by the reader leaves the tail at once,
    however small, and nothing re-arms the follow until they come back to the bottom
    themselves. Movement down re-arms it on arrival, so scrolling back is enough to resume. */
-let tailPinned = true;
+// Declared without a value: setPinned(true) below is the one place it is first set, which keeps
+// the `reading` class in step with it from the start.
+let tailPinned;
+// The class is what turns the sentinel's anchoring off (style.css), so growth below the fold
+// moves nothing while the reader is away from the tail.
+function setPinned(on) {
+  tailPinned = on;
+  messagesEl.classList.toggle("reading", !on);
+}
+setPinned(true);
 let readerTop = 0; // where we last left the list, to read direction against
 
 /* Our own writes are marked, but they are not the only scrolls the reader did not make: when the
@@ -347,10 +365,9 @@ function noteReaderScroll() {
     return;
   }
   if (top < readerTop - 1 && readerIsScrolling()) {
-    tailPinned = false;
-    stopGlide(messagesEl);
+    setPinned(false);
   } else if (messagesEl.scrollHeight - top - messagesEl.clientHeight <= TAIL_PX) {
-    tailPinned = true;
+    setPinned(true);
   }
   readerTop = top;
 }
@@ -372,10 +389,12 @@ function updateJumpBottom() {
 }
 
 messagesEl.addEventListener("scroll", updateJumpBottom, { passive: true });
-jumpBottomBtn.addEventListener("click", () => {
-  stopGlide(messagesEl);
-  glideTo(messagesEl, messagesEl.scrollHeight, MOVE_TAU);
-});
+// A deliberate jump: the reader is back at the tail, so the list follows again from here on.
+function jumpToBottom() {
+  setPinned(true);
+  messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: reduceMotion.matches ? "auto" : "smooth" });
+}
+jumpBottomBtn.addEventListener("click", jumpToBottom);
 
 /* ---------- holding the tail while the viewport moves ----------
    The list is the only thing that scrolls, so when the soft keyboard opens its height drops
@@ -395,7 +414,6 @@ function followTail() {
   if (!tailPinned || messagesEl.offsetParent === null) return;
   const bottom = clampScroll(messagesEl, Infinity);
   if (Math.abs(bottom - messagesEl.scrollTop) < ARRIVED_PX) return;
-  stopGlide(messagesEl);
   window.__perf?.scrollBack(bottom - messagesEl.scrollTop);
   setScrollTop(messagesEl, bottom);
   readerTop = bottom;
@@ -403,12 +421,20 @@ function followTail() {
 
 if (typeof ResizeObserver !== "undefined") {
   let firstPass = true;
-  // The first callback only reports the size we already have; moving the list then would
-  // race the opening render, which does its own scroll.
-  new ResizeObserver(() => {
+  // This is the before-paint fallback for what anchoring cannot hold: growth at offset 0 (the
+  // browser does not anchor there), and composer or dock height changes, which move the bottom
+  // padding of the list and which anchoring never sees. Growth that anchoring already held
+  // leaves nothing to do here, so this writes nothing.
+  // The first callback only reports the sizes we already have, for every observed element at
+  // once; moving the list then would race the opening render, which does its own scroll.
+  const composerEl = document.querySelector(".composer");
+  const follow = new ResizeObserver(() => {
     if (firstPass) { firstPass = false; return; }
     followTail();
-  }).observe(messagesEl);
+  });
+  follow.observe(messagesEl);
+  follow.observe(contentEl);
+  if (composerEl) follow.observe(composerEl);
 }
 
 // Tapping the field can also make the WebView scroll the list itself to reveal the caret.
@@ -1787,14 +1813,6 @@ function renderMessages(view, sessionId) {
   const historyChanged = signature !== lastHistoryKey;
 
   stampAnimPhase();
-  // Following the tail: the reader has not walked away from it (see "following the tail:
-  // intent, not position"), and so streaming keeps pushing. A glide already heading for the
-  // bottom counts too -- a long arrival settles over a moment, and a render landing in the
-  // middle of it must not read that as the reader having left.
-  const bottom = clampScroll(messagesEl, Infinity);
-  const glide = glides.get(LIST_KEY);
-  const following = tailPinned || (!!glide && glide.target >= bottom - 1);
-  const topBefore = messagesEl.scrollTop;
   if (historyChanged) harvestBodyScroll(messagesEl);
   else harvestBodyScroll(dynamicEl);
 
@@ -1833,15 +1851,6 @@ function renderMessages(view, sessionId) {
   const created = patchList(dynamicEl, tailSpecs, tailState);
   enhanceCodeBlocks(dynamicEl);
 
-  // While following, a render only ever adds below, so the list must never move back up. Android's
-  // WebView did exactly that on the first update after the view had come to rest: the list dropped
-  // by the height of the new text for a frame before the follow pulled it up again (a bounce). The
-  // read below lays out before paint, so putting the offset back here means that frame never shows.
-  if (following && messagesEl.scrollTop < topBefore - 0.5) {
-    window.__perf?.scrollBack(topBefore - messagesEl.scrollTop);
-    setScrollTop(messagesEl, topBefore);
-  }
-  if (following) glideTo(messagesEl, messagesEl.scrollHeight);
   updateJumpBottom();
   for (const el of historyCreated) restoreBodyScroll(el, false);
   for (const el of created) restoreBodyScroll(el);
@@ -1968,10 +1977,9 @@ function renderNow() {
   // later, looking exactly like a reader dragging upwards: it unpinned the tail and stopped the
   // glide on its way down, leaving the session open at its first message. Landing here, in the
   // same task, means that event reads the offset we set and is recognised as our own.
-  if (switched) tailPinned = true;
+  if (switched) setPinned(true);
   renderMessages(payload.view, sessionId);
   if (switched) {
-    stopGlide(messagesEl);
     const bottom = clampScroll(messagesEl, Infinity);
     setScrollTop(messagesEl, bottom);
     readerTop = bottom;
@@ -2043,7 +2051,7 @@ window.onAgentUpdate = (data) => {
   controlsDirty = true;
   if (!frame) frame = requestAnimationFrame(render);
 };
-window.scrollChatToBottom = () => glideTo(messagesEl, messagesEl.scrollHeight, MOVE_TAU);
+window.scrollChatToBottom = jumpToBottom;
 
 /* ---------- interaction ---------- */
 
