@@ -31,6 +31,7 @@ import { showTool } from "./artifacts.ts";
 import { assemble, foldContext, withoutFolded } from "./diffrows.ts";
 import { fenceLanguage, highlight, highlightPath, languageFor, MAX_INTERACTIVE_CHARS, warm as warmHighlighter } from "./highlight.ts";
 import { ExtensionLoader } from "./extensions.ts";
+import { Machines, type MachineRow } from "./machines.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
 import { discoverSkills, renderSkillsPrompt, SKILLS_DIR } from "./skills.ts";
 import { ChatViewBuilder, clampLevel, liveDelta, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
@@ -759,7 +760,14 @@ const harness = await Harness.open(
   {
     models,
     registry,
-    env: ({ conversationId, cwd }) => {
+    env: async ({ conversationId, cwd }, envContext) => {
+      // A session on a machine runs its tools there (machines.ts); the phone only runs the model and the app.
+      const row = sessions.byConversation(Number(conversationId));
+      if (row?.machineId != null) {
+        const machine = machines.get(row.machineId);
+        if (!machine) throw new Error("This session's machine was removed");
+        return machines.environment(machine, Number(conversationId), envContext);
+      }
       // Each conversation runs in its own workspace; a conversation without a stored cwd (a session
       // created before workspaces existed, and only for the turn or two before the migration runs)
       // still gets a directory of its own rather than sharing the app tree.
@@ -806,6 +814,7 @@ function setExtensionEnabled(file: string, enabled: boolean) {
 
 // --- Sessions: any number of pi-durable conversations, one shown at a time ---------------------------------
 const sessions = new Sessions(db);
+const machines = new Machines(db, join(APP_DIR, "machines"));
 const handles = new Map<number, Conversation>();
 let current!: SessionRow;
 let root!: Conversation; // the displayed session's conversation; handlers capture it at request start
@@ -867,26 +876,50 @@ async function handleFor(row: SessionRow): Promise<Conversation> {
   return conv;
 }
 
-async function createSession(): Promise<SessionRow> {
+async function createSession(machineId: number | null = null): Promise<SessionRow> {
+  // Checked before the conversation exists, so a refused machine leaves nothing behind.
+  const machine = machineId == null ? undefined : machines.get(machineId);
+  if (machineId != null && !machine) throw new Error("No such machine");
+  if (machine && !machine.trusted) throw new Error(`Confirm ${machine.name}'s host key before running sessions on it`);
   const model = pickDefaultModel();
   const thinking = thinkingInfo().current;
   const conv = await harness.createConversation(
     { ownership: { kind: "ownerless" }, agent: { model, thinkingLevel: thinking as any } },
     context,
   );
-  const row = sessions.create(Number(conv.id), DEFAULT_TITLE, `${model.provider}/${model.modelId}`, thinking);
+  const row = sessions.create(Number(conv.id), DEFAULT_TITLE, `${model.provider}/${model.modelId}`, thinking, null, null, machine?.id ?? null);
   handles.set(row.conversationId, conv);
   await pointAtWorkspace(row);
   return row;
 }
 
+/** The machine a session runs on, or undefined for one that runs on the phone. */
+function machineOf(row: SessionRow): MachineRow | undefined {
+  if (row.machineId == null) return undefined;
+  const machine = machines.get(row.machineId);
+  if (!machine) throw new Error("This session's machine was removed");
+  return machine;
+}
+
 /** Give a session its own working directory (created on demand) and make the agent run there. */
 async function pointAtWorkspace(row: SessionRow): Promise<string> {
-  const dir = workspaceDir(row.conversationId);
-  mkdirSync(dir, { recursive: true });
+  const machine = machineOf(row);
+  // On a machine the folder is created by the first operation that needs it, not here.
+  const dir = machine ? machines.sessionFolder(machine, row.conversationId) : workspaceDir(row.conversationId);
+  if (!machine) mkdirSync(dir, { recursive: true });
   const conv = await handleFor(row);
   await conv.configure({ cwd: dir } as any, context);
   return dir;
+}
+
+/** Copy a session's files on its machine into a branch's folder there. A missing source copies nothing. */
+async function copyRemoteWorkspace(machine: MachineRow, fromConversation: number, toConversation: number): Promise<boolean> {
+  const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  const from = machines.sessionFolder(machine, fromConversation);
+  const to = machines.sessionFolder(machine, toConversation);
+  const env = await machines.environment(machine, toConversation, context);
+  const result = await env.exec(`if [ -d ${quote(from)} ]; then cp -R ${quote(from)}/. ${quote(to)}/; fi`, undefined, context);
+  return result.ok && result.value.exitCode === 0;
 }
 
 /**
@@ -900,11 +933,18 @@ async function pointAtWorkspace(row: SessionRow): Promise<string> {
 async function forkSession(row: SessionRow, at: number): Promise<{ branch: SessionRow; copied: boolean }> {
   const parent = await handleFor(row);
   const child = await parent.fork(at, { ownership: { kind: "ownerless" } }, context);
-  const branch = sessions.create(Number(child.id), row.title, row.model, row.thinking, row.id, at);
+  const branch = sessions.create(Number(child.id), row.title, row.model, row.thinking, row.id, at, row.machineId);
   handles.set(branch.conversationId, child);
   // The copied agent doc carries the parent's cwd, so without this the two sessions would run in one
   // workspace. The child's own conversation id names its directory and cannot collide with the parent's.
   await pointAtWorkspace(branch);
+  const machine = machineOf(branch);
+  if (machine) {
+    // The files are on the machine, so the copy happens there, with the same outcome as a local one.
+    const copied = await copyRemoteWorkspace(machine, row.conversationId, branch.conversationId);
+    if (!copied) console.warn(`[pidroid] branch of session ${row.id}: workspace on ${machine.name} was not copied`);
+    return { branch, copied };
+  }
   const from = workspaceDir(row.conversationId);
   const to = workspaceDir(branch.conversationId);
   let copied = false;
@@ -1878,6 +1918,8 @@ const server = Bun.serve({
     if (url.pathname === "/api/sessions" && req.method === "GET") {
       return busySessions().then(busy => Response.json({
         current: current.id,
+        // The machines a new session can run on, for the picker and the sidebar's machine labels.
+        machines: machines.list().map(({ id, name, trusted }) => ({ id, name, trusted })),
         // Depth-ordered forest: branches sit under the session they came from.
         sessions: sessions.tree().map(({ row, depth }) => ({
           ...row,
@@ -1904,9 +1946,42 @@ const server = Bun.serve({
     }
 
     if (url.pathname === "/api/sessions" && req.method === "POST") {
-      return createSession()
+      return req.json().catch(() => ({})).then((body: { machineId?: number | null }) => createSession(body.machineId ?? null))
         .then(async row => { await switchTo(row.id); return Response.json({ success: true, id: row.id }); })
-        .catch(err => Response.json({ error: String(err) }, { status: 500 }));
+        .catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
+    }
+
+    // --- Machines: other computers a session can run its tools on (machines.ts) ---
+    const machineError = (err: unknown) => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
+    if (url.pathname === "/api/machines" && req.method === "GET") {
+      return Response.json({ machines: machines.list() });
+    }
+    if (url.pathname === "/api/machines" && req.method === "POST") {
+      return req.json()
+        .then(async body => Response.json({ success: true, machine: await machines.add(body) }))
+        .catch(machineError);
+    }
+    const machineRoute = url.pathname.match(/^\/api\/machines\/(\d+)\/(scan|trust|test|delete)$/);
+    if (machineRoute && req.method === "POST") {
+      const id = Number(machineRoute[1]);
+      return req.json().catch(() => ({})).then(async (body: { fingerprint?: string }) => {
+        switch (machineRoute[2]) {
+          case "scan":
+            return Response.json({ success: true, ...(await machines.scan(id)) });
+          case "trust":
+            await machines.trust(id, String(body.fingerprint ?? ""));
+            return Response.json({ success: true, machine: machines.get(id) });
+          case "test":
+            return Response.json({ success: true, platform: await machines.probe(id) });
+          default: {
+            // A session that still runs there would lose its tools, so the machine stays until they are gone.
+            const inUse = sessions.list().filter(row => row.machineId === id).length;
+            if (inUse > 0) throw new Error(`${inUse} session(s) run on this machine. Delete them first.`);
+            machines.remove(id);
+            return Response.json({ success: true });
+          }
+        }
+      }).catch(machineError);
     }
 
     const sessionRoute = url.pathname.match(/^\/api\/sessions\/(\d+)\/(switch|rename|delete|title)$/);

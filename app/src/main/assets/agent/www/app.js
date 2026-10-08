@@ -301,6 +301,7 @@ document.querySelectorAll(".tab-btn").forEach(button => {
     if (button.dataset.tab === "workspace") window.loadFilesTree?.();
     if (button.dataset.tab === "extensions") window.loadExtensionsTab?.();
     if (button.dataset.tab === "skills") window.loadSkillsTab?.();
+    if (button.dataset.tab === "machines") window.loadMachinesTab?.();
     if (button.dataset.tab === "providers") window.loadProviders?.();
     if (button.dataset.tab === "changes") window.loadChanges?.();
     

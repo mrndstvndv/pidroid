@@ -130,6 +130,7 @@
         <button class="tab-btn" data-tab="theme"><span data-icon="palette" data-size="16"></span>Theme</button>
         <button class="tab-btn" data-tab="extensions"><span data-icon="puzzle" data-size="16"></span>Extensions</button>
         <button class="tab-btn" data-tab="skills"><span data-icon="sparkles" data-size="16"></span>Skills</button>
+        <button class="tab-btn" data-tab="machines"><span data-icon="terminal" data-size="16"></span>Machines</button>
         <button class="tab-btn" data-tab="changes"><span data-icon="git-compare" data-size="16"></span>Changes</button>
         <button class="tab-btn" data-tab="workspace"><span data-icon="folder" data-size="16"></span>Files</button>
       </nav>
@@ -302,6 +303,34 @@
         <div class="skills-location" id="skills-location"><span class="dim">Loading skills folder…</span></div>
         <div class="skills-list" id="skills-list"><p class="description">Loading skills…</p></div>
       </section>
+
+      <section class="tab-content" id="tab-machines">
+        <div class="editor-header">
+          <h2>Machines</h2>
+        </div>
+        <p class="description">A machine is another computer you own, reached over SSH. A session started on it runs its files and shell there, while the model and the app stay on this phone. Confirm each machine's host key before the first connection.</p>
+        <div id="machines-list"><p class="description">Loading machines...</p></div>
+
+        <div class="editor-header">
+          <h2>Add a machine</h2>
+        </div>
+        <form id="machine-form" class="machine-form" autocomplete="off">
+          <label class="machine-field"><span class="provider-meta">Name</span>
+            <input class="field" name="name" required maxlength="40" placeholder="Work Mac" /></label>
+          <label class="machine-field"><span class="provider-meta">Host</span>
+            <input class="field" name="host" required placeholder="192.168.1.20 or my-mac" autocapitalize="none" spellcheck="false" /></label>
+          <label class="machine-field"><span class="provider-meta">User name on the machine</span>
+            <input class="field" name="user" required placeholder="your login name on the Mac" autocapitalize="none" spellcheck="false" /></label>
+          <label class="machine-field"><span class="provider-meta">Port (optional)</span>
+            <input class="field" name="port" inputmode="numeric" placeholder="22" /></label>
+          <label class="machine-field"><span class="provider-meta">Folder on the machine</span>
+            <input class="field" name="folder" required placeholder="/Users/you/pidroid" autocapitalize="none" spellcheck="false" /></label>
+          <button type="submit" class="btn-primary icon-btn-text">
+            <span data-icon="plus" data-size="15"></span><span class="btn-label">Add machine</span>
+          </button>
+        </form>
+        <div id="machine-form-result" class="machine-result" hidden></div>
+      </section>
     </section>
 
     <!-- Screen 3: Files (the current session's workspace, with what the agent showed in chat on top, and viewers) -->
@@ -374,6 +403,23 @@
 
     <!-- Model chooser: a floating sheet at the bottom. One page picks the model (searchable, recents
          first), the other the thinking effort; the Effort row switches between them. -->
+    <!-- Shown when a new session starts and machines exist: where its tools run. -->
+    <div class="modal sheet-modal" id="session-target-modal" hidden>
+      <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="session-target-title">
+        <div class="sheet-page">
+          <div class="sheet-head">
+            <h3 id="session-target-title">Run this session on</h3>
+            <button type="button" class="sheet-x" id="session-target-close" aria-label="Close">
+              <span data-icon="x" data-size="22"></span>
+            </button>
+          </div>
+          <div id="session-target-list"></div>
+          <div class="sheet-foot">
+            <span class="provider-meta">Machines are added in Settings.</span>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="modal sheet-modal" id="model-modal" hidden>
       <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="model-sheet-title">
         <div class="sheet-page" id="model-page">
@@ -445,6 +491,7 @@
   <script src="theme.js"></script>
   <script src="extensions-tab.js"></script>
   <script src="skills-tab.js"></script>
+  <script src="machines-tab.js"></script>
   <script src="providers.js"></script>
   <script src="lib/marked.umd.js"></script>
   <script src="chat.js"></script>

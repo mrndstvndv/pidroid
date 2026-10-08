@@ -966,6 +966,66 @@ textarea {
   flex-direction: column;
   gap: 9px;
 }
+/* Machines (machines-tab.js): the Settings cards, the add form, and the session picker. */
+.machine-card {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+}
+.machine-card-head,
+.machine-card-meta,
+.machine-card-folder,
+.machine-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+/* The app turns selection off everywhere (html, body above). The key, host and folder here are worth copying out. */
+.machine-card,
+.machine-result {
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+.machine-card-folder { flex-wrap: nowrap; align-items: flex-start; }
+.machine-card-folder code { min-width: 0; }
+.machine-card-head strong,
+.machine-card code,
+.machine-key { overflow-wrap: anywhere; }
+.machine-card-panel { display: grid; gap: 8px; }
+.machine-card-panel[hidden] { display: none; }
+.machine-fingerprint { display: grid; gap: 6px; }
+.machine-form { display: grid; gap: 12px; }
+.machine-field { display: grid; gap: 4px; }
+.machine-result {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+}
+.machine-result[hidden] { display: none; }
+.session-machine {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 14ch;
+  min-width: 0;
+}
+.session-machine span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sheet-row[disabled] { opacity: 0.5; }
+
 .skill-card {
   min-width: 0;
   padding: 12px;

@@ -24,6 +24,8 @@ export interface SessionRow {
   parentSessionId: number | null;
   /** Entry the branch was taken at: the child inherits the parent's history up to and including it. */
   forkEntryId: number | null;
+  /** The machine this session's tools run on (see machines.ts); null runs them on the phone. */
+  machineId: number | null;
 }
 
 export const DEFAULT_TITLE = "New session";
@@ -38,6 +40,7 @@ interface Raw {
   updated_at: number;
   parent_session_id: number | null;
   fork_entry_id: number | null;
+  machine_id: number | null;
 }
 
 const toRow = (r: Raw): SessionRow => ({
@@ -50,6 +53,7 @@ const toRow = (r: Raw): SessionRow => ({
   updatedAt: r.updated_at,
   parentSessionId: r.parent_session_id ?? null,
   forkEntryId: r.fork_entry_id ?? null,
+  machineId: r.machine_id ?? null,
 });
 
 export class Sessions {
@@ -66,9 +70,9 @@ export class Sessions {
         deleted INTEGER NOT NULL DEFAULT 0
       );
     `);
-    // Branching arrived after the first release, so older installs need the columns added. SQLite
+    // Branching and machines arrived after the first release, so older installs need the columns added. SQLite
     // has no ADD COLUMN IF NOT EXISTS, hence the table_info probe.
-    for (const column of ["parent_session_id", "fork_entry_id"]) {
+    for (const column of ["parent_session_id", "fork_entry_id", "machine_id"]) {
       const columns = (db.query(`PRAGMA table_info(sessions)`).all() as { name: string }[]).map(c => c.name);
       if (!columns.includes(column)) db.exec(`ALTER TABLE sessions ADD COLUMN ${column} INTEGER`);
     }
@@ -101,14 +105,15 @@ export class Sessions {
     thinking: string | null = null,
     parentSessionId: number | null = null,
     forkEntryId: number | null = null,
+    machineId: number | null = null,
   ): SessionRow {
     const now = Date.now();
     const result = this.db
       .query(
-        `INSERT INTO sessions (conversation_id, title, model, thinking, created_at, updated_at, parent_session_id, fork_entry_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (conversation_id, title, model, thinking, created_at, updated_at, parent_session_id, fork_entry_id, machine_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(conversationId, title, model, thinking, now, now, parentSessionId, forkEntryId);
+      .run(conversationId, title, model, thinking, now, now, parentSessionId, forkEntryId, machineId);
     return this.get(Number(result.lastInsertRowid))!;
   }
 

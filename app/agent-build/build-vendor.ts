@@ -5,10 +5,13 @@
  * node_modules, and because the entries are built together with code splitting, shared modules (pi-ai, chord, ...)
  * exist exactly once, so everything the agent writes imports the same instances the server uses.
  *
+ * pi-env deploys a prebuilt daemon found at `<package root>/bin/<platform>/pi-env`, where its package root is resolved
+ * from `import.meta.url`. In the bundle that resolves to <out>, so the package's bin/ is copied to <out>/bin.
+ *
  * Usage: bun build-vendor.ts <outDir>
  */
 
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 /** package specifier -> vendor file name. Extend this to give the agent more packages. */
@@ -17,6 +20,7 @@ const VENDOR: Record<string, string> = {
   "@earendil-works/pi-durable/env/node": "pi-durable-env-node",
   "@earendil-works/pi-durable/storage/sqlite/node": "pi-durable-storage-sqlite-node",
   "@earendil-works/pi-durable/tools": "pi-durable-tools",
+  "@earendil-works/pi-env": "pi-env",
   "@earendil-works/pi-ai": "pi-ai",
   "@earendil-works/pi-ai/providers/all": "pi-ai-providers-all",
   "@earendil-works/pi-ai/api/anthropic-messages.lazy": "pi-ai-api-anthropic-messages",
@@ -76,4 +80,6 @@ writeFileSync(
   JSON.stringify({ compilerOptions: { baseUrl: ".", paths, module: "esnext", target: "esnext", moduleResolution: "bundler" } }, null, 2) + "\n",
 );
 rmSync(entryDir, { recursive: true, force: true });
+rmSync(join(outDir, "bin"), { recursive: true, force: true });
+cpSync(resolve("node_modules/@earendil-works/pi-env/bin"), join(outDir, "bin"), { recursive: true });
 console.log(`vendor: ${result.outputs.length} files -> ${join(outDir, "vendor")}`);

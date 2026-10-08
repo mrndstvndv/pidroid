@@ -20,6 +20,13 @@ async function sessionsApi(path, method = "GET", body) {
   return data;
 }
 
+/** The machine a session's tools run on, shown in its sidebar row; empty for a session on this phone. */
+function machineBadge(s) {
+  if (s.machineId == null) return "";
+  const name = sessionData?.machines?.find(m => m.id === s.machineId)?.name ?? "Machine";
+  return `<span class="provider-meta session-machine" title="Runs on ${escapeHtml(name)}">${icon("terminal", 12)}<span>${escapeHtml(name)}</span></span>`;
+}
+
 function sessionAgo(ts) {
   const s = Math.max(1, Math.round((Date.now() - ts) / 1000));
   if (s < 60) return "just now";
@@ -151,6 +158,7 @@ function renderSessions() {
         ${selectMode ? `<span class="select-tick" aria-hidden="true">${icon(selectedIds.has(s.id) ? "check" : "square", 15)}</span>` : ""}
         <span class="model-name">${s.depth ? `<span class="branch-glyph" aria-label="branch">${icon("git-compare", 12, "ico-inline")}</span>` : ""}${escapeHtml(s.title)}</span>
         <span class="session-meta">
+          ${machineBadge(s)}
           <span class="busy-dot${s.done && !s.busy ? " done" : ""}">${mark(s)}</span>
           <span class="session-ago">${sessionAgo(s.updatedAt)}</span>
         </span>
@@ -249,7 +257,17 @@ window.loadSidebarSessions = loadSessions;
 
 async function newSession() {
   try {
-    await sessionsApi("/api/sessions", "POST");
+    // With machines set up, the session's tools go where the user picks; with none, nothing is asked. The list is
+    // fetched now rather than read from the sidebar's data, which only refreshes when the sidebar does.
+    let machineId = null;
+    const { machines } = await sessionsApi("/api/machines");
+    if (machines.length) {
+      machineId = await window.chooseSessionMachine(machines);
+      if (machineId === undefined) return;
+    }
+    await sessionsApi("/api/sessions", "POST", { machineId });
+    // The new row, with its machine label, is in the sessions list the sidebar draws from.
+    await loadSessions();
     window.closeSidebar?.();
     setTimeout(() => window.scrollChatToBottom?.(), 100);
   } catch (e) {
