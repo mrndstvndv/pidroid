@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { assemble, foldContext, foldedRows } from "./diffrows";
+import { assemble, foldContext, foldedRows, withoutFolded } from "./diffrows";
 
 /** A small patch with two hunks, in the shape createTwoFilesPatch emits. */
 const PATCH = [
@@ -134,5 +134,15 @@ describe("foldContext", () => {
     const before = rows.length;
     foldContext(rows, 3, 6);
     expect(rows).toHaveLength(before);
+  });
+
+  test("over the wire a placeholder says where its lines are, not what they are", () => {
+    const rows = long();
+    const sent = withoutFolded(foldContext(rows, 3, 6));
+    const fold = sent.find((r) => r.kind === "meta" && r.text.includes("unchanged")) as any;
+    expect(fold.folded).toBeUndefined();
+    // The slice the viewer asks for when it is tapped is exactly the lines it hid.
+    expect(rows.slice(fold.start, fold.start + fold.count)).toEqual(foldedRows(foldContext(rows, 3, 6).find((r) => r.kind === "meta" && r.text.includes("unchanged"))!));
+    expect(JSON.stringify(sent).length).toBeLessThan(JSON.stringify(foldContext(rows, 3, 6)).length);
   });
 });

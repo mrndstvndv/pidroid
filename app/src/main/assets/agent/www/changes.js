@@ -62,7 +62,7 @@ const MARK = { add: "+", del: "−", ctx: " " };
  */
 function diffRowHtml(r, index) {
   if (r.kind === "meta") {
-    if (r.folded) {
+    if (r.folded || r.count > 0) {
       return `<button type="button" class="code-fold" data-index="${index}"><span class="code-ln">⋯</span>` +
         `<span class="code-lc">Show ${escapeHtml(r.text)}</span></button>`;
     }
@@ -165,15 +165,39 @@ function syncWrapButtons() {
   changesList.querySelectorAll('button[data-act="wrap"]').forEach((b) => window.CodeView.syncWrapButton(b));
 }
 
-// Tapping a fold placeholder splices the hidden rows back in, in place. The rows travel with the
-// placeholder (see diffrows.ts), so expanding needs no second request.
-changesList.addEventListener("click", (e) => {
+// Tapping a fold placeholder splices the hidden rows back in, in place. The first load sends a fold
+// as a position (start, count) rather than the lines it hides, so they are fetched on the tap.
+changesList.addEventListener("click", async (e) => {
   const btn = e.target.closest("button.code-fold");
-  if (!btn) return;
+  if (!btn || btn.disabled) return;
   const pre = btn.closest("pre.diff");
   if (!pre || !pre._rows) return;
   const at = Number(btn.dataset.index);
-  const hidden = pre._rows[at] && pre._rows[at].folded;
+  const fold = pre._rows[at];
+  if (!fold || fold.kind !== "meta") return;
+  let hidden = fold.folded;
+  if (!hidden && Number.isInteger(fold.start) && fold.count > 0) {
+    const details = btn.closest("details.change-file");
+    const oid = btn.closest(".change-item")?.dataset.oid;
+    if (!details || !oid) return;
+    btn.disabled = true;
+    const label = btn.querySelector(".code-lc");
+    const was = label.textContent;
+    label.textContent = "Loading…";
+    try {
+      const q = new URLSearchParams({ path: details.dataset.path, from: String(fold.start), count: String(fold.count) });
+      hidden = (await changesApi(`/api/changes/${oid}/diff?${q}`)).rows;
+    } catch {
+      hidden = null;
+    }
+    // A repaint while this was in flight (the same file reloaded) has its own rows; leave it be.
+    if (pre._rows[at] !== fold) return;
+    if (!Array.isArray(hidden) || !hidden.length) {
+      btn.disabled = false;
+      label.textContent = was;
+      return;
+    }
+  }
   if (!hidden) return;
   pre._rows.splice(at, 1, ...hidden);
   paintDiff(pre);

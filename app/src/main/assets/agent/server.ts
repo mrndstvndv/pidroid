@@ -28,7 +28,7 @@ import { FileCredentialStore, LoginManager } from "./auth.ts";
 import { bridgeAvailable, bridgeCall } from "./bridge.ts";
 import { Changes } from "./changes.ts";
 import { showTool } from "./artifacts.ts";
-import { assemble, foldContext } from "./diffrows.ts";
+import { assemble, foldContext, withoutFolded } from "./diffrows.ts";
 import { fenceLanguage, highlight, highlightPath, languageFor, MAX_INTERACTIVE_CHARS, warm as warmHighlighter } from "./highlight.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
@@ -2031,30 +2031,38 @@ const server = Bun.serve({
         // and `-` lines get old-file ones; see diffrows.ts. Anything that cannot be tokenised
         // (binary, too large, unknown language) degrades to the patch on its own, which is what
         // this endpoint always returned before.
+        // A tapped fold asks for its own stretch of the unfolded rows (?from=&count=) and gets just
+        // those back; the first load sends folds as positions, never the lines they hide, so a
+        // one-line change in a big file costs the change and its context, not the file.
+        const from = Number(url.searchParams.get("from"));
+        const count = Number(url.searchParams.get("count"));
+        const slice = Number.isInteger(from) && Number.isInteger(count) && from >= 0 && count > 0
+          && url.searchParams.has("from") ? { from, count } : null;
         return respond(
           changes.diff(oid, filepath).then(async (d) => {
             // The patch only rides along when there are no rows to show (a binary or oversized
             // file's one-line note): with rows it is the same file a second time over the wire.
             const base = { binary: !!d.binary, tooLarge: !!d.tooLarge };
-            const withRows = (rows: ReturnType<typeof foldContext>) => (rows.length ? { rows } : { rows, patch: d.patch });
             const lang = d.binary || d.tooLarge ? null : languageFor(filepath);
-            const plain = () => {
-              // Without colours the rows are still the rows: the patch laid out per line, folded the same
-              // way, just with escaped text where the colours would be. Only a binary or oversized file has
-              // no rows to show, and its patch is a one-line note that renders as meta.
-              const { rows, added, removed } = assemble(d.patch, null, null);
-              return { ...base, lang, ...withRows(foldContext(rows, 3, 6)), added, removed };
+            const coloured = async () => {
+              if (!lang || d.before === undefined || d.after === undefined) return null;
+              if (d.before.length + d.after.length > MAX_INTERACTIVE_CHARS) return null;
+              const [oldLit, newLit] = await Promise.all([highlight(d.before, lang), highlight(d.after, lang)]);
+              if (!oldLit && !newLit) return null;
+              return {
+                oldRows: oldLit ? oldLit.lines.map((l) => l.html) : null,
+                newRows: newLit ? newLit.lines.map((l) => l.html) : null,
+              };
             };
-            if (!lang || d.before === undefined || d.after === undefined) return plain();
-            if (d.before.length + d.after.length > MAX_INTERACTIVE_CHARS) return plain();
-            const [oldLit, newLit] = await Promise.all([highlight(d.before, lang), highlight(d.after, lang)]);
-            if (!oldLit && !newLit) return plain();
-            const oldRows = oldLit ? oldLit.lines.map((l) => l.html) : null;
-            const newRows = newLit ? newLit.lines.map((l) => l.html) : null;
-            const { rows, added, removed } = assemble(d.patch, oldRows, newRows);
-            // Fold long unchanged runs so the viewer opens on the change, not on the whole file. Each
-            // placeholder keeps the rows it stands for, so expanding it needs no second request.
-            return { ...base, lang, ...withRows(foldContext(rows, 3, 6)), added, removed };
+            // Without colours the rows are still the rows: the patch laid out per line, folded the
+            // same way, just with escaped text where the colours would be. Only a binary or oversized
+            // file has no rows to show, and its patch is a one-line note that renders as meta.
+            const sides = await coloured();
+            const { rows, added, removed } = assemble(d.patch, sides?.oldRows ?? null, sides?.newRows ?? null);
+            if (slice) return { rows: rows.slice(slice.from, slice.from + slice.count) };
+            // Fold long unchanged runs so the viewer opens on the change, not on the whole file.
+            const folded = withoutFolded(foldContext(rows, 3, 6));
+            return { ...base, lang, rows: folded, ...(folded.length ? {} : { patch: d.patch }), added, removed };
           }),
         );
       }

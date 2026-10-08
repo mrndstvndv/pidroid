@@ -137,15 +137,25 @@ export function foldContext(rows: DiffRow[], keep = 3, minFold = 6): DiffRow[] {
         newNo: rows[i + keep].newNo,
         html: null,
         text: `${run - keep * 2} unchanged lines`,
-        // A placeholder carries the lines it stands in for, so expanding is exact rather than a
-        // second request: the viewer splices them back in.
-        ...({ folded: rows.slice(i + keep, j - keep) } as object),
+        // Where the hidden lines sit in the unfolded rows, so the viewer can ask for exactly that
+        // stretch when it is tapped, and the lines themselves for callers that keep them in memory.
+        // The Changes route sends neither the lines (see withoutFolded) nor anything else hidden.
+        ...({ start: i + keep, count: run - keep * 2, folded: rows.slice(i + keep, j - keep) } as object),
       });
       for (let k = j - keep; k < j; k++) out.push(rows[k]);
     }
     i = j;
   }
   return out;
+}
+
+/** The rows as sent over the wire: each placeholder says where its lines are, not what they are. */
+export function withoutFolded(rows: DiffRow[]): DiffRow[] {
+  return rows.map((row) => {
+    if (!("folded" in row)) return row;
+    const { folded: _lines, ...rest } = row as DiffRow & { folded?: DiffRow[] };
+    return rest;
+  });
 }
 
 /** Rows a placeholder stands in for, if it is one. */
