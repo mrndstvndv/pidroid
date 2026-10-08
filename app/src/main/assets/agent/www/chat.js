@@ -653,9 +653,16 @@ function rowsHtml(rows, colours) {
   }).join("");
 }
 
-/** Previews waiting for their colours, keyed by the id embedded in the rendered markup. */
+/**
+ * Colour jobs for tool-call diffs, by content: the same edit always gets the same key, so a row that
+ * is rebuilt (a re-render, a history repaint) carries the key it had and is repainted from the
+ * colours already fetched instead of asking again. Only settled calls get a job -- arguments that
+ * are still streaming change on every render, and each version used to queue a job (never freed)
+ * and a request. Cleared when the session changes.
+ */
 let diffColourSeq = 0;
-const pendingDiffColours = new Map();
+const diffColourKeys = new Map(); // content -> key
+const pendingDiffColours = new Map(); // key -> { before, after, path, rows, colours? }
 
 /**
  * Ask the server to tokenise both sides of a tool-call diff and repaint the blocks in place.
@@ -667,19 +674,18 @@ async function paintDiffColours(root) {
   const blocks = [...(root || document).querySelectorAll("pre[data-diff-key]:not([data-diff-painted])")];
   await Promise.all(blocks.map(async (el) => {
     const job = pendingDiffColours.get(el.dataset.diffKey);
-    if (!job) { el.dataset.diffPainted = "1"; return; }
     el.dataset.diffPainted = "1";
-    el._rows = job.rows; // so a later repaint does not need to re-diff
+    if (!job) return;
     try {
-      const res = await fetch("/api/diff/colours", {
+      // One request per edit, shared by every row that shows it; a rebuilt row waits on the same one.
+      job.colours ??= fetch("/api/diff/colours", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ before: job.before, after: job.after, path: job.path }),
-      });
-      if (!res.ok) return;
-      const { oldRows, newRows } = await res.json();
-      if (!oldRows && !newRows) return;
-      el.innerHTML = rowsHtml(el._rows, { oldRows, newRows });
+      }).then((res) => (res.ok ? res.json() : null)).catch(() => null);
+      const colours = await job.colours;
+      if (!colours || (!colours.oldRows && !colours.newRows) || !el.isConnected) return;
+      el.innerHTML = rowsHtml(job.rows, colours);
       el.classList.add("is-highlighted");
     } catch { /* highlighting is decoration; the plain diff stays */ }
   }));
@@ -696,28 +702,54 @@ async function paintDiffColours(root) {
  * the block's text is sent as it is, so the coloured lines are the same text the reply already shows.
  * A block is painted once per text: a streamed reply grows its text, and the grown text is repainted.
  */
+/* A streaming reply rebuilds its code blocks with every chunk, so a fence is only sent once its
+   text has held still for FENCE_SETTLE_MS -- asking for each version cost a request per chunk for
+   colours that were stale before they landed. Answers are kept by text, so the committed copy of a
+   reply (a new node, same text) is coloured from the cache at once. */
+const FENCE_SETTLE_MS = 700;
+const FENCE_CACHE_MAX = 120;
+const fenceColours = new Map(); // lang\0text -> Promise<rows | null>
+const fenceSeen = new Map(); // lang\0text -> when that exact text first showed up
+let fenceRetry = null;
+
+function bounded(map, key, value) {
+  map.set(key, value);
+  if (map.size > FENCE_CACHE_MAX) map.delete(map.keys().next().value);
+}
+
 async function paintFenceColours(root) {
   const blocks = [...(root || document).querySelectorAll('pre > code[class*="language-"]')];
+  const now = performance.now();
+  let unsettled = false;
   await Promise.all(blocks.map(async (code) => {
     const text = code.textContent;
     if (code._paintedText === text) return;
-    code._paintedText = text;
     const lang = (code.className.match(/language-([\w+#.-]+)/) || [])[1];
-    if (!lang) return;
-    try {
-      const res = await fetch("/api/highlight", {
+    if (!lang) { code._paintedText = text; return; }
+    const key = `${lang}\0${text}`;
+    let job = fenceColours.get(key);
+    if (!job) {
+      const seen = fenceSeen.get(key);
+      if (seen === undefined) bounded(fenceSeen, key, now);
+      if (seen === undefined || now - seen < FENCE_SETTLE_MS) { unsettled = true; return; }
+      job = fetch("/api/highlight", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code: text, lang }),
-      });
-      if (!res.ok) return;
-      const { rows } = await res.json();
-      // Only swap in colours for the text that is still there: the reply may have grown meanwhile.
-      if (!rows || code.textContent !== text) return;
-      code.innerHTML = rows.join("\n");
-      code.classList.add("is-highlighted");
-    } catch { /* colour is decoration; the plain code stays */ }
+      }).then((res) => (res.ok ? res.json() : null)).then((data) => data?.rows ?? null).catch(() => null);
+      bounded(fenceColours, key, job);
+    }
+    code._paintedText = text;
+    const rows = await job;
+    // Only swap in colours for the text that is still there: the reply may have grown meanwhile.
+    if (!rows || code.textContent !== text) return;
+    code.innerHTML = rows.join("\n");
+    code.classList.add("is-highlighted");
   }));
+  // Text that has not settled yet gets another look once it might have, even if nothing else changes.
+  if (unsettled && !fenceRetry) {
+    fenceRetry = setTimeout(() => { fenceRetry = null; paintFenceColours(messagesEl); }, FENCE_SETTLE_MS);
+  }
 }
 
 let colourPaintTimer = null;
@@ -740,8 +772,16 @@ function diffPreview(before, after, path) {
   if (!rows) return { stats, html: `<p class="tool-note">Too large to diff here (${removed} lines out, ${added} in).</p>` };
   const hunks = toHunks(rows);
   // A recognised path gets a key and a colour job; anything else renders exactly as before.
-  const key = path ? `d${++diffColourSeq}` : "";
-  if (key) pendingDiffColours.set(key, { before, after, path, rows: hunks });
+  let key = "";
+  if (path) {
+    const content = `${path}\0${before}\0${after}`;
+    key = diffColourKeys.get(content) ?? "";
+    if (!key) {
+      key = `d${++diffColourSeq}`;
+      diffColourKeys.set(content, key);
+      pendingDiffColours.set(key, { before, after, path, rows: hunks });
+    }
+  }
   const attrs = key ? ` data-diff-key="${key}"` : "";
   return { stats, html: `<pre class="diff tool-diff code-block"${attrs}>${rowsHtml(hunks)}</pre>` };
 }
@@ -751,7 +791,8 @@ function toolLabel(text, extra = "") {
 }
 
 /** `edit`: one labelled diff per replacement, so a multi-edit call stays readable. */
-function editPreview(args) {
+/** `settled`: the call has its result, so its arguments are final and worth colouring. */
+function editPreview(args, settled) {
   // The tool takes {path, edits:[{oldText,newText}]}; older transcripts carry the flat
   // {oldText,newText} form, which is still worth rendering properly.
   const edits = Array.isArray(args.edits) && args.edits.length
@@ -761,7 +802,7 @@ function editPreview(args) {
       : [];
   if (!edits.length) return "";
   const body = edits.map((edit, idx) => {
-    const { stats, html } = diffPreview(String(edit.oldText ?? ""), String(edit.newText ?? ""), args.path);
+    const { stats, html } = diffPreview(String(edit.oldText ?? ""), String(edit.newText ?? ""), settled ? args.path : undefined);
     const head = edits.length > 1 ? ` ${idx + 1}/${edits.length}` : "";
     return toolLabel(`diff${head}`, ` ${stats}`) + html;
   }).join("");
@@ -868,7 +909,7 @@ function terminalHtml(command, output, view) {
 }
 
 /** The expanded body of a tool call: a real preview where there is one, JSON otherwise. */
-function toolBodyHtml(call, args, output) {
+function toolBodyHtml(call, args, output, settled) {
   const view = toolView(call.name);
   const body = view?.body ?? defaultBody(call.name);
   // The result text is the tool's own account of what happened, so it rides along unless the view
@@ -896,7 +937,7 @@ function toolBodyHtml(call, args, output) {
   if (body === "command" && typeof args.command === "string") return terminalHtml(args.command, output, view);
 
   let preview = "";
-  if (body === "diff") preview = editPreview(args);
+  if (body === "diff") preview = editPreview(args, settled);
   else if (body === "file" && typeof args.content === "string") preview = writePreview(args);
   if (preview) return preview + outputHtml;
 
@@ -946,7 +987,7 @@ function toolBlockHtml(key, call, state, result) {
         ${running ? durHtml(undefined, call.at) : durHtml(call.ms, undefined)}
         ${status}
       </summary>
-      <div class="tool-body">${toolBodyHtml(call, args, output)}</div>
+      <div class="tool-body">${toolBodyHtml(call, args, output, !!result)}</div>
     </details>`;
 }
 
@@ -1874,6 +1915,8 @@ function renderNow() {
     historyState.slots = [];
     historyEnd = { userId: "0", n: 0 };
     toolRowCache.clear();
+    diffColourKeys.clear();
+    pendingDiffColours.clear();
     firstSeen.clear();
     freshEls.clear();
     bodyScrollTop.clear();

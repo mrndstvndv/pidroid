@@ -210,6 +210,8 @@ async function showFile(node, mode) {
   list.hidden = true;
   viewer.hidden = false;
   sourceBtn.hidden = !toggleable;
+  // Soft wrap only means something for source text; a page, an image or a rendered note hides it.
+  wrapBtn.hidden = true;
   title.textContent = node.name;
   window.CodeView.syncWrapButton(wrapBtn);
 
@@ -240,6 +242,7 @@ async function showFile(node, mode) {
     return;
   }
   viewer.innerHTML = `<pre class="artifact-source code-block"></pre>`;
+  wrapBtn.hidden = false;
   await window.CodeView.load(viewer.firstChild, {
     highlightUrl: `/api/workspace/highlight?${new URLSearchParams({ session: String(data.session), path: node.path })}`,
     url,
@@ -253,6 +256,7 @@ function closeFile() {
   viewer.innerHTML = ""; // also stops any running page in the preview iframe
   list.hidden = false;
   sourceBtn.hidden = true;
+  wrapBtn.hidden = true;
   renderList();
 }
 

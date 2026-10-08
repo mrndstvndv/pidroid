@@ -190,15 +190,15 @@ async function openPreview(path) {
   // the language, plain escaped text when it does not, and a guard against a slow load landing
   // after the user has already opened a different file.
   const pre = document.createElement("pre");
+  pre.className = "file-preview";
   body.replaceChildren(pre);
   await window.CodeView.load(pre, {
+    // One endpoint answers both: the text, and its colours when the language is known. There is
+    // no plain URL to fall back to, so a failed read is an error rather than a second fetch.
     highlightUrl: `/api/files/read?path=${encodeURIComponent(path)}`,
-    url: `/api/files/read?path=${encodeURIComponent(path)}`,
     stillCurrent: () => previewPath === path,
     errorLabel: "Could not read the file",
   });
-  // Keep the modal's own chrome: the code block brings its own className, so re-apply the frame.
-  pre.classList.add("file-preview");
 }
 
 function closePreview() {

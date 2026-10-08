@@ -90,6 +90,11 @@ html {
   -webkit-tap-highlight-color: transparent;
 }
 
+/* The rule above names a face on every element, which beats inheritance: without this, the spans
+   inside a code block (line rows, highlighted tokens) were set in the UI's sans face while the
+   block itself asked for monospace. Inside a <pre> the block's own face wins. */
+pre * { font-family: inherit; }
+
 body {
   background-color: var(--bg-primary);
   color: var(--text-primary);
@@ -1616,11 +1621,14 @@ html[data-mode="light"] .shimmer {
   background-color: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: 8px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 0.72rem;
   line-height: 1.4;
   white-space: pre;
 }
+/* As a code surface the rows run edge to edge, so their tints and the gutter reach the frame. */
+.diff.code-block { padding: 6px 0; line-height: 1.55; }
+.change-file .diff.code-block { max-height: min(62vh, 520px); }
 
 .diff .add { color: var(--success); }
 .diff .del { color: var(--danger-text); }
@@ -2457,6 +2465,9 @@ details.tool.failed .term-out { color: var(--danger-text); }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* Full-screen and modal viewers: the page itself is the surface, and the rows reach its edges. */
+.artifact-source.code-block { --code-bg: var(--bg-primary); padding: 6px 0 max(16px, env(safe-area-inset-bottom, 0px)); }
+.file-preview.code-block { --code-bg: var(--bg-primary); padding: 6px 0; }
 .diff-stat { margin-left: 6px; font-family: monospace; letter-spacing: 0; text-transform: none; }
 .tool-note { margin: 4px 0 0; color: var(--text-secondary); font-style: italic; }
 
@@ -3095,7 +3106,7 @@ html[data-blur="off"] .sidebar-scrim {
   margin: 0;
   padding: 12px 16px max(16px, env(safe-area-inset-bottom, 0px));
   overflow: auto;
-  font-family: ui-monospace, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
   line-height: 1.5;
   color: var(--text-primary);
@@ -3104,53 +3115,122 @@ html[data-blur="off"] .sidebar-scrim {
 }
 
 /* ---------- code surface (code-view.js) ----------
-   One row per line: a sticky gutter number and the line's content. The gutter is sticky so the
-   numbers stay put while a long line scrolls horizontally, which is the whole reason for numbering
-   them; that only works if the row is a block and the number is an inline-block inside it. */
+   One flex row per line: gutter (line numbers), an optional change marker, and the content. The
+   gutter is sticky so the numbers stay put while a long line scrolls sideways, and it is painted
+   opaque -- its own tint over the surface colour, --code-bg -- because code scrolls underneath
+   it. A dimmed gutter is dimmed by colour, never by opacity, or the code shows through it.
+
+   A row is at least as wide as the longest line (width: max-content), so a changed line's tint
+   runs the full scroll width instead of stopping at the screen edge. Wrapped, a row is the
+   container's width and the content wraps beside the gutter, which gives continuation lines a
+   hanging indent under their own text. */
 
 .code-block {
+  --code-bg: var(--bg-inset);
+  --row-tint: transparent;
   margin: 0;
   overflow: auto;
   font-family: var(--font-mono);
   font-size: 0.75rem;
-  line-height: 1.5;
+  line-height: 1.55;
   tab-size: 2;
   color: var(--text-primary);
   white-space: pre;
   -webkit-text-size-adjust: none;
 }
 
+.code-row {
+  display: flex;
+  min-width: 100%;
+  width: max-content;
+  min-height: 1lh;
+  background: var(--row-tint);
+}
+
+.code-ln {
+  flex: none;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 3ch;
+  padding: 0 8px 0 10px;
+  box-sizing: content-box;
+  text-align: right;
+  color: color-mix(in srgb, var(--text-secondary) 65%, transparent);
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(var(--row-tint), var(--row-tint)), var(--code-bg);
+  border-right: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.code-mk {
+  flex: none;
+  width: 2ch;
+  text-align: center;
+  color: var(--text-secondary);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.code-lc {
+  flex: 1 0 auto;
+  padding: 0 14px 0 10px;
+}
+
+/* A marker column already spaces the code off the gutter. */
+.code-mk + .code-lc { padding-left: 2px; }
+
 /* Soft wrap is for reading prose-y files on a narrow screen; the default stays `pre` so code keeps
-   its shape and the gutter stays meaningful. */
-.code-block.is-wrapped {
+   its shape. Tool previews and the Files tab's modal always wrap: they are too narrow to scroll. */
+.code-block.is-wrapped .code-row,
+.tool-diff .code-row,
+.file-preview .code-row {
+  width: auto;
+}
+.code-block.is-wrapped .code-lc,
+.tool-diff .code-lc,
+.file-preview .code-lc {
+  flex: 1 1 0;
+  min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.code-row {
-  display: block;
-  min-height: 1lh;
+/* Token colours. The server marks each token with its role (highlight.ts) and the colour is picked
+   here, per mode: GitHub's dark hues hold up on true black, its light ones on white. Plain code
+   has no class and is simply the text colour, so it follows the Theme tab too. */
+:root {
+  --hl-cm: #6e7681;
+  --hl-kw: #ff7b72;
+  --hl-str: #a5d6ff;
+  --hl-con: #79c0ff;
+  --hl-fn: #d2a8ff;
+  --hl-ty: #7ee787;
+  --hl-var: #ffa657;
+  --hl-pun: #8b949e;
 }
-
-.code-ln {
-  display: inline-block;
-  width: 3.5ch;
-  margin-right: 1.25ch;
-  text-align: right;
-  color: var(--text-secondary);
-  opacity: 0.45;
-  font-variant-numeric: tabular-nums;
-  -webkit-user-select: none;
-  user-select: none;
-  position: sticky;
-  left: 0;
-  background: var(--bg-primary);
+html[data-mode="light"] {
+  --hl-cm: #6e7781;
+  --hl-kw: #cf222e;
+  --hl-str: #0a3069;
+  --hl-con: #0550ae;
+  --hl-fn: #8250df;
+  --hl-ty: #116329;
+  --hl-var: #953800;
+  --hl-pun: #57606a;
 }
-
-.code-block.is-wrapped .code-ln {
-  /* A wrapped line's number should travel with its first row of text, not pin to the viewport. */
-  position: static;
-}
+.hl-cm { color: var(--hl-cm); }
+.hl-kw { color: var(--hl-kw); }
+.hl-str { color: var(--hl-str); }
+.hl-con { color: var(--hl-con); }
+.hl-fn { color: var(--hl-fn); }
+.hl-ty { color: var(--hl-ty); }
+.hl-var { color: var(--hl-var); }
+.hl-pun { color: var(--hl-pun); }
+.hl-i { font-style: italic; }
+.hl-b { font-weight: 600; }
+.hl-u { text-decoration: underline; }
 
 .code-status {
   margin: 0;
@@ -3158,10 +3238,11 @@ html[data-blur="off"] .sidebar-scrim {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   color: var(--text-secondary);
+  white-space: normal;
 }
 
 .code-status.is-error {
-  color: #f87171;
+  color: var(--danger-text);
 }
 
 /* Toggle buttons that reflect a sticky preference (e.g. soft wrap) read as "on" when active. */
@@ -3171,16 +3252,16 @@ html[data-blur="off"] .sidebar-scrim {
 }
 
 /* ---------- diff rows ----------
-   Two gutters (old then new line number) and a change marker, so a row reads unambiguously as
-   "this was line 12, it is now line 13". The marker and gutters are dimmed on context lines, which
-   is what makes a changed block findable by scrolling rather than by reading. */
+   Two numbers in the gutter (old, then new) and a change marker, so a row reads unambiguously as
+   "this was line 12, it is now line 13". Changed rows are tinted end to end, gutter included, and
+   their numbers are full strength; unchanged ones stay quiet, which is what makes a change findable
+   by scrolling rather than by reading. */
 
-.code-block .code-ln-pair {
-  width: auto;
-  margin-right: 0.5ch;
-  display: inline-flex;
-  gap: 0.75ch;
+.code-ln-pair {
+  display: flex;
+  gap: 1ch;
   justify-content: flex-end;
+  min-width: 0;
 }
 
 .code-ln-pair .is-old,
@@ -3189,79 +3270,65 @@ html[data-blur="off"] .sidebar-scrim {
   text-align: right;
 }
 
-/* Tool previews show one number per row. The shared gutter is sized for the Changes tab's wider
-   layout, which left a wide empty band before the code here; size it to the digits instead. */
-.tool-diff .code-ln {
-  width: auto;
-  min-width: 1.5ch;
-  margin-right: 0.5ch;
-}
-
-.tool-diff .code-mk {
-  width: 1ch;
-  margin-right: 0.5ch;
-}
-
-.code-mk {
-  display: inline-block;
-  width: 1.5ch;
-  text-align: center;
-  opacity: 0.7;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
 .code-row.is-add {
-  background: rgba(63, 185, 80, 0.12);
+  --row-tint: color-mix(in srgb, var(--success) 15%, transparent);
 }
-
-.code-row.is-add .code-mk {
-  color: #3fb950;
-  opacity: 1;
-}
-
 .code-row.is-del {
-  background: rgba(248, 81, 73, 0.12);
+  --row-tint: color-mix(in srgb, var(--danger-text) 15%, transparent);
 }
-
-.code-row.is-del .code-mk {
-  color: #f85149;
-  opacity: 1;
+.code-row.is-add .code-ln,
+.code-row.is-del .code-ln {
+  color: var(--text-secondary);
 }
+.code-row.is-add .code-mk { color: var(--success); font-weight: 600; }
+.code-row.is-del .code-mk { color: var(--danger-text); font-weight: 600; }
 
 .code-row.is-ctx .code-ln,
 .code-row.is-ctx .code-mk {
-  opacity: 0.28;
+  color: color-mix(in srgb, var(--text-secondary) 45%, transparent);
 }
 
+/* "\ No newline at end of file", a hunk heading: bookkeeping, set apart from the code. */
 .code-row.is-meta {
+  --row-tint: color-mix(in srgb, var(--text-secondary) 7%, transparent);
   color: var(--text-secondary);
-  background: var(--bg-inset, #0a0a0a);
+  font-style: italic;
 }
 
-.code-row.is-meta .code-lc {
-  font-size: 0.92em;
+/* Tool previews: one number per row, sized to the digits; the chat column is narrow. */
+.tool-diff .code-ln {
+  min-width: 1.5ch;
+  padding: 0 6px 0 8px;
 }
 
 /* A fold placeholder is a real button so it is reachable by keyboard and announced as tappable. */
 .code-fold {
-  display: block;
-  width: 100%;
+  display: flex;
+  align-items: center;
+  min-width: 100%;
+  width: max-content;
+  margin: 2px 0;
+  padding: 0;
   border: 0;
-  border-top: 1px dashed var(--border);
-  border-bottom: 1px dashed var(--border);
-  background: var(--bg-inset, #0a0a0a);
-  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--accent-text, var(--accent));
   font: inherit;
   text-align: left;
-  padding: 2px 0;
   cursor: pointer;
 }
-
-.code-fold .code-lc {
-  font-size: 0.92em;
-  opacity: 0.8;
+.code-fold .code-ln {
+  --row-tint: color-mix(in srgb, var(--accent) 8%, transparent);
+  display: grid;
+  place-items: center end;
+  color: inherit;
 }
+.code-fold .code-lc {
+  padding: 3px 14px 3px 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 0.92em;
+}
+.code-fold:active { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.code-block.is-wrapped .code-fold { width: auto; }
 
 .change-file-stat {
   margin-left: auto;
@@ -3273,7 +3340,26 @@ html[data-blur="off"] .sidebar-scrim {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
+
+/* Wrap only matters once the diff is showing, so the button waits for the file to be opened. */
+.change-wrap {
+  display: none;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin: -4px -4px -4px 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.change-file[open] .change-wrap { display: grid; }
+.change-wrap.is-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 
 html[data-mode="light"] { color-scheme: light; }
 

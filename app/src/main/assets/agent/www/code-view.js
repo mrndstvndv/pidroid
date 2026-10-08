@@ -43,7 +43,11 @@ function row(label, content, extraClass, isHtml) {
 /** Prepare a container as a code surface, without painting rows into it. */
 function surface(container, opts) {
   if (!container) return;
-  container.className = `code-block${opts && opts.wrap ? " is-wrapped" : ""}${opts && opts.highlighted ? " is-highlighted" : ""}`;
+  // Toggled rather than assigned: the caller's own classes (diff, artifact-source, file-preview)
+  // carry the frame and the surface colour, and overwriting className dropped them.
+  container.classList.add("code-block");
+  container.classList.toggle("is-wrapped", !!(opts && opts.wrap));
+  container.classList.toggle("is-highlighted", !!(opts && opts.highlighted));
 }
 
 /**
@@ -64,7 +68,8 @@ function render(container, opts) {
     // `i + 1` is the line number in the file, which is not the same as the row index once a diff
     // has folded or skipped lines -- callers that skip rows pass their own numbering via opts.numbers.
     const n = Array.isArray(opts.numbers) ? opts.numbers[i] : i + 1;
-    html += row(n, rows ? source[i] : source[i], "", !rows);
+    // Server rows are markup (escaped there); plain text lines still need escaping here.
+    html += row(n, source[i], "", !!rows);
   }
   container.innerHTML = html;
 }
@@ -83,11 +88,16 @@ async function load(container, opts) {
   container.innerHTML = `<p class="code-status">Loading...</p>`;
   let json = null;
   if (highlightUrl) {
-    try {
-      json = await fetch(highlightUrl).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-    } catch { json = null; }
+    // The body is read whatever the status: a refusal ("Too large to preview", "Binary file") is
+    // JSON too, and saying so beats falling back to the plain URL -- which for the Files tab is this
+    // same JSON endpoint, so the fallback used to show the error object as if it were the file.
+    json = await fetch(highlightUrl).then((r) => r.json()).catch(() => null);
   }
   if (stillCurrent && !stillCurrent()) return;
+  if (json && typeof json.error === "string" && typeof json.content !== "string") {
+    container.innerHTML = `<p class="code-status">${escapeHtml(json.error)}.</p>`;
+    return;
+  }
 
   let content = json && typeof json.content === "string" ? json.content : null;
   if (content === null && url) {

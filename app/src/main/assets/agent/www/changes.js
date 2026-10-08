@@ -63,8 +63,8 @@ const MARK = { add: "+", del: "−", ctx: " " };
 function diffRowHtml(r, index) {
   if (r.kind === "meta") {
     if (r.folded) {
-      return `<button class="code-fold" data-index="${index}"><span class="code-ln"></span>` +
-        `<span class="code-lc">⋯ ${escapeHtml(r.text)}</span></button>`;
+      return `<button type="button" class="code-fold" data-index="${index}"><span class="code-ln">⋯</span>` +
+        `<span class="code-lc">Show ${escapeHtml(r.text)}</span></button>`;
     }
     return `<span class="code-row is-meta"><span class="code-ln"></span><span class="code-lc">${escapeHtml(r.text)}</span></span>`;
   }
@@ -90,7 +90,13 @@ function renderDiff(pre, data) {
     return;
   }
   pre.className = "diff code-block";
-  pre._rows = rows;
+  // The patch is built with the whole file as context, so it is one hunk from line 1, and its
+  // "@@ -1,202 +1,204 @@" says nothing the gutter does not. Real hunk headings (several hunks, or
+  // one starting further down) stay: there they mark a jump.
+  const hunks = rows.filter((r) => r.kind === "meta" && r.text.startsWith("@@"));
+  pre._rows = hunks.length === 1 && rows[0] === hunks[0] && /^@@ -[01](,\d+)? \+[01](,\d+)? @@/.test(hunks[0].text)
+    ? rows.slice(1)
+    : rows;
   paintDiff(pre);
 }
 
@@ -110,13 +116,14 @@ async function loadFiles(oid) {
       ${entry?.detail ? `<p class="provider-meta">${escapeHtml(entry.detail)}</p>` : ""}
       ${files.map(f => `
         <details class="change-file" data-path="${escapeHtml(f.path)}">
-          <summary><span class="st-${f.status}">${f.status === "added" ? "+" : f.status === "deleted" ? "−" : "~"}</span> ${escapeHtml(f.path)}<span class="change-file-stat" data-stat="${escapeHtml(f.path)}"></span></summary>
+          <summary><span class="st-${f.status}">${f.status === "added" ? "+" : f.status === "deleted" ? "−" : "~"}</span> ${escapeHtml(f.path)}<span class="change-file-stat" data-stat="${escapeHtml(f.path)}"></span><button type="button" class="change-wrap" data-act="wrap" aria-label="Soft wrap" title="Soft wrap">${icon("text-wrap", 15)}</button></summary>
           <pre class="diff">Loading...</pre>
         </details>`).join("") || '<p class="provider-meta">No file changes.</p>'}
       <div class="change-actions">
         ${undoable ? `<button class="btn-secondary icon-btn-text" data-act="undo">${icon("undo-2", 14)}<span class="btn-label">Undo this</span></button>` : ""}
         <button class="btn-secondary icon-btn-text" data-act="restore">${icon("history", 14)}<span class="btn-label">Restore to here</span></button>
       </div>`;
+    syncWrapButtons();
   } catch (e) {
     body.innerHTML = `<p>${escapeHtml(e.message)}</p>`;
   }
@@ -141,6 +148,22 @@ changesList.addEventListener("toggle", async (e) => {
     pre.textContent = err.message;
   }
 }, true);
+
+// Soft wrap, from any open diff: the preference is shared with the Files viewer (CodeView), so it
+// flips every code surface on screen at once. The button sits in the summary, so the tap must not
+// also fold the file away.
+changesList.addEventListener("click", (e) => {
+  const btn = e.target.closest('button[data-act="wrap"]');
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  window.CodeView.toggleWrap();
+  syncWrapButtons();
+});
+
+function syncWrapButtons() {
+  changesList.querySelectorAll('button[data-act="wrap"]').forEach((b) => window.CodeView.syncWrapButton(b));
+}
 
 // Tapping a fold placeholder splices the hidden rows back in, in place. The rows travel with the
 // placeholder (see diffrows.ts), so expanding needs no second request.
