@@ -32,7 +32,7 @@ import { assemble, foldContext, withoutFolded } from "./diffrows.ts";
 import { fenceLanguage, highlight, highlightPath, languageFor, MAX_INTERACTIVE_CHARS, warm as warmHighlighter } from "./highlight.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
-import { discoverSkills, SKILLS_DIR } from "./skills.ts";
+import { discoverSkills, renderSkillsPrompt, SKILLS_DIR } from "./skills.ts";
 import { ChatViewBuilder, clampLevel, liveDelta, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
 import { Timings } from "./timings.ts";
 import { SKIP_DIRS, SKIP_FILES, SKIP_SUFFIXES, writeBundle } from "./bundles.ts";
@@ -656,6 +656,7 @@ const SelfModify = defineExtension({
         "Keep shell commands small and targeted; never loop over /proc or search the whole filesystem.",
       { tag: false },
     ),
+    section("skills", renderSkillsPrompt),
   ],
   hooks: [
     hook(ToolTask, {
