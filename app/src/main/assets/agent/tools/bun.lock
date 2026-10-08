@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "pidroid-tools",
+      "dependencies": {
+        "@ffmpeg/core": "0.12.6",
+      },
+    },
+  },
+  "packages": {
+    "@ffmpeg/core": ["@ffmpeg/core@0.12.6", "", {}, "sha512-PrjWBTfGn2WVn9T7wGnzfFwChbqWeZc7tM9vvJZVRadYFUDakfzy7W0LpYC0cvvK0xT82qlBsk38lQhJ/Hps5A=="],
+  }
+}

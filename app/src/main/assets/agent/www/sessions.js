@@ -291,3 +291,167 @@ window.onSessionInfo = (session) => {
 
 // Closing the sidebar (scrim tap, back gesture) must not leave the row menu floating.
 window.closeSessionMenu = closeSessionMenu;
+
+/* ---------- top bar title popup ----------
+   The session list is where renaming lived, but naming is something you do to the conversation in
+   front of you, not to a row you have to find first. The popup is the top bar's own, and does only
+   that: the current title in an editable box, and a button to have a model write a better one. The
+   list stays behind the burger -- a popup that also navigates is a menu with a text field in it. */
+const titleBtn = document.getElementById("session-btn");
+let titlePop = null;
+let titleBusy = false;
+let popOpenedAt = 0;
+/** Human name of the model a generated title will come from: the title-model preference while one
+    is picked, and empty otherwise (the server then uses the session's own model). */
+let titleModelName = "";
+
+function closeTitlePop() {
+  if (!titlePop || titlePop.hidden) return;
+  titlePop.hidden = true;
+  titleBtn?.setAttribute("aria-expanded", "false");
+  titleBusy = false;
+}
+
+/** The Generate row's label, which names the model it will spend -- so it follows the title-model
+    preference whenever that changes. */
+function renderGenerateRow() {
+  const button = titlePop?.querySelector('[data-act="generate"]');
+  if (!button || button.disabled) return;
+  button.innerHTML = `${icon("sparkles", 16)}<span>Generate${titleModelName ? ` with ${escapeHtml(titleModelName)}` : ""}</span>`;
+}
+
+function openTitlePop() {
+  if (!titleBtn) return;
+  if (!titlePop) {
+    titlePop = document.createElement("div");
+    titlePop.className = "title-pop";
+    titlePop.setAttribute("role", "dialog");
+    titlePop.setAttribute("aria-label", "Session title");
+    titlePop.hidden = true;
+    titlePop.innerHTML = `
+      <div class="title-pop-head">Session title</div>
+      <div class="title-pop-edit">
+        <input type="text" class="field title-pop-input" id="title-pop-input" maxlength="80"
+               autocomplete="off" autocapitalize="sentences" spellcheck="false" aria-label="Session title" />
+        <button type="button" class="title-pop-save" id="title-pop-save">Save</button>
+      </div>
+      <button type="button" class="session-menu-item" data-act="generate" id="title-pop-generate"></button>`;
+    document.body.appendChild(titlePop);
+
+    titlePop.querySelector("#title-pop-save").addEventListener("click", () => saveTypedTitle());
+    titlePop.querySelector('[data-act="generate"]').addEventListener("click", () => generateTitle());
+    // Enter saves without dismissing the popup: a second idea about the name usually follows the
+    // first, and having to reopen the box to say it is what makes people give up renaming.
+    titlePop.querySelector("#title-pop-input").addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      saveTypedTitle();
+    });
+  }
+  if (!titlePop.hidden) return closeTitlePop();
+
+  const input = titlePop.querySelector("#title-pop-input");
+  input.value = sessionTitle.textContent.trim();
+  const generate = titlePop.querySelector('[data-act="generate"]');
+  generate.disabled = false;
+  renderGenerateRow();
+  titlePop.hidden = false;
+  titleBtn.setAttribute("aria-expanded", "true");
+  placeTitlePop();
+  popOpenedAt = performance.now();
+
+  // Focus last: it raises the keyboard, which is a resize, and the popup has to already be on
+  // screen to survive being re-anchored by it.
+  input.focus({ preventScroll: true });
+  input.select();
+}
+
+/** Put the popup under the title, centred on it, then keep it inside the viewport. The title sits
+    in the middle of the bar, so its own edges are the only thing that can push the box off screen --
+    but the keyboard can: it shrinks the viewport from the bottom, and a popup anchored under a top
+    bar stays put only if it is clamped against the height that is left. */
+function placeTitlePop() {
+  if (!titlePop || titlePop.hidden) return;
+  const r = titleBtn.getBoundingClientRect();
+  const box = titlePop.getBoundingClientRect();
+  const pad = 8;
+  const left = Math.max(pad, Math.min(r.left + r.width / 2 - box.width / 2, window.innerWidth - box.width - pad));
+  const below = r.bottom + 6;
+  titlePop.style.left = `${left}px`;
+  titlePop.style.top = `${Math.max(pad, Math.min(below, window.innerHeight - box.height - pad))}px`;
+}
+
+async function saveTypedTitle() {
+  if (!titlePop || titleBusy) return;
+  const input = titlePop.querySelector("#title-pop-input");
+  const title = input.value.trim();
+  if (!title) return flash("A session needs a name", true);
+  if (title === sessionTitle.textContent.trim()) return closeTitlePop();
+  try {
+    await sessionsApi(`/api/sessions/${sessionData.current}/rename`, "POST", { title });
+    // The server answers with the current session and broadcasts the change, which is what
+    // repaints the top bar and the sidebar; this only clears the popup's own copy.
+    input.value = title;
+    closeTitlePop();
+  } catch (err) {
+    flash(err.message, true);
+  }
+}
+
+/** Have a model write the title for this conversation. The server does the work and the rename, and
+    sends back what it settled on, so the box never shows a title the session does not have. */
+async function generateTitle() {
+  if (!titlePop || titleBusy) return;
+  const button = titlePop.querySelector('[data-act="generate"]');
+  const input = titlePop.querySelector("#title-pop-input");
+  titleBusy = true;
+  button.disabled = true;
+  button.innerHTML = `<span class="shimmer">Writing a title…</span>`;
+  try {
+    const data = await sessionsApi(`/api/sessions/${sessionData.current}/title`, "POST");
+    input.value = data.title;
+    sessionTitle.textContent = data.title;
+    flash(`Titled with ${data.model}`);
+    closeTitlePop();
+  } catch (err) {
+    button.disabled = false;
+    button.innerHTML = `${icon("sparkles", 16)}<span>Try again</span>`;
+    flash(err.message, true);
+  } finally {
+    titleBusy = false;
+  }
+}
+
+// The title model preference decides which model Generate names, so it follows it into the popup.
+window.onTitleModelChanged = (key, name) => {
+  titleModelName = name || key || "";
+  renderGenerateRow();
+};
+
+titleBtn?.addEventListener("click", openTitlePop);
+document.addEventListener("pointerdown", (e) => {
+  if (!titlePop || titlePop.hidden) return;
+  if (titlePop.contains(e.target) || titleBtn?.contains(e.target)) return;
+  // A tap that lands a moment after opening is the tail of the tap that opened it -- the WebView
+  // hands over a synthesized pointerdown once focus has moved and the keyboard is on its way up.
+  // Treating that as "somewhere else" closed the popup under the user's thumb.
+  if (performance.now() - popOpenedAt < 400) return;
+  closeTitlePop();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeTitlePop();
+});
+// Raising the soft keyboard is a resize, and this popup holds the focused input -- so closing on
+// every resize closed it a fraction of a second after it opened, which is exactly what it did. A
+// height change while the box has focus only re-anchors it; anything else (a rotation, the window
+// itself changing) still dismisses it.
+let popWidth = window.innerWidth;
+window.addEventListener("resize", () => {
+  if (!titlePop || titlePop.hidden) return;
+  const widthChanged = window.innerWidth !== popWidth;
+  popWidth = window.innerWidth;
+  if (!widthChanged && titlePop.contains(document.activeElement)) return placeTitlePop();
+  closeTitlePop();
+});
+// Above the sidebar menu (90) but below the settings sheet, so back unwinds the title popup first.
+registerBackLayer(95, () => titlePop && !titlePop.hidden, closeTitlePop);

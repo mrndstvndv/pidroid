@@ -1,0 +1,7 @@
+{
+  "name": "pidroid-tools",
+  "private": true,
+  "dependencies": {
+    "@ffmpeg/core": "0.12.6"
+  }
+}

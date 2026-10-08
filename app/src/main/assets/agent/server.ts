@@ -1337,6 +1337,99 @@ function noteTitleStatus(sessionId: number, state: "started" | "failed", detail?
   broadcast("title_status", { sessionId, state, detail });
 }
 
+/**
+ * What a title is written from: the message the conversation opened with, plus the answer that came
+ * back. Two texts rather than one because the first message is often "do this thing" and the reply
+ * is what says what the thing was -- both are clipped so a pasted log cannot eat the whole prompt.
+ */
+function titleSource(messages: ChatView["messages"]): string {
+  const asked = messages.find((m) => m.role === "user")?.text?.trim() ?? "";
+  const answered = messages.find((m) => m.role === "assistant")?.text?.trim() ?? "";
+  if (!asked) return answered.slice(0, 4000);
+  if (!answered) return asked.slice(0, 4000);
+  return `${asked.slice(0, 4000)}\n\nThe assistant began its answer with:\n${answered.slice(0, 1200)}`;
+}
+
+/** Ask one model for a title and scrub the reply down to a bare title. Throws on a provider error;
+    undefined means the model answered with nothing usable after scrubbing. */
+async function titleFromModel(model: any, source: string): Promise<string | undefined> {
+  const stream = models.streamSimple(model, {
+    messages: [{
+      role: "user",
+      content: `Write a concise, descriptive title for this conversation in at most 8 words. Return only the title, with no quotes or explanation.\n\nThe conversation so far:\n${source}`,
+    }],
+  });
+  const result = await stream.result();
+  if (result.stopReason === "error" || result.errorMessage) {
+    throw new Error(result.errorMessage || "Title model returned an error");
+  }
+  const generated = (result.content ?? [])
+    .filter((block: any) => block?.type === "text")
+    .map((block: any) => block.text)
+    .join(" ")
+    .split(/\r?\n/, 1)[0]
+    .replace(/^\s*(?:title|conversation title)\s*:\s*/i, "")
+    .replace(/^\s*#+\s*/, "")
+    .replace(/^['"`]+|['"`]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  return generated || undefined;
+}
+
+/** The committed transcript of a session, read from storage for any row -- the open session already
+    has its view built and is used from there. */
+async function messagesOf(row: SessionRow): Promise<ChatView["messages"]> {
+  if (row.id === current.id) return latestView.messages;
+  const view = new ChatViewBuilder().build(await (await handleFor(row)).viewState(context), models);
+  return view.messages;
+}
+
+/**
+ * Write a title the user asked for, replacing whatever was on the session. This deliberately
+ * overwrites a hand-written title -- asking for a new one is the point -- unlike the automatic path,
+ * which stands down the moment a session has a name of its own.
+ */
+async function writeGeneratedTitle(row: SessionRow, source: string): Promise<string> {
+  // The title model when one is picked (that is what it is for), else the model this session
+  // already runs on: a manual "generate" is a deliberate request for a model to think about the
+  // name, and this one is already configured, signed in and paid for.
+  const key = titleModelPreference()?.key ?? row.model;
+  const [provider, ...rest] = key.split("/");
+  const model = models.getModel(provider, rest.join("/"));
+  if (!model) throw new Error(`${key} is not available`);
+  const title = await titleFromModel(model, source);
+  if (!title) throw new Error("the model returned an empty title");
+  if (row.title !== title) {
+    sessions.rename(row.id, title);
+    broadcast("sessions_changed", {});
+  }
+  if (current.id === row.id) {
+    current = sessions.get(row.id) ?? current;
+    broadcast("agent_view", chatPayload());
+  }
+  return title;
+}
+
+/** The route behind the popup's "Generate": write a fresh title from the conversation so far. */
+async function regenerateTitle(row: SessionRow): Promise<{ title: string; model: string }> {
+  const source = titleSource(await messagesOf(row));
+  if (!source.trim()) throw new Error("Send a message first -- there is nothing to name this session after yet");
+  if (titleGenerationJobs.has(row.id)) throw new Error("a title is already being written for this session");
+  titleGenerationJobs.add(row.id);
+  noteTitleStatus(row.id, "started", titleModelPreference()?.key ?? row.model);
+  try {
+    const title = await writeGeneratedTitle(row, source);
+    return { title, model: titleModelPreference()?.key ?? row.model };
+  } catch (err) {
+    console.warn(`[pidroid] title generation failed for session ${row.id}:`, err);
+    noteTitleStatus(row.id, "failed", err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    titleGenerationJobs.delete(row.id);
+  }
+}
+
 const titleGenerationJobs = new Set<number>();
 function scheduleTitleGeneration(sessionId: number, firstMessage: string) {
   const preference = titleModelPreference();
@@ -1356,27 +1449,7 @@ function scheduleTitleGeneration(sessionId: number, firstMessage: string) {
         noteTitleStatus(sessionId, "failed", `${preference.key} is no longer available`);
         return;
       }
-      const stream = models.streamSimple(model, {
-        messages: [{
-          role: "user",
-          content: `Write a concise, descriptive title for this conversation in at most 8 words. Return only the title, with no quotes or explanation.\n\nFirst user message:\n${firstMessage.slice(0, 4000)}`,
-        }],
-      });
-      const result = await stream.result();
-      if (result.stopReason === "error" || result.errorMessage) {
-        throw new Error(result.errorMessage || "Title model returned an error");
-      }
-      const generated = (result.content ?? [])
-        .filter((block: any) => block?.type === "text")
-        .map((block: any) => block.text)
-        .join(" ")
-        .split(/\r?\n/, 1)[0]
-        .replace(/^\s*(?:title|conversation title)\s*:\s*/i, "")
-        .replace(/^\s*#+\s*/, "")
-        .replace(/^['"`]+|['"`]+$/g, "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 80);
+      const generated = await titleFromModel(model, firstMessage.slice(0, 4000));
       if (!generated) {
         // Scrubbing can leave nothing behind (an empty or punctuation-only reply), and the
         // fallback below is only for a thrown error -- so say so rather than leave the session
@@ -1879,9 +1952,18 @@ const server = Bun.serve({
         .catch(err => Response.json({ error: String(err) }, { status: 500 }));
     }
 
-    const sessionRoute = url.pathname.match(/^\/api\/sessions\/(\d+)\/(switch|rename|delete)$/);
+    const sessionRoute = url.pathname.match(/^\/api\/sessions\/(\d+)\/(switch|rename|delete|title)$/);
     if (sessionRoute && req.method === "POST") {
       const id = Number(sessionRoute[1]);
+      if (sessionRoute[2] === "title") {
+        const row = sessions.get(id);
+        if (!row) return Response.json({ error: "No such session" }, { status: 404 });
+        // Awaits the model rather than reporting back: the page is waiting on the new title to put
+        // in the box, and there is nothing else for it to do with a "started" it cannot trust.
+        return regenerateTitle(row)
+          .then(({ title, model }) => Response.json({ success: true, title, model }))
+          .catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
+      }
       return req.json().catch(() => ({})).then(async (body: { title?: string }) => {
         if (sessionRoute[2] === "switch") await switchTo(id);
         else if (sessionRoute[2] === "rename") {
@@ -2421,7 +2503,16 @@ const server = Bun.serve({
       // The agent edits these files itself, so they must revalidate; but an unchanged file answers
       // 304 with no body instead of being re-read and re-sent on every page load.
       const etag = `"${file.lastModified.toString(36)}-${file.size.toString(36)}"`;
-      const headers = { ETag: etag, "Cache-Control": "no-cache" };
+      // Fonts are the exception. They are bundled and never edited in place, so revalidating them on
+      // every use buys nothing -- and "no-cache" actively hurt them: the WebView re-fetched each face
+      // on every paint and, when that revalidation came back as a bodyless 304, dropped the face and
+      // fell through to the next family in the stack. That read as "the font appears, then something
+      // replaces it". A long immutable max-age lets the font sit in the cache untouched; the ?v=
+      // cache-bust on the stylesheet is what picks up a new build.
+      const isFont = /\.(woff2?|ttf|otf|eot)$/i.test(filePath);
+      const headers = isFont
+        ? { ETag: etag, "Cache-Control": "public, max-age=31536000, immutable" }
+        : { ETag: etag, "Cache-Control": "no-cache" };
       if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers });
       return new Response(file, { headers });
     }

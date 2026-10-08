@@ -189,6 +189,17 @@
   }
   try { applyBlur(localStorage.getItem(BLUR_KEY) !== "off"); } catch (e) { /* default: on */ }
 
+  // --- code ligatures: html[data-ligatures="off"] disables JetBrains Mono's programming ligatures
+  //     in code surfaces, which can otherwise hide the exact characters a diff is showing (see style.css).
+  const LIGATURE_KEY = "pidroid.ligatures";
+  function applyLigatures(on) {
+    if (on) document.documentElement.removeAttribute("data-ligatures");
+    else document.documentElement.setAttribute("data-ligatures", "off");
+    const box = document.getElementById("theme-ligatures");
+    if (box) box.checked = on;
+  }
+  try { applyLigatures(localStorage.getItem(LIGATURE_KEY) !== "off"); } catch (e) { /* default: on */ }
+
   function save(theme) {
     try {
       localStorage.setItem(KEY(), JSON.stringify(theme));
@@ -420,6 +431,12 @@
       try { localStorage.setItem(BLUR_KEY, e.target.checked ? "on" : "off"); } catch (err) { /* won't persist */ }
     });
     applyBlur(document.documentElement.getAttribute("data-blur") !== "off");
+
+    document.getElementById("theme-ligatures")?.addEventListener("change", (e) => {
+      applyLigatures(e.target.checked);
+      try { localStorage.setItem(LIGATURE_KEY, e.target.checked ? "on" : "off"); } catch (err) { /* won't persist */ }
+    });
+    applyLigatures(document.documentElement.getAttribute("data-ligatures") !== "off");
 
     document.getElementById("theme-reset")?.addEventListener("click", () => apply({ ...D() }));
 

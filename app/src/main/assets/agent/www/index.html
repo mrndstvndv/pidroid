@@ -7,6 +7,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
   <title>Pidroid Agent</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <!-- The bundled code face (JetBrains Mono) is declared at the top of style.css, so it travels with
+       the CSS the UI hot-reloads. Regular/Bold are preloaded because that is what a diff asks for
+       first; the preload alone would not be enough, the @font-face rules do the real work. -->
+  <link rel="preload" href="fonts/JetBrainsMono-Regular-2.304.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/JetBrainsMono-Bold-2.304.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="style.css" id="main-stylesheet">
   <script>
     // Resolve light/dark and apply the saved theme before first paint, so there is no flash of the wrong
@@ -284,6 +289,15 @@
           <div class="theme-value">
             <label class="ext-switch" title="Blur behind the top bar, composer and sidebar">
               <input type="checkbox" id="theme-blur" checked />
+              <span class="ext-switch-track"><span class="ext-switch-thumb"></span></span>
+            </label>
+          </div>
+        </div>
+        <div class="theme-row">
+          <label class="theme-label" for="theme-ligatures">Code ligatures</label>
+          <div class="theme-value">
+            <label class="ext-switch" title="JetBrains Mono draws != and =&gt; as single glyphs; off shows the plain characters">
+              <input type="checkbox" id="theme-ligatures" checked />
               <span class="ext-switch-track"><span class="ext-switch-thumb"></span></span>
             </label>
           </div>

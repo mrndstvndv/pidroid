@@ -1,5 +1,61 @@
+/* ---------- JetBrains Mono (bundled) ----------
+   The code face for every source surface: the Changes-tab diff, the file viewers, artifact source and
+   errors. Bundled rather than linked so the app renders the same offline and on every device.
+
+   These @font-face rules live in style.css rather than a separate fonts.css on purpose: the UI's CSS
+   hot-reload (app.js) only re-swaps style.css, so a second stylesheet would keep serving a stale copy
+   and --font-mono would name a family that was never defined. Keeping them here makes the faces
+   travel with the variable that uses them.
+
+   Licensed under the SIL Open Font License 1.1 -- see fonts/OFL.txt, shipped alongside as the
+   licence requires. Only the faces the app renders are bundled: Regular and Italic for code,
+   SemiBold because the highlighter marks emphasis with font-weight:600, Bold/BoldItalic for bold
+   spans in source. font-display:swap keeps text readable while they load. */
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-Regular-2.304.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-Italic-2.304.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-SemiBold-2.304.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-Bold-2.304.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-BoldItalic-2.304.woff2") format("woff2");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+
 :root {
-  --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", "Roboto Mono", "Droid Sans Mono", Menlo, Consolas, monospace;
+  /* The bundled code face above. The system stack stays behind it so a face that fails to load still
+     renders as something monospaced rather than falling back to the UI sans. */
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "SFMono-Regular", "Roboto Mono", "Droid Sans Mono", Menlo, Consolas, monospace;
   --bg-primary: #000000;
   --bg-secondary: #000000;
   --bg-card: #000000;
@@ -316,9 +372,9 @@ body {
   left: 0;
   width: min(84vw, 320px);
   /* Frosted: translucent tint over a blur of the chat and scrim behind it. */
-  background-color: color-mix(in srgb, var(--bg-secondary) 78%, transparent);
-  -webkit-backdrop-filter: blur(18px) saturate(160%);
-  backdrop-filter: blur(18px) saturate(160%);
+  background-color: color-mix(in srgb, var(--bg-secondary) 26%, transparent);
+  -webkit-backdrop-filter: blur(30px) saturate(190%);
+  backdrop-filter: blur(30px) saturate(190%);
   border-right: 1px solid var(--border);
   z-index: 50;
   display: flex;
@@ -960,8 +1016,25 @@ textarea {
 
 .provider-actions {
   display: flex;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.provider-actions a {
+  text-decoration: none;
+}
+
+.provider-actions .provider-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  padding: 0;
+  flex: 0 0 44px;
 }
 
 /* ---------- provider usage panel (Providers tab → Usage) ---------- */
@@ -1604,7 +1677,7 @@ html[data-mode="light"] .shimmer {
 
 .change-file summary {
   cursor: pointer;
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 0.78rem;
   padding: 4px 0;
 }
@@ -1668,7 +1741,8 @@ html[data-mode="light"] .shimmer {
   position: absolute;
   inset: 50% 0 0;
   z-index: -1;
-  background: linear-gradient(to bottom, transparent, var(--bg-primary) 45%);
+  background: linear-gradient(to bottom, transparent,
+    color-mix(in srgb, var(--bg-primary) 55%, transparent) 45%);
   pointer-events: none;
 }
 
@@ -2182,12 +2256,24 @@ details.work[data-want-open="1"] > summary .work-chev { transform: rotate(90deg)
 
 .message.error { border-color: #ef4444; color: var(--danger-text); }
 
-/* Anything that is code gets the same monospace face as the diff, wherever it appears --
-   not just inside a message, but also in the static tab descriptions and the tool bodies. */
+/* Anything that is code gets the same bundled face -- fences, tool diffs and file-viewer rows.
+   Markdown highlighters wrap each token in a span, so assign the family to those descendants too
+   instead of relying only on inheritance from <pre>/<code>. Keep this important so token styles or
+   component-level font shorthands cannot silently switch code back to the UI sans. */
+code,
+code *,
+pre,
+pre *,
+.code,
+.code *,
+.code-block,
+.code-block * {
+  font-family: var(--font-mono) !important;
+}
+
 code,
 pre,
 .code {
-  font-family: monospace;
   font-size: 0.78rem;
 }
 
@@ -2423,7 +2509,7 @@ details.tool.failed .tool-sum { color: var(--danger-text); }
   border-radius: 10px;
   background-color: var(--bg-inset);
   overflow: hidden;
-  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
 }
 
@@ -2453,7 +2539,7 @@ details.tool.failed .term { border-color: color-mix(in srgb, var(--danger-text) 
 details.tool.failed .term-out { color: var(--danger-text); }
 
 /* The row shows the command itself, in the terminal's face. */
-.tool-sum-cmd { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.74rem; }
+.tool-sum-cmd { font-family: var(--font-mono); font-size: 0.74rem; }
 
 .tool-label { font-size: 0.65rem; text-transform: uppercase; color: var(--text-secondary); margin-top: 6px; }
 .tool-out { max-height: 220px; overflow-y: auto; }
@@ -2468,7 +2554,7 @@ details.tool.failed .term-out { color: var(--danger-text); }
 /* Full-screen and modal viewers: the page itself is the surface, and the rows reach its edges. */
 .artifact-source.code-block { --code-bg: var(--bg-primary); padding: 6px 0 max(16px, env(safe-area-inset-bottom, 0px)); }
 .file-preview.code-block { --code-bg: var(--bg-primary); padding: 6px 0; }
-.diff-stat { margin-left: 6px; font-family: monospace; letter-spacing: 0; text-transform: none; }
+.diff-stat { margin-left: 6px; font-family: var(--font-mono); letter-spacing: 0; text-transform: none; }
 .tool-note { margin: 4px 0 0; color: var(--text-secondary); font-style: italic; }
 
 /* web_search results, as cards. A numbered text dump is unreadable on a phone: the eye needs the
@@ -2679,6 +2765,64 @@ p.empty { padding: 24px 8px; text-align: center; }
 .session-menu-item:hover,
 .session-menu-item:focus-visible { background-color: var(--press); outline: none; }
 .session-menu-item.danger { color: var(--danger-text); }
+/* A row that is working (a title being written) must not look tappable. */
+.session-menu-item:disabled { opacity: 0.55; cursor: default; }
+.session-menu-item:disabled:hover { background: none; }
+
+/* ---------- top bar title popup ----------
+   Same fixed-on-<body> trick as the row menu, and the same opaque card, so it can sit over the
+   chat and the composer without the messages showing through it. Above the sidebar (50) and the
+   row menu (60): it is opened from the bar, which is on top of both. */
+.title-pop {
+  position: fixed;
+  z-index: 70;
+  width: min(320px, calc(100vw - 16px));
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+.title-pop[hidden] { display: none; }
+
+.title-pop-head {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  padding: 0 2px;
+}
+
+.title-pop-edit {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.title-pop-input {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0; /* the shared .field rule assumes a form column, not a row */
+  /* --bg-primary, not the card the popup itself is: on the same colour the box would be invisible
+     until it took focus. */
+  background-color: var(--bg-primary);
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+.title-pop-save {
+  flex: none;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.title-pop-save:active { background-color: var(--press); }
 
 /* ---------- one-line confirmation ----------
    Exporting a transcript is invisible work: the file goes to shared storage and the only
@@ -2964,8 +3108,8 @@ p.empty { padding: 24px 8px; text-align: center; }
   /* How much tint sits over the blur. Low on purpose: on AMOLED black the bar should read
      as a pane of glass, not a grey slab, and messages stay legible scrolling under it.
      Raise --chrome-tint to tighten it. */
-  --chrome-tint: 55%;
-  --chrome-blur: blur(26px) saturate(180%);
+  --chrome-tint: 14%;
+  --chrome-blur: blur(34px) saturate(200%);
   isolation: isolate; /* keep the tint from blending with whatever is behind */
 }
 
@@ -3137,6 +3281,18 @@ html[data-blur="off"] .sidebar-scrim {
   color: var(--text-primary);
   white-space: pre;
   -webkit-text-size-adjust: none;
+}
+
+/* Code ligatures off (Theme > Effects). JetBrains Mono draws != and => as single glyphs, which reads
+   nicely but can hide the exact characters a diff is about; this turns them back into plain pairs.
+   font-feature-settings is the reliable lever here -- font-variant-ligatures alone does not always
+   reach a font's calt/liga tables. */
+html[data-ligatures="off"] .code-block,
+html[data-ligatures="off"] code,
+html[data-ligatures="off"] pre,
+html[data-ligatures="off"] .code {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "clig" 0, "calt" 0;
 }
 
 .code-row {
@@ -3402,7 +3558,7 @@ html[data-mode="light"] { color-scheme: light; }
   margin: 0;
   padding: 4px 12px max(12px, env(safe-area-inset-bottom, 0px));
   overflow: auto;
-  font-family: ui-monospace, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 0.72rem;
   line-height: 1.45;
   color: var(--text-primary);

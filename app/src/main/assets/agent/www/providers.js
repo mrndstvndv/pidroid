@@ -110,6 +110,9 @@ function renderTitleModelButton() {
   titleModelBtnSub.textContent = m
     ? (m.providerName || m.provider)
     : "Titles come from your first message";
+  // The top bar's title popup names the model its Generate button would spend, so it needs to
+  // hear about the preference too -- not only the tab that shows it.
+  window.onTitleModelChanged?.(modelData.titleModel || "", m ? m.name : "");
 }
 
 titleModelBtn?.addEventListener("click", () => openModelModal({ mode: "title" }));
@@ -438,13 +441,20 @@ function renderProviders() {
       : `<span class="provider-meta">Not signed in · ${p.modelCount} models</span>`;
     const buttons = [];
     if (p.configured && p.source === "stored credential") {
-      buttons.push(`<button class="btn-secondary icon-btn-text" data-act="logout" data-id="${escapeHtml(p.id)}">${icon("log-out", 14)}<span class="btn-label">Sign out</span></button>`);
+      buttons.push(`<button type="button" class="btn-secondary provider-icon-btn" data-act="logout" data-id="${escapeHtml(p.id)}" aria-label="Sign out of ${escapeHtml(p.name)}" title="Sign out">${icon("log-out", 18)}</button>`);
     }
-    if (!p.configured || p.source === "stored credential") {
-      if (p.oauth) buttons.push(`<button class="btn-primary icon-btn-text" data-act="oauth" data-id="${escapeHtml(p.id)}">${icon("log-in", 14)}<span class="btn-label">Sign in</span></button>`);
-      if (p.apiKey) buttons.push(`<button class="${p.oauth ? "btn-secondary" : "btn-primary"} icon-btn-text" data-act="key" data-id="${escapeHtml(p.id)}">${icon("key-round", 14)}<span class="btn-label">API key</span></button>`);
+    // A configured Copilot credential is an active sign-in. Don't offer Sign in and API key
+    // beside Sign out; users can sign out first if they need to replace the credential.
+    if (!p.configured || (p.source === "stored credential" && p.id !== "github-copilot")) {
+      if (p.oauth) buttons.push(`<button type="button" class="btn-primary provider-icon-btn" data-act="oauth" data-id="${escapeHtml(p.id)}" aria-label="Sign in to ${escapeHtml(p.name)}" title="Sign in">${icon("log-in", 18)}</button>`);
+      if (p.apiKey) buttons.push(`<button type="button" class="${p.oauth ? "btn-secondary" : "btn-primary"} provider-icon-btn" data-act="key" data-id="${escapeHtml(p.id)}" aria-label="Set API key for ${escapeHtml(p.name)}" title="API key">${icon("key-round", 18)}</button>`);
     }
-    if (p.usage) buttons.push(`<button class="btn-secondary icon-btn-text" data-act="usage" data-id="${escapeHtml(p.id)}">${icon("history", 14)}<span class="btn-label">Usage</span></button>`);
+    if (p.usage) buttons.push(`<button type="button" class="btn-secondary provider-icon-btn" data-act="usage" data-id="${escapeHtml(p.id)}" aria-label="View ${escapeHtml(p.name)} usage" title="Usage">${icon("history", 18)}</button>`);
+    // Copilot account usage is shown on GitHub's billing overview, not through the
+    // Command Code-specific in-app usage API. Only show the shortcut when signed in.
+    if (p.id === "github-copilot" && p.configured) {
+      buttons.push(`<a class="btn-secondary provider-icon-btn" href="https://github.com/settings/copilot/features" target="_blank" rel="noopener" aria-label="View GitHub Copilot usage on GitHub" title="Usage">${icon("external-link", 18)}</a>`);
+    }
     return `
       <div class="provider-item">
         <div class="provider-info"><strong>${escapeHtml(p.name)}</strong>${status}</div>

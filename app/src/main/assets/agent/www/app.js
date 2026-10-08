@@ -387,8 +387,8 @@ burger?.addEventListener("click", openSidebar);
 scrim?.addEventListener("click", closeSidebar);
 document.getElementById("sidebar-close")?.addEventListener("click", closeSidebar);
 registerBackLayer(80, () => sidebar.classList.contains("open"), closeSidebar);
-// The title doubles as a shortcut to the session list.
-document.getElementById("session-btn")?.addEventListener("click", openSidebar);
+// The title in the bar opens the title popup instead of the list (sessions.js owns that now), so
+// the session list is behind the burger only.
 
 
 // WebSocket Setup
