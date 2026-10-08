@@ -100,7 +100,7 @@ const TOOL_ICONS = [
   ["todowrite", "list-todo"], ["todos", "list-todo"], ["todo", "list-todo"],
   ["updateplan", "list-checks"], ["plan", "list-checks"],
   ["findfiles", "folder-search"], ["glob", "folder-search"],
-  ["grep", "search"], ["search", "search"],
+  ["search", "search"],
   ["read", "file-text"], ["view", "file-text"],
   ["write", "file-plus"], ["create", "file-plus"],
   ["edit", "pencil"], ["patch", "pencil"],
