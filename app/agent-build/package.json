@@ -7,10 +7,13 @@
     "start": "bun run server.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-durable": "^1.0.4",
-    "@earendil-works/pi-ai": "^1.0.4",
     "@earendil-works/chord": "^1.0.4",
-    "isomorphic-git": "^1.30.0",
-    "diff": "^8.0.4"
+    "@earendil-works/pi-ai": "^1.0.4",
+    "@earendil-works/pi-durable": "^1.0.4",
+    "@shikijs/core": "^4.5.0",
+    "@shikijs/engine-oniguruma": "^4.5.0",
+    "@shikijs/langs": "^4.5.0",
+    "diff": "^8.0.4",
+    "isomorphic-git": "^1.30.0"
   }
 }

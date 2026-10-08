@@ -26,6 +26,20 @@ const VENDOR: Record<string, string> = {
   "@earendil-works/chord/context": "chord-context",
   "isomorphic-git": "isomorphic-git",
   diff: "diff",
+  // Syntax highlighting (highlight.ts): the Oniguruma wasm engine, inlined, and one grammar per language.
+  "@shikijs/core": "shiki-core",
+  "@shikijs/engine-oniguruma": "shiki-engine-oniguruma",
+  "@shikijs/engine-oniguruma/wasm-inlined": "shiki-engine-oniguruma-wasm",
+  "@shikijs/langs/typescript": "shiki-lang-typescript",
+  "@shikijs/langs/javascript": "shiki-lang-javascript",
+  "@shikijs/langs/json": "shiki-lang-json",
+  "@shikijs/langs/html": "shiki-lang-html",
+  "@shikijs/langs/css": "shiki-lang-css",
+  "@shikijs/langs/markdown": "shiki-lang-markdown",
+  "@shikijs/langs/yaml": "shiki-lang-yaml",
+  "@shikijs/langs/python": "shiki-lang-python",
+  "@shikijs/langs/diff": "shiki-lang-diff",
+  "@shikijs/langs/shell": "shiki-lang-shell",
 };
 
 const outDir = resolve(process.argv[2] ?? "dist");
@@ -37,7 +51,8 @@ rmSync(join(outDir, "vendor"), { recursive: true, force: true });
 const entrypoints: string[] = [];
 for (const [specifier, name] of Object.entries(VENDOR)) {
   const file = join(entryDir, `${name}.ts`);
-  const hasDefault = specifier === "isomorphic-git";
+  // A grammar's default export is its registration list; `export *` alone would drop it.
+  const hasDefault = specifier === "isomorphic-git" || specifier.startsWith("@shikijs/langs/");
   writeFileSync(file, `export * from "${specifier}";\n${hasDefault ? `export { default } from "${specifier}";\n` : ""}`);
   entrypoints.push(file);
 }
