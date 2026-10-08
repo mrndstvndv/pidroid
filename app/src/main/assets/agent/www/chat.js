@@ -2493,7 +2493,7 @@ chatForm.addEventListener("submit", (e) => {
   }
   if (attachmentUploadInProgress) return;
   const text = chatInput.value.trim();
-  const images = pendingImages.map(({ path, number, name }) => ({ path, label: `Image #${number}`, name }));
+  const images = pendingImages.map(({ path, name }) => ({ path, name }));
   if (!text && !images.length) return;
   chatInput.value = "";
   autoSizeChatInput();
@@ -2517,7 +2517,8 @@ function sendText(text, attachments = []) {
 /* ---------- attachments ----------
    Android gives the WebView a content:// URI for picked files; upload the bytes here, then
    keep image paths as structured request metadata while the composer shows removable previews
-   and stable [Image #N] references. Non-image attachments retain the path-in-prompt workflow. */
+   and are sent as image inputs alongside the message. Non-image attachments retain the
+   path-in-prompt workflow, since a path is the only thing that names a file. */
 const attachBtn = document.getElementById("attach-btn");
 const attachInput = document.getElementById("attach-input");
 const attachmentTray = document.getElementById("attachment-tray");
@@ -2596,7 +2597,6 @@ function renderAttachmentTray() {
       if (index < 0) return;
       pendingImages.splice(index, 1);
       URL.revokeObjectURL(image.previewUrl);
-      removeImageReference(image.number);
       renderAttachmentTray();
     });
     card.append(remove);
@@ -2604,12 +2604,6 @@ function renderAttachmentTray() {
   }
   attachmentTray.hidden = pendingImages.length === 0;
   if (!attachmentUploadInProgress) updateComposerAction();
-}
-
-function removeImageReference(number) {
-  const marker = `[Image #${number}]`;
-  chatInput.value = chatInput.value.split(marker).join("").replace(/ {2,}/g, " ").trim();
-  autoSizeChatInput();
 }
 
 if (attachBtn && attachInput) {
@@ -2623,7 +2617,6 @@ if (attachBtn && attachInput) {
     attachmentUploadInProgress = true;
     updateComposerAction();
     const savedPaths = [];
-    const addedMarkers = [];
     try {
       for (const file of files) {
         const imageFile = isSupportedImage(file);
@@ -2637,7 +2630,6 @@ if (attachBtn && attachInput) {
         if (isSupportedImage(file)) {
           const number = nextImageNumber++;
           pendingImages.push({ path: data.path, name: file.name, size: file.size, number, previewUrl: URL.createObjectURL(file) });
-          addedMarkers.push(`[Image #${number}]`);
           renderAttachmentTray();
         } else {
           savedPaths.push(data.path);
@@ -2651,7 +2643,6 @@ if (attachBtn && attachInput) {
       updateComposerAction();
     }
     if (savedPaths.length) appendToComposer(savedPaths.join("\n"));
-    if (addedMarkers.length) appendToComposer(addedMarkers.join(" "));
   });
 }
 

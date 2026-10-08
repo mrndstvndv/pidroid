@@ -109,6 +109,24 @@ describe("ChatViewBuilder", () => {
     expect(replacement.messages[0].id).toBe(10);
     expect(replacement.messages[0].branchBefore).toBeUndefined();
   });
+
+  test("a running command keeps the output that is still arriving", () => {
+    const builder = new ChatViewBuilder();
+    // The live slot is a tail window, so its text ends at the newest line. Clipping it from the
+    // head (as a settled result is clipped) would freeze a chatty command on its first lines.
+    const running = builder.build(snapshot([], undefined, []), models);
+    expect(running.tools).toEqual([]);
+
+    const streamed = builder.build(snapshot([], {
+      tools: [{ callId: "call-1", name: "bash", status: "running", output: "x".repeat(9000) + "\nlast line\n" }],
+    }), models);
+
+    const output = streamed.tools[0].output!;
+    expect(output.endsWith("last line\n")).toBe(true);
+    // The note counts what was dropped, and the text that survives is the newest end of it.
+    expect(output.startsWith(`… (${"x".repeat(9000).length + "\nlast line\n".length - 6000} earlier characters)\n`)).toBe(true);
+    expect(output.length).toBeLessThan(6200);
+  });
 });
 
 describe("liveDelta", () => {

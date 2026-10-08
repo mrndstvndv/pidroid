@@ -303,7 +303,7 @@ document.querySelectorAll(".tab-btn").forEach(button => {
     if (button.dataset.tab === "skills") window.loadSkillsTab?.();
     if (button.dataset.tab === "providers") window.loadProviders?.();
     if (button.dataset.tab === "changes") window.loadChanges?.();
-    if (button.dataset.tab === "usage") window.loadUsageStats?.();
+    
   });
 });
 

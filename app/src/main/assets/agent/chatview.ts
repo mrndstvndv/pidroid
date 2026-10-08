@@ -163,6 +163,19 @@ function clip(text: string, max = MAX_TOOL_TEXT): string {
   return text.length > max ? `${text.slice(0, max)}\n… (${text.length - max} more characters)` : text;
 }
 
+/**
+ * Clip from the end, for output that is still arriving.
+ *
+ * A running command's output is kept as a tail window (pi-durable retains "tail" for bash, so the
+ * live slot holds the *last* 2000 lines), and the newest line is the one being written as the
+ * command runs. Clipping that from the head -- as clip() does for a settled result -- keeps the
+ * oldest end and throws away everything since, so a chat server printing steadily would show the
+ * same frozen six thousand characters for the whole run. The head goes in a note instead.
+ */
+function clipTail(text: string, max = MAX_TOOL_TEXT): string {
+  return text.length > max ? `… (${text.length - max} earlier characters)\n${text.slice(-max)}` : text;
+}
+
 function blocksOf(content: unknown): Block[] {
   if (!Array.isArray(content)) return [];
   const out: Block[] = [];
@@ -352,7 +365,7 @@ export class ChatViewBuilder {
         callId: slot.callId,
         name: slot.name,
         status: slot.status,
-        output: slot.output ? clip(String(slot.output)) : undefined,
+        output: slot.output ? clipTail(String(slot.output)) : undefined,
       })),
       toolViews: toolViews ?? {},
       busy: !!live?.run,

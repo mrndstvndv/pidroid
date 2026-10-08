@@ -119,12 +119,11 @@ function agentInputContent(text: string, attachments: AgentImageAttachment[] = [
   }
 
   const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
-  const labels: string[] = [];
   const seen = new Set<string>();
   let totalBytes = 0;
   const uploadPrefix = resolve(UPLOADS_DIR) + sep;
 
-  const addImage = (candidate: string, requestedLabel?: string, explicit = false): string | undefined => {
+  const addImage = (candidate: string, explicit = false): string | undefined => {
     try {
       if (!candidate.startsWith(uploadPrefix)) return explicit ? "Invalid image attachment path." : undefined;
       const file = realpathSync(candidate);
@@ -139,7 +138,6 @@ function agentInputContent(text: string, attachments: AgentImageAttachment[] = [
       const mimeType = imageMimeFromHeader(bytes.subarray(0, 12)) ?? IMAGE_MIME_BY_EXTENSION[extname(file).toLowerCase()];
       if (!mimeType) return explicit ? "Only supported image files can be attached this way." : undefined;
       images.push({ type: "image", mimeType, data: bytes.toString("base64") });
-      labels.push(requestedLabel && /^Image #\d+$/.test(requestedLabel) ? requestedLabel : `Image #${images.length}`);
       seen.add(file);
       totalBytes += stat.size;
       return undefined;
@@ -150,7 +148,7 @@ function agentInputContent(text: string, attachments: AgentImageAttachment[] = [
 
   for (const attachment of attachments) {
     if (!attachment || typeof attachment.path !== "string") return { content: text, error: "Invalid image attachment." };
-    const error = addImage(attachment.path.trim(), attachment.label, true);
+    const error = addImage(attachment.path.trim(), true);
     if (error) return { content: text, error };
   }
 
@@ -163,9 +161,9 @@ function agentInputContent(text: string, attachments: AgentImageAttachment[] = [
   }
 
   if (!images.length) return { content: text };
-  const imageNote = `Attached images are provided in this order: ${labels.map(label => `[${label}]`).join(", ")}. Refer to each image by its label.`;
-  const prompt = text ? `${text}\n\n${imageNote}` : imageNote;
-  return { content: [{ type: "text", text: prompt }, ...images] };
+  // The message goes to the model exactly as typed: the images ride along as image blocks and
+  // nothing is appended to the text, so what the user wrote is what the model reads.
+  return text ? { content: [{ type: "text", text }, ...images] } : { content: images };
 }
 
 /* ---------- file tree (Files tab) ----------
@@ -208,26 +206,7 @@ db.exec(`
     at INTEGER NOT NULL,
     PRIMARY KEY (session, key)
   ) WITHOUT ROWID;
-  CREATE TABLE IF NOT EXISTS token_usage_events (
-    event_key TEXT PRIMARY KEY,
-    session_id INTEGER NOT NULL,
-    conversation_id INTEGER NOT NULL,
-    task_id TEXT NOT NULL,
-    captured_at INTEGER NOT NULL,
-    provider TEXT NOT NULL,
-    model TEXT NOT NULL,
-    input_tokens INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0,
-    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-    total_tokens INTEGER NOT NULL DEFAULT 0,
-    cost_total REAL
-  ) WITHOUT ROWID;
-  CREATE INDEX IF NOT EXISTS token_usage_by_session_time
-    ON token_usage_events (session_id, captured_at);
-  CREATE INDEX IF NOT EXISTS token_usage_by_time
-    ON token_usage_events (captured_at);
-`);
+  `);
 
 console.log(`[pidroid] Agent runtime initialized. SQLite DB at: ${DB_PATH}`);
 
@@ -730,22 +709,21 @@ const SelfModify = defineExtension({
       // used to create the directory, so the two cannot drift apart.
       (input) =>
         "You are the agent embedded in the Pidroid Android app, running on Bun inside the app's own process sandbox. " +
-        `Your working directory is this session's own workspace (${workspaceDir(Number(input.conversationId))}, also $PIDROID_WORKSPACE): scratch files, scripts and experiments belong there and are yours alone. ` +
-        `It is NOT version controlled: nothing in it is checkpointed, so nothing in it can be undone -- if the user wants to keep something, copy it into the app tree (below). ` +
-        `The app itself lives at ${APP_DIR} (also $PIDROID_APP_DIR), and you can change it -- every path below is relative to it: ` +
+        "Your working directory is this session's own workspace ($PIDROID_WORKSPACE): scratch files, scripts and experiments belong there and are yours alone. " +
+        "It is NOT version controlled: nothing in it is checkpointed, so nothing in it can be undone -- if the user wants to keep something, copy it into the app tree (below). " +
+        "The app source is $PIDROID_APP_DIR, and you can change it -- every path below is relative to it: " +
         "www/ is the web UI (index.html, style.css, app.js, chat.js, sessions.js, providers.js, changes.js); CSS edits apply instantly, but HTML/JS edits only show after you call reload_ui (call it once when a batch of UI edits is finished, not after every file). " +
         "extensions/*.ts are hot-swappable pi-durable extensions (extensions/save-bundle.ts is a worked example): add tools, prompt sections and hooks there, then call reload_extensions. No restart is needed. " +
-        `Shared Agent Skills are stored outside the app source at ${SKILLS_DIR} (also $PIDROID_SKILLS), one directory per skill with a SKILL.md file; they are shared across sessions and survive app code updates. ` +
+        "Shared Agent Skills are stored outside the app source in $PIDROID_SKILLS, one directory per skill with a SKILL.md file; they are shared across sessions and survive app code updates. " +
         "server.ts, auth.ts, artifacts.ts, changes.ts, chatview.ts, sessions.ts, extensions.ts, web-tools.ts and providers/ are the server; after editing them call restart_server (it builds first and refuses if the build fails; all sessions continue afterwards). " +
         "vendor/ holds prebuilt dependencies and is not editable; only the packages mapped in tsconfig.json can be imported. " +
-        `Files the user attaches from the phone are saved under ${UPLOADS_DIR} (also $PIDROID_UPLOADS). Composer image attachments are labeled [Image #N] and sent as image inputs in that order; use those labels to distinguish multiple images. The read tool also supports image files and sends them as image input to vision-capable models. If a file path is shown in the message, it is absolute and should be used as given. ` +
+        "Files the user attaches from the phone are saved in $PIDROID_UPLOADS. The read tool also supports image files and sends them as image input to vision-capable models. If a file path is shown in the message, it is absolute and should be used as given. " +
         "The UI is black (AMOLED) themed; keep it that way. " +
         "Nothing is committed to git automatically. Your edits take effect on disk at once, but the user can undo them only once you checkpoint them: call checkpoint with the paths of one finished, verified change (pending_changes lists what is uncommitted; the rest stays uncommitted for later). The workspace is not version controlled. If the server fails to start repeatedly the app falls back to a safe-mode server, and an edit that was never checkpointed is still captured at the next start, so it can be undone from the Changes tab. " +
         "When an app update changes a file you also edited, the user chooses in the Changes tab: keep yours, use the bundled version, or merge in a session that runs the shipped agent and finishes with complete_merge. " +
         "The Android shell around the web view (Kotlin) is not part of your sandbox and cannot be edited from here; if a feature needs it, say so instead of searching the device. " +
-        "The shell userland on this phone is Android's toybox/mksh, not GNU: expect missing or different flags (cat -A is unsupported; use cat -etv, od -c, or read the file with the read tool; prefer small portable commands). " +
-        "grep, egrep and fgrep are the exception: they are GNU grep 3.12, bundled in the APK and first on PATH ahead of toybox. Use it through the bash tool like any other command -- the whole GNU flag set works (-P, -o, -w, -v, -m, -A/-B/-C, --include=, --exclude=, --exclude-dir=, --group-separator=), with GNU exit codes. Two things to know: GNU grep has no --stats option (it never did), and -r descends into .git, node_modules, .tmp and sqlite files, so pass --exclude-dir=.git --exclude-dir=node_modules and -I when you walk a source tree. " +
-        "On PATH: bun (the full CLI: bun run / test / build / install / add), bunx, ssh, ssh-keygen and GNU grep. Use bun to try out your own changes: run scripts and `bun test` against extensions in isolation, and `bun build server.ts --target=bun --outfile=/tmp/x.js` to check that the server still builds. " +
+        "The shell is real bash on an Android sandbox. grep/egrep/fgrep are GNU grep 3.12, bundled and first on PATH; every other coreutil is toybox, so GNU-only flags are missing and error out loudly (cat takes only -etuv, head has no negative -n). Prefer short portable invocations; note that grep -r descends into .git and node_modules, so pass --exclude-dir. " +
+        "On PATH: bun (the full CLI: bun run / test / build / install / add), bunx, ssh and ssh-keygen. Use bun to try out your own changes: run scripts and `bun test` against extensions in isolation, and `bun build server.ts --target=bun --outfile=$PIDROID_WORKSPACE/x.js` to check that the server still builds. " +
         "Never `bun run server.ts` (a second server would fight this one for the port and the databases). " +
         "A package's own CLI cannot be started through bunx or node_modules/.bin on Android (those scripts start with #!/usr/bin/env, which does not exist here): after `bun add <pkg>` run its script directly, e.g. `bun node_modules/<pkg>/bin/<cli>.js`. " +
         "Keep shell commands small and targeted; never loop over /proc or search the whole filesystem.",
@@ -1644,148 +1622,6 @@ const server = Bun.serve({
       return Response.json({ messages });
     }
 
-    if (url.pathname === "/api/usage/stats" && req.method === "GET") {
-      const now = new Date();
-      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      const weekStart = new Date(todayStart);
-      weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7)); // Monday, local time
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-      const dailyStart = new Date(todayStart);
-      dailyStart.setDate(dailyStart.getDate() - 29);
-      const weeklyStart = new Date(weekStart);
-      weeklyStart.setDate(weeklyStart.getDate() - 7 * 11);
-      const monthlyStart = new Date(now.getFullYear(), now.getMonth() - 11, 1);
-      const selectedProvider = url.searchParams.get("provider")?.trim() || "";
-      const selectedModel = url.searchParams.get("model")?.trim() || ""; // canonical provider/model key
-      const filterClauses: string[] = [];
-      const filterBindings: (string | number)[] = [];
-      if (selectedProvider) {
-        filterClauses.push("provider = ?");
-        filterBindings.push(selectedProvider);
-      }
-      if (selectedModel) {
-        filterClauses.push("(provider || '/' || model) = ?");
-        filterBindings.push(selectedModel);
-      }
-      const whereFor = (start?: number, prefix = "") => {
-        const clauses = filterClauses.map((clause) => prefix ? clause.replaceAll("provider", `${prefix}provider`).replaceAll("model", `${prefix}model`) : clause);
-        if (start !== undefined) clauses.push(`${prefix}captured_at >= ?`);
-        return clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-      };
-      const bindingsFor = (start?: number) => start === undefined ? [...filterBindings] : [...filterBindings, start];
-
-      const total = (start?: number) => {
-        const raw = db.query(`
-          SELECT COALESCE(SUM(input_tokens), 0) AS inputTokens,
-                 COALESCE(SUM(output_tokens), 0) AS outputTokens,
-                 COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
-                 COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens,
-                 COALESCE(SUM(total_tokens), 0) AS tokens,
-                 SUM(cost_total) AS cost,
-                 COUNT(cost_total) AS pricedResponses,
-                 COUNT(*) AS responses,
-                 COUNT(DISTINCT u.session_id) AS sessions
-          FROM token_usage_events u
-          JOIN sessions s ON u.session_id = s.id AND s.deleted = 0 ${whereFor(start, "u.")}
-        `).get(...bindingsFor(start)) as any;
-        return {
-          inputTokens: Number(raw?.inputTokens ?? 0),
-          outputTokens: Number(raw?.outputTokens ?? 0),
-          cacheReadTokens: Number(raw?.cacheReadTokens ?? 0),
-          cacheWriteTokens: Number(raw?.cacheWriteTokens ?? 0),
-          tokens: Number(raw?.tokens ?? 0),
-          cost: raw?.cost === null || raw?.cost === undefined ? null : Number(raw.cost),
-          pricedResponses: Number(raw?.pricedResponses ?? 0),
-          responses: Number(raw?.responses ?? 0),
-          sessions: Number(raw?.sessions ?? 0),
-        };
-      };
-      const normalizeUsageRow = (row: any) => ({
-        ...row,
-        tokens: Number(row.tokens ?? 0),
-        inputTokens: Number(row.inputTokens ?? 0),
-        outputTokens: Number(row.outputTokens ?? 0),
-        cacheReadTokens: Number(row.cacheReadTokens ?? 0),
-        cacheWriteTokens: Number(row.cacheWriteTokens ?? 0),
-        cost: row.cost === null || row.cost === undefined ? null : Number(row.cost),
-        pricedResponses: Number(row.pricedResponses ?? 0),
-        responses: Number(row.responses ?? 0),
-      });
-      const grouped = (bucket: string, start: number) => (db.query(`
-        SELECT ${bucket} AS bucket,
-               COALESCE(SUM(total_tokens), 0) AS tokens,
-               COALESCE(SUM(input_tokens), 0) AS inputTokens,
-               COALESCE(SUM(output_tokens), 0) AS outputTokens,
-               COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
-               COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens,
-               SUM(cost_total) AS cost,
-               COUNT(cost_total) AS pricedResponses,
-               COUNT(*) AS responses
-        FROM token_usage_events u
-        JOIN sessions s ON u.session_id = s.id AND s.deleted = 0 ${whereFor(start, "u.")}
-        GROUP BY bucket
-        ORDER BY bucket ASC
-      `).all(...bindingsFor(start)) as any[]).map(normalizeUsageRow);
-
-      const sessionJoinFilters: string[] = [];
-      const sessionBindings: string[] = [];
-      if (selectedProvider) {
-        sessionJoinFilters.push("u.provider = ?");
-        sessionBindings.push(selectedProvider);
-      }
-      if (selectedModel) {
-        sessionJoinFilters.push("(u.provider || '/' || u.model) = ?");
-        sessionBindings.push(selectedModel);
-      }
-      const sessionFilterSql = sessionJoinFilters.length ? ` AND ${sessionJoinFilters.join(" AND ")}` : "";
-      const sessions = db.query(`
-        SELECT s.id, s.title, s.created_at AS createdAt,
-               COALESCE(SUM(u.total_tokens), 0) AS tokens,
-               COALESCE(SUM(u.input_tokens), 0) AS inputTokens,
-               COALESCE(SUM(u.output_tokens), 0) AS outputTokens,
-               COALESCE(SUM(u.cache_read_tokens), 0) AS cacheReadTokens,
-               COALESCE(SUM(u.cache_write_tokens), 0) AS cacheWriteTokens,
-               SUM(u.cost_total) AS cost,
-               COUNT(u.cost_total) AS pricedResponses,
-               COUNT(u.event_key) AS responses,
-               MAX(u.captured_at) AS lastUsedAt
-        FROM sessions s
-        LEFT JOIN token_usage_events u ON u.session_id = s.id${sessionFilterSql}
-        WHERE s.deleted = 0
-        GROUP BY s.id
-        HAVING COUNT(u.event_key) > 0
-        ORDER BY tokens DESC, s.updated_at DESC
-      `).all(...sessionBindings) as any[];
-      const normalizedSessions = sessions.map((row) => ({
-        ...normalizeUsageRow(row),
-        id: Number(row.id),
-        createdAt: Number(row.createdAt),
-        lastUsedAt: row.lastUsedAt === null || row.lastUsedAt === undefined ? null : Number(row.lastUsedAt),
-      }));
-
-      const dayBucket = "strftime('%Y-%m-%d', captured_at / 1000, 'unixepoch', 'localtime')";
-      const weekBucket = `date(
-        captured_at / 1000, 'unixepoch', 'localtime',
-        printf('-%d days', (CAST(strftime('%w', captured_at / 1000, 'unixepoch', 'localtime') AS INTEGER) + 6) % 7)
-      )`;
-      const monthBucket = "strftime('%Y-%m', captured_at / 1000, 'unixepoch', 'localtime')";
-      const providers = (db.query("SELECT DISTINCT u.provider FROM token_usage_events u JOIN sessions s ON u.session_id = s.id AND s.deleted = 0 ORDER BY u.provider").all() as { provider: string }[])
-        .map((row) => row.provider);
-      const availableModels = db.query("SELECT DISTINCT u.provider, u.model FROM token_usage_events u JOIN sessions s ON u.session_id = s.id AND s.deleted = 0 ORDER BY u.provider, u.model").all() as { provider: string; model: string }[];
-      return Response.json({
-        generatedAt: Date.now(),
-        filters: { provider: selectedProvider, model: selectedModel, providers, models: availableModels },
-        allTime: total(),
-        today: total(todayStart.getTime()),
-        thisWeek: total(weekStart.getTime()),
-        thisMonth: total(monthStart.getTime()),
-        sessions: normalizedSessions,
-        daily: grouped(dayBucket, dailyStart.getTime()),
-        weekly: grouped(weekBucket, weeklyStart.getTime()),
-        monthly: grouped(monthBucket, monthlyStart.getTime()),
-      });
-    }
-
     if (url.pathname === "/api/chat" && req.method === "POST") {
       return req.json().then(async (body: { message?: string; attachments?: AgentImageAttachment[] }) => {
         const text = body.message?.trim() ?? "";
@@ -1793,19 +1629,19 @@ const server = Bun.serve({
         if (!text && !attachments.length) {
           return Response.json({ error: "Message or image attachment is required" }, { status: 400 });
         }
-        const refs = attachments.map((attachment, index) => {
-          const label = attachment?.label && /^Image #\d+$/.test(attachment.label) ? attachment.label : `Image #${index + 1}`;
-          return text.includes(`[${label}]`) ? "" : `[${label}]`;
-        }).filter(Boolean);
-        const visibleText = [text, refs.join(" ")].filter(Boolean).join(" ");
+        // What the user typed is the whole message: attached images travel as image inputs,
+        // never as extra text appended to it.
+        const visibleText = text;
         const agentInput = agentInputContent(visibleText, attachments);
         if (agentInput.error) {
           return Response.json({ error: agentInput.error }, { status: 413 });
         }
+        // The transcript only needs a stand-in so an image-only message still renders as something.
+        const storedText = text || "[image]";
 
         // Store user message
-        db.query("INSERT INTO messages (role, content) VALUES (?, ?)").run("user", visibleText);
-        broadcast("message", { role: "user", content: visibleText });
+        db.query("INSERT INTO messages (role, content) VALUES (?, ?)").run("user", storedText);
+        broadcast("message", { role: "user", content: storedText });
 
         let replyText: string;
         const conv = root; // a session switch mid-run must not redirect this request

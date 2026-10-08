@@ -162,9 +162,8 @@ export class Sessions {
    */
   purge(id: number) {
     this.db.transaction(() => {
-      // Timings and token usage are keyed by session id, so they are the other data this session owns.
+      // Timings are keyed by session id, so they are the other data this session owns.
       this.db.query("DELETE FROM timings WHERE session = ?").run(id);
-      this.db.query("DELETE FROM token_usage_events WHERE session_id = ?").run(id);
       this.db.query("DELETE FROM sessions WHERE id = ?").run(id);
     })();
   }

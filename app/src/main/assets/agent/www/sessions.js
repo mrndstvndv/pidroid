@@ -32,7 +32,13 @@ function sessionAgo(ts) {
    The row menu deletes one session per trip, which on a phone means walking the list one ⋮ tap at
    a time. A long press on a row starts selecting instead: from then on a tap marks a session rather
    than opening it, the ⋮ button steps aside, and a bar over the list carries the count plus the one
-   action the mode exists for. Back or Escape leaves it. */
+   action the mode exists for. Back or Escape leaves it.
+
+   That bar and the ticks come and go together, on whether anything is marked: the mode has nothing
+   to say to a list where every row is unticked, and a disabled delete button over it is just a
+   line of chrome. So the first mark brings the bar in, unticking the last one takes the whole mode
+   back off -- which also means there is no way to be left inside a mode whose only exit button has
+   just been hidden. */
 const selectBar = document.getElementById("sidebar-select-bar");
 const selectCount = document.getElementById("sidebar-select-count");
 const selectDelete = document.getElementById("sidebar-select-delete");
@@ -45,7 +51,7 @@ function setSelectMode(on) {
   if (selectMode === on) return;
   selectMode = on;
   if (!on) selectedIds.clear();
-  if (selectBar) selectBar.hidden = !on;
+  if (selectBar) selectBar.hidden = !on || !selectedIds.size;
   sidebarList?.classList.toggle("selecting", on);
   renderSessions();
 }
@@ -59,7 +65,9 @@ function shownSessions() {
 
 function updateSelectBar() {
   const n = selectedIds.size;
-  if (selectCount) selectCount.textContent = n ? `${n} selected` : "Select sessions";
+  // The bar belongs to the marks, not to the mode: it shows while at least one row is marked.
+  if (selectBar) selectBar.hidden = !selectMode || !n;
+  if (selectCount) selectCount.textContent = n ? `${n} selected` : "Nothing selected";
   if (selectDelete) selectDelete.disabled = !n;
   if (selectAll) {
     // One button for both directions, because what the user means is "all of them": once every
@@ -77,6 +85,8 @@ function updateSelectBar() {
 function toggleSelect(id) {
   if (selectedIds.has(id)) selectedIds.delete(id);
   else selectedIds.add(id);
+  // Unmarking the last row leaves nothing for the mode to act on, so it ends -- bar, ticks and all.
+  if (selectMode && !selectedIds.size) return setSelectMode(false);
   updateSelectBar();
   renderSessions();
 }
@@ -86,6 +96,8 @@ function toggleSelectAll() {
   const shown = shownSessions();
   const everyMarked = shown.length > 0 && shown.every((s) => selectedIds.has(s.id));
   shown.forEach((s) => (everyMarked ? selectedIds.delete(s.id) : selectedIds.add(s.id)));
+  // Same rule as a single unmark: an empty selection ends the mode with it.
+  if (selectMode && !selectedIds.size) return setSelectMode(false);
   updateSelectBar();
   renderSessions();
 }
