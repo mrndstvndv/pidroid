@@ -154,9 +154,35 @@ const enginePromise = createOnigurumaEngine(getWasmInstance).catch((err) => {
   console.error(`[highlight] wasm engine unavailable: ${err}`);
   return null;
 });
-/** code -> tokens, per highlighter. `codeToTokens` is synchronous once a highlighter exists, so
- *  the only asynchronous part of `highlight()` is loading a grammar the first time. */
-const tokenCaches = new WeakMap<Highlighter, Map<string, Token[][]>>();
+/**
+ * Finished lines, by language and source, most recently used last. Bounded by the characters held,
+ * not by entries: a count of 64 per language let a few large files (tokens cost ~60 bytes per
+ * source character) pin hundreds of MB on a phone. The lines are kept rather than Shiki's token
+ * objects, which are several times their size.
+ */
+const RESULT_CACHE_CHARS = 400_000;
+const resultCache = new Map<string, HighlightLine[]>();
+let resultCacheChars = 0;
+
+function cached(key: string): HighlightLine[] | undefined {
+  const hit = resultCache.get(key);
+  if (hit) {
+    resultCache.delete(key);
+    resultCache.set(key, hit);
+  }
+  return hit;
+}
+
+function remember(key: string, lines: HighlightLine[]): void {
+  if (key.length > RESULT_CACHE_CHARS / 4) return; // one big file would evict everything else
+  resultCache.set(key, lines);
+  resultCacheChars += key.length;
+  for (const [old] of resultCache) {
+    if (resultCacheChars <= RESULT_CACHE_CHARS) break;
+    resultCache.delete(old);
+    resultCacheChars -= old.length;
+  }
+}
 
 /** Escape for the HTML we assemble. Shiki escapes inside `codeToHtml`; we are not using that. */
 function esc(s: string): string {
@@ -192,18 +218,41 @@ function highlighterFor(lang: string): Promise<Highlighter> {
   return pending;
 }
 
-/** Turn a TextMate fontStyle (a bitmask: 1 italic, 2 bold, 4 underline) into a CSS declaration. */
-function fontStyleCss(fontStyle: number | string | undefined): string {
-  if (!fontStyle) return "";
-  if (typeof fontStyle === "string") {
-    // Some shapes hand back "italic" / "bold" directly.
-    return fontStyle.includes("italic") ? "font-style:italic;" : fontStyle.includes("bold") ? "font-weight:600;" : "";
+/**
+ * Theme hue -> token class. The theme above is only how Shiki is told which scopes go together;
+ * what reaches the page is a class per role, and style.css gives each role a colour per mode. An
+ * inline colour fixed the dark palette into the markup, and on a light theme the default
+ * foreground (#c9d1d9) was pale grey on white. The default foreground gets no class at all, so plain
+ * code is simply the page's own text colour. A hue this map does not know stays inline.
+ */
+const TOKEN_CLASS: Record<string, string> = {
+  "#c9d1d9": "",
+  "#5c6370": "hl-cm",
+  "#ff7b72": "hl-kw",
+  "#a5d6ff": "hl-str",
+  "#79c0ff": "hl-con",
+  "#d2a8ff": "hl-fn",
+  "#7ee787": "hl-ty",
+  "#ffa657": "hl-var",
+  "#8b949e": "hl-pun",
+};
+
+function tokenAttrs(token: Token): string {
+  const color = token.color?.toLowerCase();
+  const known = color === undefined ? "" : TOKEN_CLASS[color];
+  const classes: string[] = known ? [known] : [];
+  const fs = token.fontStyle;
+  if (typeof fs === "number") {
+    if (fs & 1) classes.push("hl-i");
+    if (fs & 2) classes.push("hl-b");
+    if (fs & 4) classes.push("hl-u");
+  } else if (typeof fs === "string") {
+    if (fs.includes("italic")) classes.push("hl-i");
+    if (fs.includes("bold")) classes.push("hl-b");
   }
-  let css = "";
-  if (fontStyle & 1) css += "font-style:italic;";
-  if (fontStyle & 2) css += "font-weight:600;";
-  if (fontStyle & 4) css += "text-decoration:underline;";
-  return css;
+  const cls = classes.length ? ` class="${classes.join(" ")}"` : "";
+  const inline = color !== undefined && known === undefined ? ` style="color:${esc(color)}"` : "";
+  return cls + inline;
 }
 
 function toLines(tokens: Token[][]): HighlightLine[] {
@@ -216,8 +265,8 @@ function toLines(tokens: Token[][]): HighlightLine[] {
       text += token.content;
       // fontStyle is part of the theme, not decoration we can drop: comments and bold list items
       // are the only places it shows, and losing it makes italic comments render as plain grey.
-      const style = `${token.color ? `color:${token.color};` : ""}${fontStyleCss(token.fontStyle)}`;
-      html += style ? `<span style="${style}">${esc(token.content)}</span>` : esc(token.content);
+      const attrs = tokenAttrs(token);
+      html += attrs ? `<span${attrs}>${esc(token.content)}</span>` : esc(token.content);
     }
     lines[i] = { n: i + 1, text, html };
   }
@@ -248,6 +297,18 @@ const FENCE_LANG: Record<string, string> = {
   diff: "diff", patch: "diff",
   yaml: "yaml", yml: "yaml",
 };
+
+/** The language for a fence tag (```ts, ```console ...), or null when we ship no grammar for it. */
+export function fenceLanguage(tag: string): string | null {
+  return FENCE_LANG[tag.trim().split(/[\s{]/)[0].toLowerCase()] ?? null;
+}
+
+/**
+ * Most source a request may tokenise. Shiki runs synchronously on the server's only thread, at
+ * roughly a second per 100 KB on a phone, and every WebSocket stream waits while it does: the
+ * colour routes check this before calling `highlight`, and a request over it is simply left plain.
+ */
+export const MAX_INTERACTIVE_CHARS = 150_000;
 
 /**
  * Replace the contents of fenced code blocks with the *fenced language's* tokens.
@@ -295,22 +356,19 @@ export async function highlight(code: string, lang: string, depth = 0): Promise<
     console.error(`[highlight] ${lang} unavailable: ${err}`);
     return null;
   }
-  let cache = tokenCaches.get(hl);
-  if (!cache) tokenCaches.set(hl, (cache = new Map()));
-  let tokens = cache.get(code);
-  if (!tokens) {
-    try {
-      tokens = hl.codeToTokens(code, { lang, theme: THEME.name }).tokens as Token[][];
-    } catch {
-      return null;
-    }
-    // Do not let a one-shot huge file pin its tokens for the life of the process.
-    if (cache.size > 64) cache.clear();
-    cache.set(code, tokens);
+  const key = `${lang}\0${depth}\0${code}`;
+  const hit = cached(key);
+  if (hit) return { lang, lines: hit };
+  let tokens: Token[][];
+  try {
+    tokens = hl.codeToTokens(code, { lang, theme: THEME.name }).tokens as Token[][];
+  } catch {
+    return null;
   }
-  const lines = toLines(tokens);
+  let lines = toLines(tokens);
   // Markdown is the one language that contains other languages; honour their fence tags.
-  if (lang === "markdown" && depth < 2) return { lang, lines: await spliceFences(code, lines, depth) };
+  if (lang === "markdown" && depth < 2) lines = await spliceFences(code, lines, depth);
+  remember(key, lines);
   return { lang, lines };
 }
 

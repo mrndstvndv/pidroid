@@ -89,9 +89,12 @@ export function assemble(patch: string, oldRows?: string[] | null, newRows?: str
       rows.push({ kind: "del", oldNo, newNo: null, html: tokenFor(oldRows, oldNo), text: body });
       removed++;
       oldNo++;
-    } else if (marker === " " || raw === "") {
-      // A trailing empty string is the patch's final newline, not a real context line.
-      if (raw === "" && newNo > 0 && oldNo > 0 && rows.length && rows[rows.length - 1].kind !== "ctx") continue;
+    } else if (raw === "") {
+      // The patch's final newline. jsdiff writes an empty context line as " ", so a bare "" is
+      // never a line of the file -- keeping it put a ghost line N+1 under every diff ending in
+      // unchanged lines, which with full-context patches is nearly all of them.
+      continue;
+    } else if (marker === " ") {
       rows.push({ kind: "ctx", oldNo, newNo, html: tokenFor(newRows, newNo) ?? tokenFor(oldRows, oldNo), text: body });
       oldNo++;
       newNo++;

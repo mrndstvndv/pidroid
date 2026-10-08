@@ -76,6 +76,17 @@ describe("assemble", () => {
     const { rows } = assemble("--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-a\n+b\n");
     expect(rows.filter((r) => r.kind === "ctx")).toHaveLength(0);
   });
+
+  test("a diff ending in unchanged lines gets no ghost line after them", () => {
+    const { rows } = assemble("--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n");
+    const last = rows[rows.length - 1];
+    expect(last).toMatchObject({ kind: "ctx", oldNo: 3, newNo: 3, text: "c" });
+  });
+
+  test("an empty context line is still a line", () => {
+    const { rows } = assemble("--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n \n-b\n+B\n");
+    expect(rows.filter((r) => r.kind === "ctx").map((r) => r.text)).toEqual(["a", ""]);
+  });
 });
 
 describe("foldContext", () => {

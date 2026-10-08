@@ -29,7 +29,7 @@ import { bridgeAvailable, bridgeCall } from "./bridge.ts";
 import { Changes } from "./changes.ts";
 import { showTool } from "./artifacts.ts";
 import { assemble, foldContext } from "./diffrows.ts";
-import { highlight, highlightPath, languageFor, warm as warmHighlighter } from "./highlight.ts";
+import { fenceLanguage, highlight, highlightPath, languageFor, MAX_INTERACTIVE_CHARS, warm as warmHighlighter } from "./highlight.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
 import { ChatViewBuilder, clampLevel, liveDelta, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
@@ -1981,7 +1981,9 @@ const server = Bun.serve({
           const after = typeof body.after === "string" ? body.after : "";
           const lang = typeof body.path === "string" ? languageFor(body.path) : null;
           if (!lang) return { lang: null, oldRows: null, newRows: null };
-          if (before.length > MAX_SIDE || after.length > MAX_SIDE) return { lang, oldRows: null, newRows: null };
+          if (before.length > MAX_SIDE || after.length > MAX_SIDE || before.length + after.length > MAX_INTERACTIVE_CHARS) {
+            return { lang, oldRows: null, newRows: null };
+          }
           return Promise.all([highlight(before, lang), highlight(after, lang)]).then(([oldLit, newLit]) => ({
             lang,
             oldRows: oldLit ? oldLit.lines.map((l) => l.html) : null,
@@ -1998,8 +2000,9 @@ const server = Bun.serve({
       return req.json()
         .then(async (body: { code?: unknown; lang?: unknown }) => {
           const code = typeof body.code === "string" ? body.code : "";
-          const lang = typeof body.lang === "string" ? languageFor(`snippet.${body.lang}`) : null;
-          const lit = lang ? await highlight(code, lang) : null;
+          // Fence tags, not file extensions: ```console or ```svg have no extension of their own.
+          const lang = typeof body.lang === "string" ? fenceLanguage(body.lang) : null;
+          const lit = lang && code.length <= MAX_INTERACTIVE_CHARS ? await highlight(code, lang) : null;
           return { lang, rows: lit ? lit.lines.map((l) => l.html) : null };
         })
         .then((payload: object) => Response.json(payload))
@@ -2030,25 +2033,28 @@ const server = Bun.serve({
         // this endpoint always returned before.
         return respond(
           changes.diff(oid, filepath).then(async (d) => {
-            const base = { patch: d.patch, binary: !!d.binary, tooLarge: !!d.tooLarge };
+            // The patch only rides along when there are no rows to show (a binary or oversized
+            // file's one-line note): with rows it is the same file a second time over the wire.
+            const base = { binary: !!d.binary, tooLarge: !!d.tooLarge };
+            const withRows = (rows: ReturnType<typeof foldContext>) => (rows.length ? { rows } : { rows, patch: d.patch });
             const lang = d.binary || d.tooLarge ? null : languageFor(filepath);
             const plain = () => {
               // Without colours the rows are still the rows: the patch laid out per line, folded the same
               // way, just with escaped text where the colours would be. Only a binary or oversized file has
               // no rows to show, and its patch is a one-line note that renders as meta.
               const { rows, added, removed } = assemble(d.patch, null, null);
-              return { ...base, lang, rows: foldContext(rows, 3, 6), added, removed };
+              return { ...base, lang, ...withRows(foldContext(rows, 3, 6)), added, removed };
             };
             if (!lang || d.before === undefined || d.after === undefined) return plain();
+            if (d.before.length + d.after.length > MAX_INTERACTIVE_CHARS) return plain();
             const [oldLit, newLit] = await Promise.all([highlight(d.before, lang), highlight(d.after, lang)]);
             if (!oldLit && !newLit) return plain();
             const oldRows = oldLit ? oldLit.lines.map((l) => l.html) : null;
             const newRows = newLit ? newLit.lines.map((l) => l.html) : null;
             const { rows, added, removed } = assemble(d.patch, oldRows, newRows);
-            // Fold long unchanged runs here rather than shipping them: a one-line change in a big
-            // file would otherwise carry the whole file across the wire. Each placeholder keeps the
-            // rows it stands for, so expanding it in the viewer needs no second request.
-            return { ...base, lang, rows: foldContext(rows, 3, 6), added, removed };
+            // Fold long unchanged runs so the viewer opens on the change, not on the whole file. Each
+            // placeholder keeps the rows it stands for, so expanding it needs no second request.
+            return { ...base, lang, ...withRows(foldContext(rows, 3, 6)), added, removed };
           }),
         );
       }

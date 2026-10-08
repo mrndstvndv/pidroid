@@ -100,12 +100,16 @@ const sessionId = generateId("ses");
 type Thinking = NonNullable<Model<Api>["thinkingLevelMap"]>;
 
 const GENERIC_THINKING: Thinking = {
-  // `off` maps to null (the field is omitted), not to a "none" effort: verified live on 2026-10-08,
-  // Zen's upstream answers `reasoning_effort: "none"` with 400
+  // No `off` entry, so the field is omitted at the off level rather than sent as a "none" effort:
+  // verified live on 2026-10-08, Zen's upstream answers `reasoning_effort: "none"` with 400
   // "[invalid_request_error] invalid request" on every route behind the free tier -- including the
   // session-title job, which always runs at the default (off) level. Omitting the field is what the
   // OpenAI-compatible surface accepts; the model then reasons on its own default.
-  off: null,
+  //
+  // Absent, not null: pi-ai omits the field either way (it only sends a string off value), but
+  // supportedLevels() reads null as "this model cannot be turned off" -- which is what MUSE and
+  // DEEPSEEK mean by it -- so `off: null` here dropped Off from the chooser and quietly moved
+  // anyone who had picked it to medium.
   minimal: null,
   low: null,
   medium: "medium",
@@ -144,16 +148,22 @@ interface ModelSpec {
 /**
  * Repairs a persisted Zen catalog in place before the registry reads it.
  *
- * A pidroid-models.json written before the `off: null` fix still carries `"off": "none"`, and the
- * stored copy is the one that reaches the model, so the value is corrected on the way out (and the
- * next catalog refresh rewrites the file with the fixed map anyway).
+ * A pidroid-models.json written by an older build still carries `"off": "none"` (which Zen rejects)
+ * or `"off": null` (which hid the Off level) on generic models, and the stored copy is the one that
+ * reaches the model, so the entry is dropped on the way out to match GENERIC_THINKING. MUSE and
+ * DEEPSEEK keep theirs: there null really means reasoning cannot be switched off. The next catalog
+ * refresh rewrites the file with the fixed map anyway.
  */
 export function normalizeOpencodeCatalog(models: unknown): unknown {
   if (!Array.isArray(models)) return models;
   return models.map((model: any) => {
     const map = model?.thinkingLevelMap;
-    if (typeof map !== "object" || map === null || map.off !== "none") return model;
-    return { ...model, thinkingLevelMap: { ...map, off: null } };
+    if (typeof map !== "object" || map === null || !("off" in map)) return model;
+    const id = String(model?.id ?? "");
+    if (isMuse(id) || /^deepseek-/i.test(id)) return model;
+    if (map.off !== "none" && map.off !== null) return model;
+    const { off: _dropped, ...rest } = map;
+    return { ...model, thinkingLevelMap: rest };
   });
 }
 
