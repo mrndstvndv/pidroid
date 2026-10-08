@@ -32,8 +32,10 @@ import { assemble, foldContext, withoutFolded } from "./diffrows.ts";
 import { fenceLanguage, highlight, highlightPath, languageFor, MAX_INTERACTIVE_CHARS, warm as warmHighlighter } from "./highlight.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
+import { discoverSkills, SKILLS_DIR } from "./skills.ts";
 import { ChatViewBuilder, clampLevel, liveDelta, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
 import { Timings } from "./timings.ts";
+import { SKIP_DIRS, SKIP_FILES, SKIP_SUFFIXES, writeBundle } from "./bundles.ts";
 
 const PORT = Number(process.env.PORT) || 8765;
 /** The app itself: the server, the UI and the git checkpoint journal. */
@@ -164,12 +166,12 @@ function agentInputContent(text: string, attachments: AgentImageAttachment[] = [
 }
 
 /* ---------- file tree (Files tab) ----------
-   The Files tab mirrors what the save_bundle extension archives, so its skip lists duplicate the
-   SKIP_DIRS / SKIP_FILES / SKIP_SUFFIXES constants in extensions/save-bundle.ts. If one changes, the
-   other must too -- otherwise the tab would promise files a bundle silently drops. */
-const TREE_SKIP_DIRS = new Set([".git", "node_modules", "vendor", "fallback", ".bun", ".tmp", ".bundle-staging"]);
-const TREE_SKIP_FILES = new Set(["auth.json", "auth.json.tmp", ".installed_version", ".shipped_manifest.json"]);
-const TREE_SKIP_SUFFIXES = [".sqlite", ".sqlite-shm", ".sqlite-wal"];
+   The Files tab shows what a bundle archives, so its skip lists are the ones bundles.ts uses
+   (imported, not copied): the tab, the Export bundle button and the save_bundle tool therefore
+   cannot drift apart -- a file the tab promises is a file the tarball carries. */
+const TREE_SKIP_DIRS = SKIP_DIRS;
+const TREE_SKIP_FILES = SKIP_FILES;
+const TREE_SKIP_SUFFIXES = SKIP_SUFFIXES;
 
 /** Largest file the tree preview will render. Above this the tab shows the size and nothing else. */
 const MAX_READ_BYTES = 512 * 1024;
@@ -639,6 +641,7 @@ const SelfModify = defineExtension({
         `The app itself lives at ${APP_DIR} (also $PIDROID_APP_DIR), and you can change it -- every path below is relative to it: ` +
         "www/ is the web UI (index.html, style.css, app.js, chat.js, sessions.js, providers.js, changes.js); CSS edits apply instantly, but HTML/JS edits only show after you call reload_ui (call it once when a batch of UI edits is finished, not after every file). " +
         "extensions/*.ts are hot-swappable pi-durable extensions (extensions/save-bundle.ts is a worked example): add tools, prompt sections and hooks there, then call reload_extensions. No restart is needed. " +
+        `Shared Agent Skills are stored outside the app source at ${SKILLS_DIR} (also $PIDROID_SKILLS), one directory per skill with a SKILL.md file; they are shared across sessions and survive app code updates. ` +
         "server.ts, auth.ts, artifacts.ts, changes.ts, chatview.ts, sessions.ts, extensions.ts, web-tools.ts and providers/ are the server; after editing them call restart_server (it builds first and refuses if the build fails; all sessions continue afterwards). " +
         "vendor/ holds prebuilt dependencies and is not editable; only the packages mapped in tsconfig.json can be imported. " +
         `Files the user attaches from the phone are saved under ${UPLOADS_DIR} (also $PIDROID_UPLOADS). Composer image attachments are labeled [Image #N] and sent as image inputs in that order; use those labels to distinguish multiple images. The read tool also supports image files and sends them as image input to vision-capable models. If a file path is shown in the message, it is absolute and should be used as given. ` +
@@ -692,7 +695,7 @@ const harness = await Harness.open(
       // "shell-init: error retrieving current directory: getcwd: cannot access parent directories".
       return new NodeExecutionEnv({
         cwd: dir,
-        shellEnv: { PWD: dir, PIDROID_WORKSPACE: dir, PIDROID_APP_DIR: APP_DIR, PIDROID_UPLOADS: UPLOADS_DIR },
+        shellEnv: { PWD: dir, PIDROID_WORKSPACE: dir, PIDROID_APP_DIR: APP_DIR, PIDROID_UPLOADS: UPLOADS_DIR, PIDROID_SKILLS: SKILLS_DIR },
       });
     },
     // A hung provider request must fail (and retry) instead of blocking the queue forever.
@@ -1887,6 +1890,15 @@ const server = Bun.serve({
       return loader.reload().then(r => Response.json(r)).catch(err => Response.json({ error: String(err) }, { status: 500 }));
     }
 
+    // Shared Agent Skills are data files, discovered on demand from the app-private user skills directory.
+    if (url.pathname === "/api/skills" && req.method === "GET") {
+      try {
+        return Response.json({ directory: SKILLS_DIR, skills: discoverSkills() });
+      } catch (err) {
+        return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
     // Extensions: the settings tab lists them and toggles each one. Turning one off stores the choice and
     // reloads in the same step, so what the list shows is what is actually installed.
     if (url.pathname === "/api/extensions" && req.method === "GET") {
@@ -2311,6 +2323,18 @@ const server = Bun.serve({
           suffixes: TREE_SKIP_SUFFIXES,
         },
       });
+    }
+
+    // Export a bundle without asking the agent: the Files tab's "Export bundle" button.
+    //
+    // Same bundles.ts writeBundle the save_bundle tool calls, on purpose -- one implementation, so
+    // what the tab shows and what the tarball holds stay the same thing. The name is optional and
+    // arrives in the query string (a GET-shaped request needs no body and no CSRF dance); an empty
+    // or missing one falls back to the tool's default prefix.
+    if (url.pathname === "/api/files/bundle" && req.method === "POST") {
+      return writeBundle(url.searchParams.get("name") || undefined)
+        .then(result => Response.json({ ok: true, ...result }))
+        .catch(err => Response.json({ error: String(err?.message || err) }, { status: 500 }));
     }
 
     // --- Artifacts: browse and serve the files in a session's own workspace ---

@@ -469,15 +469,34 @@ body {
 }
 
 .settings-tabs {
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  min-width: 0;
   overflow-x: auto;
-  scrollbar-width: none;
+  overflow-y: hidden;
+  flex-wrap: nowrap;
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-muted) transparent;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
   /* Horizontal tab swipes keep working; vertical drags die instead of panning the view. */
   touch-action: pan-x;
-  overscroll-behavior: none;
+  overscroll-behavior-x: contain;
 }
 
-.settings-tabs::-webkit-scrollbar { display: none; }
+.settings-tabs .tab-btn {
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 12px;
+  white-space: nowrap;
+  scroll-snap-align: center;
+}
+
+.settings-tabs::-webkit-scrollbar { height: 2px; }
+.settings-tabs::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 2px; }
+.settings-tabs::-webkit-scrollbar-track { background: transparent; }
 
 /* A drag must not walk out of its scroller into a page pan: the keyboard pan and the
    focus scroll are both triggered that way, and either one slides the whole app shell
@@ -913,6 +932,90 @@ textarea {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+/* Skills are read-only metadata views; each instruction file stays in the shared skills directory. */
+.skills-location {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  margin: 8px 0 14px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text-secondary);
+  font-size: 0.73rem;
+  background: var(--bg-secondary);
+}
+.skills-location code {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+.skills-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.skill-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+}
+.skill-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--accent-text-strong);
+  font-size: 0.88rem;
+}
+.skill-card-head strong { overflow-wrap: anywhere; }
+.skill-card p {
+  margin: 7px 0 9px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.skill-card-path {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-muted);
+}
+.skill-card-path .ico-wrap { flex: none; margin-top: 1px; }
+.skill-card-path code {
+  min-width: 0;
+  font-size: 0.65rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.skills-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 24px 14px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  text-align: center;
+}
+.skills-empty > strong { font-size: 0.9rem; }
+.skills-empty .description { margin: 0; max-width: 34rem; }
+.skills-example-path {
+  max-width: 100%;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  overflow-wrap: anywhere;
 }
 
 /* Extension rows: label on the left, switch hard right, note between them on parked files. */

@@ -129,6 +129,7 @@
         <button class="tab-btn active" data-tab="providers"><span data-icon="cpu" data-size="16"></span>Providers</button>
         <button class="tab-btn" data-tab="theme"><span data-icon="palette" data-size="16"></span>Theme</button>
         <button class="tab-btn" data-tab="extensions"><span data-icon="puzzle" data-size="16"></span>Extensions</button>
+        <button class="tab-btn" data-tab="skills"><span data-icon="sparkles" data-size="16"></span>Skills</button>
         <button class="tab-btn" data-tab="changes"><span data-icon="git-compare" data-size="16"></span>Changes</button>
         <button class="tab-btn" data-tab="workspace"><span data-icon="folder" data-size="16"></span>Files</button>
       </nav>
@@ -235,6 +236,13 @@
             <button class="btn-secondary icon-btn-text" id="refresh-files-btn">
               <span data-icon="refresh-cw" data-size="15"></span><span class="btn-label">Refresh</span>
             </button>
+            <!-- The escape hatch as a button: bundles the app's source into
+                 /storage/emulated/0/Download without asking the agent. Same archives the
+                 save_bundle tool writes; see POST /api/files/bundle. -->
+            <button class="btn-secondary icon-btn-text" id="export-bundle-btn"
+                    title="Write every source file to a tar.gz in Downloads">
+              <span data-icon="archive" data-size="15"></span><span class="btn-label">Export bundle</span>
+            </button>
           </div>
           <div class="field-wrap">
             <span data-icon="search" data-size="15" class="field-icon"></span>
@@ -326,6 +334,18 @@
           <h2>Reload result</h2>
         </div>
         <div class="state-card" id="extensions-result"><p>No reload yet this session.</p></div>
+      </section>
+
+      <section class="tab-content" id="tab-skills">
+        <div class="editor-header">
+          <h2>Agent Skills</h2>
+          <button type="button" class="btn-secondary icon-btn-text" id="refresh-skills-btn">
+            <span data-icon="refresh-cw" data-size="15"></span><span class="btn-label">Refresh</span>
+          </button>
+        </div>
+        <p class="description">Skills give the agent task-specific instructions and supporting files. The agent sees each skill's name and description, then reads its <code>SKILL.md</code> only when relevant.</p>
+        <div class="skills-location" id="skills-location"><span class="dim">Loading skills folder…</span></div>
+        <div class="skills-list" id="skills-list"><p class="description">Loading skills…</p></div>
       </section>
     </section>
 
@@ -456,6 +476,7 @@
   <script src="artifacts.js"></script>
   <script src="theme.js"></script>
   <script src="extensions-tab.js"></script>
+  <script src="skills-tab.js"></script>
   <script src="providers.js"></script>
   <script src="lib/marked.umd.js"></script>
   <script src="chat.js"></script>

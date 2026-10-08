@@ -1,0 +1,180 @@
+/**
+ * Agent Skills catalog for Pidroid.
+ *
+ * Shared user skills live outside the app source and per-session workspaces, at
+ * <app-data>/skills/<skill-name>/SKILL.md. Only names/descriptions/paths enter the prompt;
+ * the model loads a skill's instructions with the ordinary read tool when relevant.
+ */
+
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+const APP_DIR = decodeURIComponent(new URL("./", import.meta.url).pathname).replace(/\/$/, "");
+export const SKILLS_DIR = join(dirname(APP_DIR), "skills");
+const MAX_SKILL_FILE_BYTES = 1024 * 1024;
+const MAX_NAME_LENGTH = 64;
+const MAX_DESCRIPTION_LENGTH = 1024;
+const MAX_SCAN_DEPTH = 6;
+const MAX_SCAN_DIRECTORIES = 2000;
+
+mkdirSync(SKILLS_DIR, { recursive: true });
+
+interface SkillMetadata {
+  name: string;
+  description: string;
+  location: string;
+}
+
+const reported = new Set<string>();
+
+function warnOnce(path: string, reason: string): void {
+  const key = `${path}\n${reason}`;
+  if (reported.has(key)) return;
+  reported.add(key);
+  console.warn(`[pidroid] skill ${path}: ${reason}`);
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function metadataFrom(filePath: string, folderName: string): SkillMetadata | undefined {
+  let raw: string;
+  try {
+    const size = statSync(filePath).size;
+    if (size > MAX_SKILL_FILE_BYTES) {
+      warnOnce(filePath, `SKILL.md is larger than ${MAX_SKILL_FILE_BYTES} bytes; skipping`);
+      return undefined;
+    }
+    raw = readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+  } catch (error) {
+    warnOnce(filePath, `could not read SKILL.md: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+
+  const frontmatter = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(raw);
+  if (!frontmatter) {
+    warnOnce(filePath, "missing YAML frontmatter; expected --- at the start of SKILL.md");
+    return undefined;
+  }
+
+  let parsed: unknown;
+  try {
+    const yaml = (globalThis as any).Bun?.YAML;
+    if (typeof yaml?.parse !== "function") throw new Error("Bun YAML parser is unavailable");
+    parsed = yaml.parse(frontmatter[1]);
+  } catch (error) {
+    warnOnce(filePath, `invalid YAML frontmatter: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    warnOnce(filePath, "YAML frontmatter must be a mapping");
+    return undefined;
+  }
+
+  const metadata = parsed as Record<string, unknown>;
+  const name = typeof metadata.name === "string" ? metadata.name.trim() : "";
+  const description = typeof metadata.description === "string" ? metadata.description.trim() : "";
+  if (!name) {
+    warnOnce(filePath, "missing required 'name' field; skipping skill");
+    return undefined;
+  }
+  if (!description) {
+    warnOnce(filePath, "missing required 'description' field; skipping skill");
+    return undefined;
+  }
+
+  if (name.length > MAX_NAME_LENGTH || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
+    warnOnce(filePath, `name '${name}' does not follow the Agent Skills naming rules`);
+  }
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    warnOnce(filePath, `description exceeds ${MAX_DESCRIPTION_LENGTH} characters`);
+  }
+  if (name !== folderName) {
+    // The spec requires a directory/name match. Follow Pi's lenient behavior: keep a usable
+    // skill visible, but make the portability issue clear in the server log.
+    warnOnce(filePath, `name '${name}' does not match its directory '${folderName}'`);
+  }
+
+  return { name, description, location: filePath };
+}
+
+/** Discover Agent Skills folders recursively, stopping at each directory that owns SKILL.md. */
+export function discoverSkills(root = SKILLS_DIR): SkillMetadata[] {
+  if (!existsSync(root)) return [];
+  const skills: SkillMetadata[] = [];
+  const names = new Set<string>();
+  let scannedDirectories = 0;
+
+  const scan = (directory: string, depth: number): void => {
+    if (++scannedDirectories > MAX_SCAN_DIRECTORIES) {
+      warnOnce(root, `stopped after scanning ${MAX_SCAN_DIRECTORIES} directories`);
+      return;
+    }
+    let entries;
+    try {
+      entries = readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    } catch (error) {
+      warnOnce(directory, `could not scan directory: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+
+    const skillEntry = entries.find((entry) => entry.name === "SKILL.md" && entry.isFile());
+    if (skillEntry) {
+      const skillFile = join(directory, skillEntry.name);
+      const skill = metadataFrom(skillFile, directory.split(/[\\/]/).pop() ?? directory);
+      if (skill) {
+        if (names.has(skill.name)) {
+          warnOnce(skillFile, `duplicate skill name '${skill.name}'; keeping the first discovered skill`);
+        } else {
+          names.add(skill.name);
+          skills.push(skill);
+        }
+      }
+      return; // Resources below a skill directory are not separate skills.
+    }
+
+    if (depth >= MAX_SCAN_DEPTH) {
+      if (entries.some((entry) => entry.isDirectory() && !entry.name.startsWith("."))) {
+        warnOnce(directory, `stopped descending at depth ${MAX_SCAN_DEPTH}`);
+      }
+      return;
+    }
+    for (const entry of entries) {
+      // Do not follow symlinks, hidden directories, or dependency trees outside the skill root.
+      if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      scan(join(directory, entry.name), depth + 1);
+      if (scannedDirectories > MAX_SCAN_DIRECTORIES) return;
+    }
+  };
+
+  scan(root, 0);
+  return skills;
+}
+
+export function renderSkillsPrompt(): string | undefined {
+  const skills = discoverSkills();
+  if (!skills.length) return undefined;
+
+  const lines = [
+    "These skills provide specialized instructions for particular tasks.",
+    "When a skill's description matches the task, use the read tool to load its SKILL.md before proceeding.",
+    "Resolve paths referenced by a skill relative to the directory containing its SKILL.md; use absolute paths with the file tools.",
+    "Load only relevant skills and supporting files, not the whole skills directory.",
+    "<available_skills>",
+  ];
+  for (const skill of skills) {
+    lines.push("  <skill>");
+    lines.push(`    <name>${escapeXml(skill.name)}</name>`);
+    lines.push(`    <description>${escapeXml(skill.description)}</description>`);
+    lines.push(`    <location>${escapeXml(skill.location)}</location>`);
+    lines.push("  </skill>");
+  }
+  lines.push("</available_skills>");
+  return lines.join("\n");
+}
+
