@@ -1583,10 +1583,6 @@ textarea {
   justify-content: space-between;
 }
 
-.message.thinking {
-  color: var(--text-secondary);
-}
-
 /* Sweeping highlight across the live status text ("Thinking…", "Working…").
    The gradient is clipped to the glyphs, so only the text itself lights up. */
 .shimmer {
@@ -2056,7 +2052,8 @@ html[data-mode="light"] .shimmer {
 .composer > .chat-dock { pointer-events: none; }
 
 .dock-status { display: flex; align-items: baseline; gap: 6px; }
-/* Same look as the status row's clock used to have; the gap above already spaces it. */
+/* The dock's own flex gap already spaces the clock from the status word, so the shared .dur
+   margin and padding are zeroed here. */
 .dock-status .dur { margin-left: 0; padding-left: 0; }
 
 .dock-queued { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -2591,9 +2588,6 @@ details.tool:not(.failed) .dur-live { color: var(--accent); }
 }
 
 .dur-live { opacity: 1; }
-
-/* The waiting row carries the run age inline after the word. */
-.message.thinking .message-content .dur { margin-left: 6px; padding-left: 0; }
 
 /* A failed call turns red: icon, tool name and argument preview. */
 details.tool.failed .tool-ico,
