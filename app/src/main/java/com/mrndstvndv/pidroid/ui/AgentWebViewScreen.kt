@@ -202,8 +202,8 @@ fun AgentWebViewScreen() {
                                 }
                             }
                         }
-                        // Bridge for the web UI. The restart goes through here rather than /api/restart because this works
-                        // even when the agent-editable server is broken, and it also leaves safe mode.
+                        // Bridge for the web UI. The restart goes through here rather than /api/restart because this still
+                        // works when the agent's own server is down.
                         addJavascriptInterface(object {
                             @JavascriptInterface
                             fun statusBarHeight(): Float = statusBarDp[0]

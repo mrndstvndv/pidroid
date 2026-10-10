@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import com.mrndstvndv.pidroid.MainActivity
 import com.mrndstvndv.pidroid.R
 import com.mrndstvndv.pidroid.agent.AgentProcessManager
+import com.mrndstvndv.pidroid.agent.BundleStore
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -25,6 +26,7 @@ object Capabilities {
         "battery.get" to ::battery,
         "notification.post" to ::postNotification,
         "agent.setRunningCount" to ::setRunningCount,
+        "agent.ready" to ::agentReady,
     )
 
     private const val CHANNEL_ID = "pidroid_agent_messages"
@@ -61,11 +63,28 @@ object Capabilities {
         return JSONObject()
     }
 
+    /**
+     * The agent (server.ts) calls this once, about 5s after it starts listening, to say the bundle it runs came up: the
+     * bundle is then the last healthy one (BundleStore.markHealthy). A failed start never gets here.
+     */
+    private fun agentReady(context: Context, @Suppress("UNUSED_PARAMETER") args: JSONObject): JSONObject {
+        BundleStore.markHealthy(context)
+        return JSONObject()
+    }
+
     private fun postNotification(context: Context, args: JSONObject): JSONObject {
         val title = args.optString("title").takeIf { it.isNotBlank() }
             ?: throw BridgeException("bad_args", "title is required")
-        val body = args.optString("body")
+        val id = if (args.has("id")) args.optInt("id") else null
+        val notificationId = showNotification(context, title, args.optString("body"), id)
+        return JSONObject().put("id", notificationId)
+    }
 
+    /**
+     * Posts a notification that opens the app when tapped. [id] replaces an earlier notification with that id; null takes
+     * the next free id. Throws BridgeException when the user has notifications off for the app.
+     */
+    fun showNotification(context: Context, title: String, body: String, id: Int? = null): Int {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -84,9 +103,9 @@ object Capabilities {
         }
 
         // Reusing a caller-chosen id replaces the earlier notification (e.g. progress updates).
-        val id = if (args.has("id")) args.optInt("id") else nextId.getAndUpdate { if (it == Int.MAX_VALUE) FIRST_ID else it + 1 }
+        val notificationId = id ?: nextId.getAndUpdate { if (it == Int.MAX_VALUE) FIRST_ID else it + 1 }
         val open = PendingIntent.getActivity(
-            context, id, Intent(context, MainActivity::class.java),
+            context, notificationId, Intent(context, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
@@ -98,7 +117,7 @@ object Capabilities {
             .setAutoCancel(true)
             .build()
         @Suppress("MissingPermission") // checked above
-        NotificationManagerCompat.from(context).notify(id, notification)
-        return JSONObject().put("id", id)
+        NotificationManagerCompat.from(context).notify(notificationId, notification)
+        return notificationId
     }
 }
