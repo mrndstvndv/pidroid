@@ -5,8 +5,7 @@
  *
  * The socket client itself is ../bridge.ts, shared with the harness, which posts its own notification
  * when a run ends unattended. That helper is imported, not inlined, so there is only one copy of the
- * wire protocol -- and unlike this file it is not hot-swapped: restart_server after changing it.
- * After editing this file, call reload_extensions.
+ * wire protocol, and it ships with the app.
  */
 
 import { Type } from "@earendil-works/pi-ai";

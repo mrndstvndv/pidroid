@@ -49,16 +49,6 @@
       </button>
     </header>
 
-    <!-- Shown only when the page is talking to the app's recovery server instead of the real
-         one. Positioned rather than in flow, so it can appear on any screen without reflowing. -->
-    <div class="mode-banner" id="fallback-banner" hidden>
-      <span data-icon="triangle-alert" data-size="14" class="ico-inline"></span>
-      <span>Recovery server active. Some features are limited until the agent restarts.</span>
-      <button type="button" class="icon-btn" id="fallback-banner-close" aria-label="Dismiss">
-        <span data-icon="x" data-size="14"></span>
-      </button>
-    </div>
-
     <!-- Transient in-app notices (a failed title job, with a fix button). A stack that floats
          under the top chrome: nothing is in flow, so no screen reflows when one appears. -->
     <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
@@ -132,7 +122,6 @@
         <button class="tab-btn" data-tab="extensions"><span data-icon="puzzle" data-size="16"></span>Extensions</button>
         <button class="tab-btn" data-tab="skills"><span data-icon="sparkles" data-size="16"></span>Skills</button>
         <button class="tab-btn" data-tab="machines"><span data-icon="terminal" data-size="16"></span>Machines</button>
-        <button class="tab-btn" data-tab="changes"><span data-icon="git-compare" data-size="16"></span>Changes</button>
         <button class="tab-btn" data-tab="workspace"><span data-icon="folder" data-size="16"></span>Files</button>
       </nav>
 
@@ -164,23 +153,6 @@
         <div id="providers-list"><p>Loading providers...</p></div>
       </section>
 
-      <section class="tab-content" id="tab-changes">
-        <div class="editor-header">
-          <h2>Changes</h2>
-          <div class="provider-actions">
-            <button class="btn-secondary icon-btn-text" id="undo-latest-btn">
-              <span data-icon="undo-2" data-size="15"></span><span class="btn-label">Undo last</span>
-            </button>
-            <button class="btn-secondary icon-btn-text" id="refresh-changes-btn">
-              <span data-icon="refresh-cw" data-size="15"></span><span class="btn-label">Refresh</span>
-            </button>
-          </div>
-        </div>
-        <p class="description">The agent checkpoints the changes it has finished, and the app checkpoints anything that changed while no agent was running. Undo reverts just that checkpoint's changes (and first saves any uncommitted edits, so nothing is lost); Restore returns every file to how it was right after it. Undoing an undo brings the change back.</p>
-        <div id="update-panel" class="update-panel" hidden></div>
-        <div id="changes-list"><p>Loading changes...</p></div>
-      </section>
-
       <section class="tab-content files-tab" id="tab-workspace">
         <div class="files-toolbar">
           <div class="header-actions files-actions">
@@ -192,13 +164,6 @@
             </button>
             <button class="btn-secondary icon-btn-text" id="refresh-files-btn">
               <span data-icon="refresh-cw" data-size="15"></span><span class="btn-label">Refresh</span>
-            </button>
-            <!-- The escape hatch as a button: bundles the app's source into
-                 /storage/emulated/0/Download without asking the agent. Same archives the
-                 save_bundle tool writes; see POST /api/files/bundle. -->
-            <button class="btn-secondary icon-btn-text" id="export-bundle-btn"
-                    title="Write every source file to a tar.gz in Downloads">
-              <span data-icon="archive" data-size="15"></span><span class="btn-label">Export bundle</span>
             </button>
           </div>
           <div class="field-wrap">
@@ -281,10 +246,12 @@
           </div>
         </div>
         <p class="description">
-          Every <code>extensions/*.ts</code> file default-exports one extension and is hot-swapped on reload —
-          no restart, sessions keep running. The switch on each row turns that extension off or on: flipping it
-          reloads right away, so a disabled extension drops its tools, prompt sections and hooks from the next
-          turn on. Files starting with an underscore are skipped by the loader and have no switch.
+          Built-in extensions ship with the app and are read-only. The agent writes its own into
+          <code>$PIDROID_DATA_DIR/extensions</code>, where they load after the built-in ones. Every file
+          default-exports one extension and is hot-swapped on reload — no restart, sessions keep running. The
+          switch on each row turns that extension off or on: flipping it reloads right away, so a disabled
+          extension drops its tools, prompt sections and hooks from the next turn on. Files starting with an
+          underscore are skipped by the loader and have no switch.
         </p>
         <div id="extensions-list"><p>Loading extensions...</p></div>
         <div class="editor-header">
@@ -506,7 +473,5 @@
   <script src="lib/marked.umd.js"></script>
   <script src="chat.js"></script>
   <script src="sessions.js"></script>
-  <script src="changes.js"></script>
-  
 </body>
 </html>

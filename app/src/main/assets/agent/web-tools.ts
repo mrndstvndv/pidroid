@@ -43,10 +43,9 @@
  * It lives here rather than in extensions/ because being able to read the web is core to being able
  * to answer questions at all, not a capability to hot-swap away. It is still a pi-durable extension
  * in the mechanical sense -- defineExtension({tools}), installed into the registry by server.ts
- * alongside CodingTools and SelfModify -- which keeps server.ts itself from growing by several
+ * alongside CodingTools and the pidroid tools -- which keeps server.ts itself from growing by several
  * hundred lines.
  *
- * After editing, call restart_server: it builds first and refuses if the build fails.
  */
 
 import { Type } from "@earendil-works/pi-ai";

@@ -36,17 +36,15 @@
  *    and cannot reach the app holding the session. It also means the page is a real file: the
  *    reader can open it full screen, copy it, and it is still there next turn.
  *
- * After editing, call reload_extensions. No restart needed.
  */
 
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { mkdir } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
+import { WORKSPACES_DIR } from "../paths.ts";
 
-/** The app directory: the session workspaces are one directory above it, one per conversation. */
-const APP_DIR = dirname(import.meta.dir);
-const WORKSPACES_DIR = join(dirname(APP_DIR), "workspaces");
+/** One workspace per conversation, under the app's files directory (see paths.ts). */
 const workspaceDir = (conversationId: number | bigint) => join(WORKSPACES_DIR, String(conversationId));
 
 /** Where artifacts land inside a workspace, and the longest listing that fits in a tool result. */

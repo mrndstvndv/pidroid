@@ -2,11 +2,8 @@
 *.sqlite-*
 auth.json
 auth.json.tmp
-.installed_version
-.shipped_manifest.json
 node_modules/
 vendor/
-fallback/
 uploads/
 .tmp/
 machines/

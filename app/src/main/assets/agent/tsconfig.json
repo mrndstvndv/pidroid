@@ -38,9 +38,6 @@
       "@earendil-works/chord/context": [
         "./vendor/chord-context.js"
       ],
-      "isomorphic-git": [
-        "./vendor/isomorphic-git.js"
-      ],
       "diff": [
         "./vendor/diff.js"
       ],

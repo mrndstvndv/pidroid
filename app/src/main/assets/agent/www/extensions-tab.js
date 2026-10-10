@@ -1,4 +1,4 @@
-// Extensions tab: lists extensions/*.ts, toggles each one and triggers the hot-swap reload via /api/reload.
+// Extensions tab: lists the built-in and user extensions, toggles each one and triggers the hot-swap reload via /api/reload.
 // The server's ExtensionLoader does the work; this is just a view over it. A toggle is applied by
 // POSTing it and reloading in the same step, so what the list shows is what is actually installed.
 
@@ -10,10 +10,13 @@ function escapeHtml(str) {
   return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function row({ file, name, enabled, switchable }) {
+/** Built-in extensions ship with the app; user ones are the agent's own, in the data directory. */
+const ORIGIN_LABEL = { builtin: "built-in", user: "yours" };
+
+function row({ key, origin, file, name, enabled, switchable }) {
   const toggle = switchable
     ? `<label class="ext-switch" title="${enabled ? "On" : "Off"}">
-         <input type="checkbox" data-ext-toggle="${escapeHtml(file)}" ${enabled ? "checked" : ""}
+         <input type="checkbox" data-ext-toggle="${escapeHtml(key)}" ${enabled ? "checked" : ""}
                 aria-label="Enable ${escapeHtml(name)}" />
          <span class="ext-switch-track"><span class="ext-switch-thumb"></span></span>
        </label>`
@@ -21,8 +24,10 @@ function row({ file, name, enabled, switchable }) {
   // The extension's own name is the label; the file it lives in is just an implementation detail, so it
   // only appears where there is no name to show (a parked file was never imported to find one).
   const label = switchable ? name : file;
-  const note = switchable ? "" : `<span class="ext-note">prefixed with _, skipped by the loader</span>`;
-  // Label on the left, switch hard right; the note (parked files only) sits between them.
+  const note = switchable
+    ? `<span class="ext-note">${escapeHtml(ORIGIN_LABEL[origin] || origin)}</span>`
+    : `<span class="ext-note">${escapeHtml(ORIGIN_LABEL[origin] || origin)} · prefixed with _, skipped by the loader</span>`;
+  // Label on the left, switch hard right; the note (origin, and why a parked file has no switch) sits between them.
   return `
     <div class="file-item ext-item${enabled === false ? " is-off" : ""}">
       <span class="file-name">${iconTag("file-text", 16, "dim")} <strong>${escapeHtml(label)}</strong></span>
@@ -34,21 +39,17 @@ function row({ file, name, enabled, switchable }) {
 async function loadExtensions() {
   if (!extList) return;
   try {
-    const [state, listing] = await Promise.all([
-      fetch("/api/extensions").then((r) => r.json()),
-      fetch("/api/files/list?dir=extensions").then((r) => r.json()).catch(() => ({ files: [] })),
-    ]);
+    const state = await fetch("/api/extensions").then((r) => r.json());
     if (state.error) throw new Error(state.error);
 
-    const parked = (listing.files || []).filter((f) => !f.isDirectory && f.name.startsWith("_"));
     const rows = [
       ...(state.extensions || []).map((e) => row({ ...e, switchable: true })),
-      ...parked.map((f) => row({ file: f.name, name: f.name, enabled: false, switchable: false })),
+      ...(state.parked || []).map((p) => row({ key: `${p.origin}:${p.file}`, origin: p.origin, file: p.file, name: p.file, enabled: false, switchable: false })),
     ];
 
     extList.innerHTML = rows.length
       ? rows.join("")
-      : '<p class="description">No extension files yet. Drop one in <code>extensions/</code> and press Reload.</p>';
+      : '<p class="description">No extension files yet. Ask the agent to write one into <code>$PIDROID_DATA_DIR/extensions</code>, then press Reload.</p>';
   } catch (e) {
     extList.innerHTML = `<p class="description">Error loading extensions: ${escapeHtml(e)}</p>`;
   }
@@ -60,7 +61,7 @@ function renderReloadResult(result) {
   for (const l of result.loaded || []) lines.push(`loaded  ${l}`);
   for (const s of result.skipped || []) lines.push(`off     ${s}`);
   for (const r of result.removed || []) lines.push(`removed ${r}`);
-  for (const [file, error] of Object.entries(result.errors || {})) lines.push(`ERROR   ${file}: ${error}`);
+  for (const [key, error] of Object.entries(result.errors || {})) lines.push(`ERROR   ${key}: ${error}`);
   extResult.textContent = lines.length ? lines.join("\n") : "Nothing to do: no extension files found.";
 }
 
@@ -91,25 +92,25 @@ async function reloadExtensions() {
 
 // Flipping a switch stores the choice and hot-swaps in one call, so the extension is out of the
 // registry (tools gone, prompt sections and hooks dropped) before the next turn starts.
-async function toggleExtension(file, enabled, input) {
+async function toggleExtension(key, enabled, input) {
   input.disabled = true;
   try {
     const res = await fetch("/api/extensions/toggle", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file, enabled }),
+      body: JSON.stringify({ key, enabled }),
     });
     const data = await res.json();
     if (data.error) {
       input.checked = !enabled;
-      extResult.textContent = `Could not toggle ${file}: ${data.error}`;
+      extResult.textContent = `Could not toggle ${key}: ${data.error}`;
       return;
     }
     renderReloadResult(data.reload || {});
     markPopulated();
   } catch (e) {
     input.checked = !enabled;
-    extResult.textContent = `Could not toggle ${file}: ${e}`;
+    extResult.textContent = `Could not toggle ${key}: ${e}`;
   } finally {
     input.disabled = false;
     input.closest(".ext-item")?.classList.toggle("is-off", !enabled);

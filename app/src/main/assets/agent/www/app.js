@@ -262,40 +262,6 @@ async function openTitleFixSession(sessionId, model, detail) {
   }
 }
 
-/* ---------- which server is this? ----------
-   Both the real server and the app's recovery server answer /api/status, but only the real one
-   reports mode: "full". So a missing mode means we are on the fallback, and the banner says so
-   instead of leaving the user to guess why something is quietly different. Checked on load and
-   again whenever the socket reconnects, because the swap happens across a restart. */
-const fallbackBanner = document.getElementById("fallback-banner");
-
-async function checkServerMode() {
-  if (!fallbackBanner) return;
-  try {
-    const response = await fetch("/api/status", { cache: "no-store" });
-    if (!response.ok) return; // nothing to say while the server is unreachable
-    const status = await response.json();
-    fallbackBanner.hidden = status.mode === "full";
-    if (!fallbackBanner.hidden) {
-      // An app update waiting on the user is the usual reason the recovery server is up, so say so here.
-      const update = await fetch("/api/update", { cache: "no-store" }).then(r => r.json()).catch(() => ({}));
-      const waiting = update.stage === "pending" ? " An app update is waiting for your choice in Changes."
-        : update.stage === "merging" ? " A merge of an app update is in progress."
-        : "";
-      fallbackBanner.querySelector("span:nth-child(2)").textContent =
-        (status.mode
-          ? `Recovery server (${status.mode}). Some features are limited until the agent restarts.`
-          : "Recovery server active. Some features are limited until the agent restarts.") + waiting;
-    }
-  } catch {
-    // A failed probe says nothing about which server this is; leave the banner as it was.
-  }
-}
-
-document.getElementById("fallback-banner-close")?.addEventListener("click", () => {
-  if (fallbackBanner) fallbackBanner.hidden = true;
-});
-
 /* ---------- screens: chat (main) and settings ---------- */
 
 const chatScreen = document.getElementById("screen-chat");
@@ -385,8 +351,6 @@ document.querySelectorAll(".tab-btn").forEach(button => {
     if (button.dataset.tab === "skills") window.loadSkillsTab?.();
     if (button.dataset.tab === "machines") window.loadMachinesTab?.();
     if (button.dataset.tab === "providers") window.loadProviders?.();
-    if (button.dataset.tab === "changes") window.loadChanges?.();
-    
   });
 });
 
@@ -482,7 +446,6 @@ registerBackLayer(80, () => sidebar.classList.contains("open"), closeSidebar);
 
 // WebSocket Setup
 let socket = null;
-let reloadTimeout = null;
 let serverStopping = false;
 
 function setConnected(online) {
@@ -510,7 +473,6 @@ function connectWebSocket() {
   socket.onopen = () => {
     setConnected(true);
     reportVisibility();
-    checkServerMode();
   };
 
   socket.onmessage = (event) => {
@@ -552,22 +514,8 @@ function connectWebSocket() {
           }
           titleModelBySession[p.sessionId] = { model: p.detail, at: Date.now() };
         }
-      } else if (data.event === "changes") {
-        window.onChangesEvent?.();
       } else if (data.event === "login" || data.event === "providers_changed") {
         window.onProviderEvent?.(data);
-      } else if (data.event === "ui_reload") {
-        console.log("[pidroid] UI file modified, hot-reloading:", data.payload);
-        // Instant CSS / Page Hot-Reload
-        clearTimeout(reloadTimeout);
-        reloadTimeout = setTimeout(() => {
-          const stylesheet = document.getElementById("main-stylesheet");
-          if (stylesheet && data.payload?.filename?.endsWith(".css")) {
-            stylesheet.href = `style.css?v=${Date.now()}`;
-          } else {
-            window.location.reload();
-          }
-        }, 300);
       }
     } catch (e) {
       console.error("WS Parse error:", e);
@@ -584,18 +532,5 @@ function escapeHtml(str) {
   return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/* Colour a unified diff (from changes.ts) for display. Shared: the Changes tab renders
-   checkpoint diffs with it, and so does the chat's tool preview. */
-function colorDiff(text) {
-  return escapeHtml(text).split("\n").map(line => {
-    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("===")) return `<span class="hunk">${line}</span>`;
-    if (line.startsWith("@@")) return `<span class="hunk">${line}</span>`;
-    if (line.startsWith("+")) return `<span class="add">${line}</span>`;
-    if (line.startsWith("-")) return `<span class="del">${line}</span>`;
-    return line;
-  }).join("\n");
-}
-
 // WebSocket Setup
-checkServerMode();
 connectWebSocket();
