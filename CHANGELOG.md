@@ -1,3 +1,41 @@
+# [0.6.0](https://github.com/mrndstvndv/pidroid/compare/v0.5.0...v0.6.0) (2026-10-10)
+
+
+### Bug Fixes
+
+* **agent:** bundle manifest, concurrent exports and skill discovery ([669d867](https://github.com/mrndstvndv/pidroid/commit/669d8673047912987aa939e87ae8a02fa1f6b953))
+* **agent:** code and diff viewers render, read and wrap properly ([955d6cc](https://github.com/mrndstvndv/pidroid/commit/955d6ccaf365f837fdd1323c260030495710f8af))
+* **agent:** diff ghost line, Zen's Off level, and bounded highlighting ([02494da](https://github.com/mrndstvndv/pidroid/commit/02494da360a0fd732b2b98b602b4f9058b4e8b49))
+* **agent:** only the reader's input can stop the chat following the stream ([5584896](https://github.com/mrndstvndv/pidroid/commit/558489687648ac1f60c4200a33964440d15e5591))
+* **agent:** repair OpenCode's off level and make send and stop neutral ([6a34c32](https://github.com/mrndstvndv/pidroid/commit/6a34c32591efc1a012184c2ce81febeefe5fec77))
+* **agent:** steady status row, run clock and session landing ([22ed586](https://github.com/mrndstvndv/pidroid/commit/22ed58654c5d123a4e0764d95e00eeb4d18d1963))
+
+
+### Features
+
+* **agent:** Agent Skills tab and an Export bundle button ([00e94d5](https://github.com/mrndstvndv/pidroid/commit/00e94d532193f9b5361989eb7dfd211d66ca2abe))
+* **agent:** checkpoint chosen paths and reconcile app updates in git ([9ee7601](https://github.com/mrndstvndv/pidroid/commit/9ee7601d36158fe7dd90f4255ab189f85bb97e9a))
+* **agent:** colour code fences inside Markdown files by their own language ([2888cd4](https://github.com/mrndstvndv/pidroid/commit/2888cd4116b22e95ad4b6dea24915b12b40fcbce))
+* **agent:** dock the run status and queued messages above the composer ([2582f06](https://github.com/mrndstvndv/pidroid/commit/2582f0642fe061697c1d26f366560f3f4102d0f1))
+* **agent:** follow the transcript tail by native scroll anchoring ([920826c](https://github.com/mrndstvndv/pidroid/commit/920826c083c676aa8df2e7426eb0f9f711ea83c6))
+* **agent:** keep transcript nodes across a commit ([2d5a1ee](https://github.com/mrndstvndv/pidroid/commit/2d5a1eec7efbb7e14ade36b4022b54a871aa0cfb))
+* **agent:** merge phone updates and switch session machines ([172d5ce](https://github.com/mrndstvndv/pidroid/commit/172d5ceac7a385ef8f68524e973afa67f38838a2))
+* **agent:** one code viewer for files and diffs, with soft wrap ([92b1b02](https://github.com/mrndstvndv/pidroid/commit/92b1b022609d4baa97701fce584ede6e7427f89b))
+* **agent:** one markdown renderer for streaming, committed and thinking text ([e3169e9](https://github.com/mrndstvndv/pidroid/commit/e3169e96b29654939a223a20275ba87c70d5cc33))
+* **agent:** pace streamed text to an even reveal ([5902a3a](https://github.com/mrndstvndv/pidroid/commit/5902a3ab74f1936317f5c402b4369ac8bd6f4a0c))
+* **agent:** run a session's tools on a machine over SSH ([247a281](https://github.com/mrndstvndv/pidroid/commit/247a28179220784c8f7d5a5acffc29da0ce5f102))
+* **agent:** slide new transcript lines in on the compositor ([ea39a9f](https://github.com/mrndstvndv/pidroid/commit/ea39a9f5436f5650d85a41978036fffd37483c7f))
+* **agent:** syntax highlighting for files, diffs and code fences ([ffb142c](https://github.com/mrndstvndv/pidroid/commit/ffb142c82ebc44a6f2db86a1e0a4d7f3a7cbd4b7))
+* **agent:** title popup, code ligatures and bundled JetBrains Mono ([9a6cc17](https://github.com/mrndstvndv/pidroid/commit/9a6cc17e8643f16c270d31b85a27c44877a1fed8))
+* **agent:** tool-call diffs with gutters, one turn total, tweened groups and a Mono theme ([5364a9c](https://github.com/mrndstvndv/pidroid/commit/5364a9c3c8fb9a0ceaf1cad3635af49114c1124d))
+* **android:** bundle GNU grep for the agent sandbox ([59deaea](https://github.com/mrndstvndv/pidroid/commit/59deaea508b9ea03a0ad579ee264f7a6704b1902))
+
+
+### Performance Improvements
+
+* **agent:** count visual drops of the last transcript block per frame ([c43db45](https://github.com/mrndstvndv/pidroid/commit/c43db456ef01fdd01143b44f8cf9bbc211094d32))
+* **agent:** load a diff's folded lines when the fold is tapped ([b1b75ec](https://github.com/mrndstvndv/pidroid/commit/b1b75ecefd16f1487d3e2e4667eab7903bf23e33))
+
 # [0.5.0](https://github.com/mrndstvndv/pidroid/compare/v0.4.1...v0.5.0) (2026-10-07)
 
 
