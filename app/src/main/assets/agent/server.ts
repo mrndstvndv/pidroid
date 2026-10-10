@@ -24,7 +24,7 @@ import { commandCodeProvider, commandCodeUsage, commandCodeUsageData } from "./p
 import { opencodeProvider, normalizeOpencodeCatalog } from "./providers/opencode.ts";
 import { GITHUB_COPILOT_PROVIDER_ID, withCopilotOAuth } from "./providers/github-copilot.ts";
 import { FileCredentialStore, LoginManager } from "./auth.ts";
-import { bridgeAvailable, bridgeCall } from "./bridge.ts";
+import { BridgeError, bridgeAvailable, bridgeCall } from "./bridge.ts";
 import { showTool } from "./artifacts.ts";
 import { assemble, foldContext, withoutFolded } from "./diffrows.ts";
 import { fenceLanguage, highlight, highlightPath, languageFor, MAX_INTERACTIVE_CHARS, warm as warmHighlighter } from "./highlight.ts";
@@ -48,6 +48,45 @@ const ThinkingChangeEntry = defineEntry(THINKING_CHANGE_ENTRY_KIND);
  * Uploaded attachments. Private state, so they live in the data directory and survive app updates.
  */
 const UPLOADS_DIR = join(DATA_DIR, "uploads");
+/** Largest bundle zip the Updates tab accepts. A release bundle is a few MB; this only stops runaway uploads. */
+const BUNDLE_IMPORT_MAX_BYTES = 200 * 1024 * 1024;
+/** Install unpacks, hashes and verifies the whole zip on the host, which a large one takes longer than a status read. */
+const BUNDLE_INSTALL_TIMEOUT_MS = 120_000;
+/** Uploaded zips wait here for the host to read them; not part of the bundle, and not served. */
+const INBOX_DIR = join(DATA_DIR, "inbox");
+
+/**
+ * A bridge call that answers with the host's JSON. A refusal from the host (BridgeError, e.g. "unverified" or
+ * "invalid") is a 400 carrying its code; no bridge at all is a 503.
+ */
+function bundleCall(method: string, args?: Record<string, unknown>, timeoutMs?: number): Promise<Response> {
+  return bridgeCall(method, args, timeoutMs).then(
+    (result) => Response.json(result),
+    (err: unknown) => {
+      if (err instanceof BridgeError && err.code === "unavailable") {
+        return Response.json({ error: "Not running inside the Pidroid app" }, { status: 503 });
+      }
+      if (err instanceof BridgeError) return Response.json({ error: err.message, code: err.code }, { status: 400 });
+      return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+    },
+  );
+}
+
+/** Stores the uploaded zip in the inbox, asks the host to install it, then removes the file. */
+async function importBundle(req: Request, allowUnverified: boolean): Promise<Response> {
+  const buf = await req.arrayBuffer();
+  if (!buf.byteLength) return Response.json({ error: "Empty upload" }, { status: 400 });
+  if (buf.byteLength > BUNDLE_IMPORT_MAX_BYTES) return Response.json({ error: "Bundle is larger than 200 MB" }, { status: 413 });
+  mkdirSync(INBOX_DIR, { recursive: true });
+  const file = join(INBOX_DIR, `import-${Date.now()}.zip`);
+  try {
+    await Bun.write(file, buf);
+    return await bundleCall("bundle.install", { path: file, allowUnverified }, BUNDLE_INSTALL_TIMEOUT_MS);
+  } finally {
+    rmSync(file, { force: true });
+  }
+}
+
 const MAX_AGENT_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_AGENT_IMAGES = 8;
 const MAX_AGENT_TOTAL_IMAGE_BYTES = 32 * 1024 * 1024;
@@ -1953,6 +1992,36 @@ const server = Bun.serve({
         })
         .then(reload => Response.json({ success: true, extensions: loader.list(), reload }))
         .catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
+    }
+
+    // --- Agent bundles: the Updates tab. The app's host owns the bundles (download, verify, pin, roll back); these
+    // routes are thin wrappers over its bridge calls. Outside the app there is no host, so every one answers 503.
+    if (url.pathname === "/api/bundles" && req.method === "GET") return bundleCall("bundle.status");
+    if (url.pathname === "/api/bundles/check" && req.method === "POST") return bundleCall("bundle.check");
+    if (url.pathname === "/api/bundles/unpin" && req.method === "POST") return bundleCall("bundle.unpin");
+
+    if (url.pathname === "/api/bundles/prerelease" && req.method === "POST") {
+      return req.json().catch(() => ({})).then((body: { enabled?: boolean }) =>
+        bundleCall("bundle.setPrerelease", { enabled: body.enabled === true }));
+    }
+
+    if (url.pathname === "/api/bundles/activate" && req.method === "POST") {
+      return req.json().catch(() => ({})).then((body: { code?: number }) => {
+        const code = Number(body.code);
+        if (!Number.isSafeInteger(code) || code < 1) return Response.json({ error: "No such bundle" }, { status: 400 });
+        return bundleCall("bundle.activate", { code });
+      });
+    }
+
+    // A manually chosen zip: the raw bytes are the body. The host reads the file during the call, so it is
+    // removed once the call returns, whatever the outcome. ?allowUnverified=1 is the user's confirmation that
+    // the bundle is not signed by the release key (a bundle they built themselves).
+    if (url.pathname === "/api/bundles/import" && req.method === "POST") {
+      if (!bridgeAvailable()) return Response.json({ error: "Not running inside the Pidroid app" }, { status: 503 });
+      const declared = Number(req.headers.get("content-length") ?? 0);
+      if (declared > BUNDLE_IMPORT_MAX_BYTES) return Response.json({ error: "Bundle is larger than 200 MB" }, { status: 413 });
+      const allowUnverified = url.searchParams.get("allowUnverified") === "1";
+      return importBundle(req, allowUnverified);
     }
 
     // The Restart button in Settings (the app's host restarts the process itself; this is the browser's way).

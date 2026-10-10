@@ -824,20 +824,6 @@ html[data-blur="off"] .chat-jump-bottom {
   flex-shrink: 0;
 }
 
-.tree-badge {
-  font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 1px 6px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.tree-badge.modified { color: var(--accent); border-color: var(--accent); }
-.tree-badge.not-shipped { color: var(--text-primary); }
-
 .tree-file.selected {
   background-color: var(--bg-primary);
   box-shadow: inset 2px 0 0 var(--accent);
@@ -1903,6 +1889,64 @@ html[data-mode="light"] .shimmer {
 .update-panel ul { margin: 6px 0; padding-left: 18px; }
 .update-panel code { font-size: 0.8rem; word-break: break-all; }
 .update-panel .provider-actions { flex-wrap: wrap; }
+
+/* ---------- Updates tab ----------
+   Rows reuse .provider-item / .file-item; these only add the wrapping the badges and buttons need on a phone. */
+.updates-current,
+.updates-row {
+  flex-wrap: wrap;
+}
+.updates-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.updates-row .provider-info { flex: 1 1 10rem; }
+.badge.ok { color: var(--success); }
+.badge.warn { color: var(--warn); }
+.updates-pinned {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+}
+.updates-pinned > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.updates-pending {
+  margin: 0 0 12px;
+  color: var(--text-primary);
+}
+.updates-check {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 20px;
+}
+.updates-error,
+.updates-notice.is-error {
+  color: var(--warn);
+  font-size: 0.8rem;
+}
+.updates-notice {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.updates-notice.is-error { border-color: var(--warn); }
+.updates-row .btn-secondary { flex: none; }
 
 .parked {
   color: var(--text-secondary);
@@ -4019,29 +4063,6 @@ html[data-mode="light"] { color-scheme: light; }
   user-select: text;
   touch-action: pan-x pan-y;
 }
-
-/* ---------- recovery-server banner ----------
-   Fixed under the floating chrome rather than in flow: it has to show on any screen (chat,
-   Settings, Artifacts) without pushing the message list or the composer around. */
-.mode-banner {
-  position: absolute;
-  top: var(--chrome-top, 0px);
-  left: 0;
-  right: 0;
-  z-index: 6;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 8px 7px 12px;
-  background-color: color-mix(in srgb, var(--warn) 16%, var(--bg-secondary));
-  border-bottom: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
-  color: var(--text-primary);
-  font-size: 0.74rem;
-  line-height: 1.35;
-}
-.mode-banner[hidden] { display: none; }
-.mode-banner > span:nth-child(2) { flex: 1; min-width: 0; }
-.mode-banner .icon-btn { flex: 0 0 auto; width: 26px; height: 26px; }
 
 /* ---------- in-app toasts ----------
    Under the top chrome rather than over the composer: the send button and the model pill live

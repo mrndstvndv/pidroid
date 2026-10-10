@@ -26,13 +26,16 @@ export function bridgeAvailable(): boolean {
   return Boolean(process.env.PIDROID_BRIDGE_SOCKET);
 }
 
-/** One request per connection: send a JSON line, read the JSON line back. */
-export function bridgeCall(method: string, args: Record<string, unknown> = {}): Promise<any> {
+/**
+ * One request per connection: send a JSON line, read the JSON line back. `timeoutMs` covers calls the host
+ * answers slowly, such as installing a bundle from a large zip; the default suits everything else.
+ */
+export function bridgeCall(method: string, args: Record<string, unknown> = {}, timeoutMs = BRIDGE_TIMEOUT_MS): Promise<any> {
   const path = process.env.PIDROID_BRIDGE_SOCKET;
   if (!path) return Promise.reject(new BridgeError("Not running inside the Pidroid app", "unavailable"));
   return new Promise((resolve, reject) => {
     let buf = "";
-    const timer = setTimeout(() => reject(new BridgeError("Android bridge timed out", "timeout")), BRIDGE_TIMEOUT_MS);
+    const timer = setTimeout(() => reject(new BridgeError("Android bridge timed out", "timeout")), timeoutMs);
     const done = (fn: () => void) => {
       clearTimeout(timer);
       fn();

@@ -122,6 +122,7 @@
         <button class="tab-btn" data-tab="extensions"><span data-icon="puzzle" data-size="16"></span>Extensions</button>
         <button class="tab-btn" data-tab="skills"><span data-icon="sparkles" data-size="16"></span>Skills</button>
         <button class="tab-btn" data-tab="machines"><span data-icon="terminal" data-size="16"></span>Machines</button>
+        <button class="tab-btn" data-tab="updates"><span data-icon="refresh-cw" data-size="16"></span>Updates</button>
         <button class="tab-btn" data-tab="workspace"><span data-icon="folder" data-size="16"></span>Files</button>
       </nav>
 
@@ -151,6 +152,23 @@
         <input type="search" id="provider-filter" class="field" placeholder="Filter providers..." autocomplete="off" />
         <p class="description">Sign in to use a provider's models. OpenCode free models need no login.</p>
         <div id="providers-list"><p>Loading providers...</p></div>
+      </section>
+
+      <section class="tab-content" id="tab-updates">
+        <div class="editor-header">
+          <h2>Updates</h2>
+          <div class="provider-actions">
+            <button type="button" class="btn-secondary icon-btn-text" id="updates-import-btn" title="Import a bundle from a zip file">
+              <span data-icon="file-plus" data-size="15"></span><span class="btn-label">Import…</span>
+            </button>
+            <button type="button" class="btn-secondary icon-btn-text" id="updates-check-btn">
+              <span data-icon="refresh-cw" data-size="15"></span><span class="btn-label">Check now</span>
+            </button>
+          </div>
+        </div>
+        <p class="description">The agent's code ships as one bundle that the app replaces as a whole, so it is never edited in place. Updates come from GitHub releases, are checked against the Pidroid signing key, and apply when the agent is idle. Your own extensions and skills are kept.</p>
+        <input type="file" id="updates-import-input" accept=".zip,application/zip" hidden />
+        <div id="updates-body"><p class="description">Loading updates...</p></div>
       </section>
 
       <section class="tab-content files-tab" id="tab-workspace">
@@ -469,6 +487,7 @@
   <script src="extensions-tab.js"></script>
   <script src="skills-tab.js"></script>
   <script src="machines-tab.js"></script>
+  <script src="updates-tab.js"></script>
   <script src="providers.js"></script>
   <script src="lib/marked.umd.js"></script>
   <script src="chat.js"></script>
