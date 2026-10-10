@@ -1,15 +1,14 @@
 /**
  * Agent Skills catalog for Pidroid.
  *
- * Shared user skills live outside the app source and per-session workspaces, at
- * <app-data>/skills/<skill-name>/SKILL.md. The prompt advertises names/descriptions/paths; the
+ * Shared user skills live outside the app bundle and per-session workspaces, at
+ * $PIDROID_HOME/skills/<skill-name>/SKILL.md (see paths.ts). The prompt advertises names/descriptions/paths; the
  * model can read relevant instructions, and `/skill:name` explicitly embeds the full skill body.
  */
 
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
-const APP_DIR = decodeURIComponent(new URL("./", import.meta.url).pathname).replace(/\/$/, "");
-export const SKILLS_DIR = join(dirname(APP_DIR), "skills");
+import { SKILLS_DIR } from "./paths.ts";
 const MAX_SKILL_FILE_BYTES = 1024 * 1024;
 const MAX_NAME_LENGTH = 64;
 const MAX_DESCRIPTION_LENGTH = 1024;

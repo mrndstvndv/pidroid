@@ -106,8 +106,7 @@ const TOOL_ICONS = [
   ["edit", "pencil"], ["patch", "pencil"],
   ["bash", "terminal"], ["shell", "terminal"], ["exec", "terminal"],
   ["evalruntime", "code"], ["runjs", "code"],
-  ["reloadextensions", "refresh-cw"], ["reloadui", "refresh-cw"], ["reload", "refresh-cw"],
-  ["restartserver", "rotate-cw"],
+  ["reloadextensions", "refresh-cw"], ["reload", "refresh-cw"],
   ["thinking", "brain"], ["reason", "brain"],
 ];
 

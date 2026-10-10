@@ -56,16 +56,20 @@ function cleanView(view: unknown): ToolView | undefined {
 }
 
 /**
- * Hot-swappable extensions. Every extensions/*.ts file default-exports a pi-durable extension
- * (`defineExtension({ name, tools, sections, hooks, wraps, views })`). reload() re-imports each file with a cache-busting
- * query (a plain path, since Bun caches file:// URLs) and installs it: pi-durable replaces an installed extension of the same name in place, so work that is
- * already running finishes on the old code and the next request, tool call or prompt uses the new one. No restart,
- * and sessions keep going. Files an extension imports itself (./helper.ts) are cached, so keep extensions
- * self-contained or restart_server after changing a helper. A file that fails to import leaves the previous version of its extension installed.
+ * Hot-swappable extensions. Every extension file default-exports a pi-durable extension
+ * (`defineExtension({ name, tools, sections, hooks, wraps, views })`). Two directories are loaded, in order:
+ * the built-in ones shipped with the app (APP_DIR/extensions, read-only), then the user's own
+ * (DATA_DIR/extensions, written by the agent). A later extension of the same name replaces an earlier one.
+ *
+ * reload() re-imports each file with a cache-busting query (a plain path, since Bun caches file:// URLs) and
+ * installs it: pi-durable replaces an installed extension of the same name in place, so work that is already
+ * running finishes on the old code and the next request, tool call or prompt uses the new one. No restart, and
+ * sessions keep going. Files an extension imports itself (./helper.ts) are cached, so keep extensions
+ * self-contained. A file that fails to import leaves the previous version of its extension installed.
  */
 
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 interface Installable {
   readonly name: string;
@@ -74,6 +78,25 @@ interface Installable {
 interface RegistryLike {
   install(extension: any): void;
   uninstall(extension: any): void;
+}
+
+export type ExtensionOrigin = "builtin" | "user";
+
+/** A directory of extension files, and whether the app ships it (builtin) or the agent writes it (user). */
+export interface ExtensionSource {
+  origin: ExtensionOrigin;
+  dir: string;
+}
+
+/**
+ * A file on disk. `key` is "<origin>:<file>" (e.g. "builtin:android.ts", "user:weather.ts"): it is what the
+ * settings toggle stores, so a built-in and a user file with the same name are told apart.
+ */
+interface ExtensionEntry {
+  key: string;
+  origin: ExtensionOrigin;
+  file: string;
+  path: string;
 }
 
 export interface ReloadResult {
@@ -85,34 +108,72 @@ export interface ReloadResult {
 }
 
 export interface ExtensionState {
+  key: string;
+  origin: ExtensionOrigin;
   file: string;
   name: string;
   enabled: boolean;
 }
 
+const EXTENSION_FILE = /\.(ts|js|mjs)$/;
+
 export class ExtensionLoader {
-  /** file name -> the extension it last installed */
+  /** entry key -> the extension it last installed */
   private installed = new Map<string, Installable>();
 
   constructor(
     private readonly registry: RegistryLike,
-    private readonly dir: string,
+    private readonly sources: ExtensionSource[],
     /** Consulted on every reload, so a toggle takes effect on the next one. Defaults to "everything on". */
-    private readonly isEnabled: (file: string) => boolean = () => true,
+    private readonly isEnabled: (key: string) => boolean = () => true,
   ) {
-    mkdirSync(dir, { recursive: true });
+    for (const source of sources) mkdirSync(source.dir, { recursive: true });
   }
 
-  /** What is on disk, what is loaded, and what settings have switched off -- for the settings tab. */
+  /** Every extension file on disk, in load order: the sources in turn, each one's files by name. */
+  private entries(): ExtensionEntry[] {
+    return this.sources.flatMap(({ origin, dir }) =>
+      existsSync(dir)
+        ? readdirSync(dir)
+            .filter((f) => EXTENSION_FILE.test(f) && !f.startsWith("_"))
+            .sort()
+            .map((file) => ({ key: `${origin}:${file}`, origin, file, path: join(dir, file) }))
+        : [],
+    );
+  }
+
+  /** Files the loader skips on purpose (a leading underscore), so the settings tab can say why they have no switch. */
+  parked(): { origin: ExtensionOrigin; file: string }[] {
+    return this.sources.flatMap(({ origin, dir }) =>
+      existsSync(dir)
+        ? readdirSync(dir)
+            .filter((f) => EXTENSION_FILE.test(f) && f.startsWith("_"))
+            .sort()
+            .map((file) => ({ origin, file }))
+        : [],
+    );
+  }
+
+  /** What is on disk, what is loaded, and what settings have switched off -- for the settings tab and the agent. */
   list(): ExtensionState[] {
-    const files = existsSync(this.dir)
-      ? readdirSync(this.dir).filter((f) => /\.(ts|js|mjs)$/.test(f) && !f.startsWith("_"))
-      : [];
-    return files.map((file) => ({
+    return this.entries().map(({ key, origin, file }) => ({
+      key,
+      origin,
       file,
-      name: this.installed.get(file)?.name ?? file.replace(/\.(ts|js|mjs)$/, ""),
-      enabled: this.isEnabled(file),
+      name: this.installed.get(key)?.name ?? file.replace(EXTENSION_FILE, ""),
+      enabled: this.isEnabled(key),
     }));
+  }
+
+  /**
+   * Delete a user extension's file. Built-in extensions ship with the app and are refused. The caller reloads
+   * afterwards, which uninstalls the extension.
+   */
+  removeUser(key: string): string {
+    const entry = this.entries().find((e) => e.key === key);
+    if (!entry || entry.origin !== "user") throw new Error(`${key} is not a user extension; built-in extensions ship with the app and cannot be removed`);
+    unlinkSync(entry.path);
+    return entry.file;
   }
 
   /**
@@ -145,43 +206,75 @@ export class ExtensionLoader {
 
   async reload(): Promise<ReloadResult> {
     const result: ReloadResult = { loaded: [], removed: [], skipped: [], errors: {} };
-    const files = existsSync(this.dir)
-      ? readdirSync(this.dir).filter((f) => /\.(ts|js|mjs)$/.test(f) && !f.startsWith("_"))
-      : [];
-    const active = files.filter((file) => this.isEnabled(file));
+    const all = this.entries();
+    const active = all.filter((entry) => this.isEnabled(entry.key));
 
     // Import everything at once (the files are independent and each pulls in its own dependencies),
-    // then install in directory order, since a later extension wins over an earlier one.
+    // then install in load order, since a later extension wins over an earlier one.
     const stamp = Date.now();
     // A plain path + query re-imports the file; Bun caches file:// URLs regardless of the query.
-    const imports = active.map((file) => import(`${join(this.dir, file)}?v=${stamp}`).then((m) => ({ ok: true as const, m }), (error) => ({ ok: false as const, error })));
+    const imports = active.map((entry) => import(`${entry.path}?v=${stamp}`).then((m) => ({ ok: true as const, m }), (error) => ({ ok: false as const, error })));
     const imported = await Promise.all(imports);
 
-    for (const [i, file] of active.entries()) {
+    for (const [i, entry] of active.entries()) {
       try {
         const got = imported[i];
         if (!got.ok) throw got.error;
         const extension = got.m.default as Installable | undefined;
         if (!extension || typeof extension.name !== "string") throw new Error("default export must be defineExtension({ name, ... })");
-        const previous = this.installed.get(file);
+        const previous = this.installed.get(entry.key);
         if (previous && previous.name !== extension.name) this.registry.uninstall(previous); // renamed inside the file
         this.registry.install(extension);
-        this.installed.set(file, extension);
+        this.installed.set(entry.key, extension);
         this.#views = undefined;
-        result.loaded.push(`${file} (${extension.name})`);
+        result.loaded.push(`${entry.key} (${extension.name})`);
       } catch (err) {
-        result.errors[file] = err instanceof Error ? err.message : String(err);
+        result.errors[entry.key] = err instanceof Error ? err.message : String(err);
       }
     }
 
     // A deleted file takes its extension with it, and so does one that was switched off.
-    for (const [file, extension] of [...this.installed]) {
-      if (active.includes(file)) continue;
-      this.registry.uninstall(extension);
-      this.installed.delete(file);
+    const activeKeys = new Set(active.map((entry) => entry.key));
+    const onDisk = new Set(all.map((entry) => entry.key));
+    for (const [key, extension] of [...this.installed]) {
+      if (activeKeys.has(key)) continue;
+      // A user file can share its name with a built-in one and replace it. Uninstalling by name would then take the
+      // built-in down too, so the registry is left alone while another installed file still provides that name.
+      const shadowed = [...this.installed].some(([other, ext]) => other !== key && ext.name === extension.name);
+      if (!shadowed) this.registry.uninstall(extension);
+      this.installed.delete(key);
       this.#views = undefined;
-      (files.includes(file) ? result.skipped : result.removed).push(`${file} (${extension.name})`);
+      (onDisk.has(key) ? result.skipped : result.removed).push(`${key} (${extension.name})`);
     }
     return result;
+  }
+}
+
+/**
+ * Write DATA_DIR/extensions/tsconfig.json, so a user extension can import the same packages the app's own code
+ * can. Bun resolves imports through the tsconfig nearest the importing file, and that directory is not beside the
+ * app, so the app's `paths` are copied with every target made absolute under the app directory. Regenerated on
+ * every boot: an update can change the vendor files (and so the targets). Failure is logged, not fatal.
+ */
+export function writeExtensionsTsconfig(appDir: string, dir: string): void {
+  try {
+    const source = JSON.parse(readFileSync(join(appDir, "tsconfig.json"), "utf8"));
+    const options = source?.compilerOptions ?? {};
+    const baseUrl = resolve(appDir, options.baseUrl ?? ".");
+    const paths: Record<string, string[]> = {};
+    for (const [specifier, targets] of Object.entries<unknown>(options.paths ?? {})) {
+      paths[specifier] = (Array.isArray(targets) ? targets : [targets]).map((target) => resolve(baseUrl, String(target)));
+    }
+    const compilerOptions = {
+      baseUrl,
+      paths,
+      module: options.module,
+      target: options.target,
+      moduleResolution: options.moduleResolution,
+    };
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ compilerOptions }, null, 2) + "\n");
+  } catch (err) {
+    console.warn(`[pidroid] could not write ${join(dir, "tsconfig.json")}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }

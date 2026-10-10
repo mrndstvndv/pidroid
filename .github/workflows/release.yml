@@ -17,6 +17,9 @@ concurrency:
 #   KEYSTORE_PASS    - keystore password
 #   KEY_ALIAS        - key alias
 #   KEY_PASS         - key password
+#   AGENT_BUNDLE_KEY        - PEM private key that signs the agent bundle (optional; unsigned without it)
+#   AGENT_BUNDLE_PUBLIC_KEY - base64 DER public key the app verifies bundles with (optional; empty without it)
+#                             Both are made together by .github/scripts/generate-bundle-key.sh.
 
 jobs:
   release:
@@ -76,3 +79,5 @@ jobs:
         uses: cycjimmy/semantic-release-action@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENT_BUNDLE_KEY: ${{ secrets.AGENT_BUNDLE_KEY }}
+          AGENT_BUNDLE_PUBLIC_KEY: ${{ secrets.AGENT_BUNDLE_PUBLIC_KEY }}

@@ -18,7 +18,6 @@
  *   - console.* is captured and returned instead of written to logcat, so probe output arrives as
  *     tool output. It is restored in a finally block even if the code throws.
  *
- * After editing, call reload_extensions. No restart needed.
  */
 
 import { Type } from "@earendil-works/pi-ai";
@@ -29,7 +28,6 @@ const LOCAL_MODULES = [
   "server",
   "chatview",
   "sessions",
-  "changes",
   "auth",
   "extensions",
   "providers/commandcode",

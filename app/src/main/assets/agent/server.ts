@@ -1,7 +1,6 @@
 import { Database } from "bun:sqlite";
-import { join, dirname, resolve, extname, relative, sep, basename } from "path";
+import { join, dirname, resolve, extname, sep, basename } from "path";
 import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync, statSync, cpSync, rmSync, mkdirSync, realpathSync } from "fs";
-import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
@@ -25,40 +24,69 @@ import { commandCodeProvider, commandCodeUsage, commandCodeUsageData } from "./p
 import { opencodeProvider, normalizeOpencodeCatalog } from "./providers/opencode.ts";
 import { GITHUB_COPILOT_PROVIDER_ID, withCopilotOAuth } from "./providers/github-copilot.ts";
 import { FileCredentialStore, LoginManager } from "./auth.ts";
-import { bridgeAvailable, bridgeCall } from "./bridge.ts";
-import { Changes } from "./changes.ts";
+import { BridgeError, bridgeAvailable, bridgeCall } from "./bridge.ts";
 import { showTool } from "./artifacts.ts";
 import { assemble, foldContext, withoutFolded } from "./diffrows.ts";
 import { fenceLanguage, highlight, highlightPath, languageFor, MAX_INTERACTIVE_CHARS, warm as warmHighlighter } from "./highlight.ts";
-import { ExtensionLoader } from "./extensions.ts";
+import { ExtensionLoader, writeExtensionsTsconfig, type ReloadResult } from "./extensions.ts";
+import { APP_DIR, BUILTIN_EXTENSIONS_DIR, DATA_DIR, SKILLS_DIR, USER_EXTENSIONS_DIR, WORKSPACES_DIR } from "./paths.ts";
 import { Machines, type MachineRow } from "./machines.ts";
 import { copyWorkspaceTree } from "./workspace-copy.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
-import { discoverSkills, expandSkillCommand, renderSkillsPrompt, SKILLS_DIR } from "./skills.ts";
+import { discoverSkills, expandSkillCommand, renderSkillsPrompt } from "./skills.ts";
 import { ChatViewBuilder, clampLevel, liveDelta, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
 import { Timings } from "./timings.ts";
-import { SKIP_DIRS, SKIP_FILES, SKIP_SUFFIXES, writeBundle } from "./bundles.ts";
 
 const PORT = Number(process.env.PORT) || 8765;
-/** The app itself: the server, the UI and the git checkpoint journal. */
-const APP_DIR = process.cwd();
-// The recovery server (the shipped bundle, PIDROID_RECOVERY set by the app) serves the shipped web UI. The agent's own www/
-// may be what broke, or may predate an update that is being applied, so the recovery UI must not come from there.
-const SHIPPED_WWW_DIR = join(dirname(APP_DIR), "agent-bundle", "www");
-const WWW_DIR = process.env.PIDROID_RECOVERY && existsSync(SHIPPED_WWW_DIR) ? SHIPPED_WWW_DIR : join(APP_DIR, "www");
-const DB_PATH = join(APP_DIR, "pidroid.sqlite");
+/** The web UI, served from the read-only bundle. */
+const WWW_DIR = join(APP_DIR, "www");
+const DB_PATH = join(DATA_DIR, "pidroid.sqlite");
 const ModelChangeEntry = defineEntry(MODEL_CHANGE_ENTRY_KIND);
 const ThinkingChangeEntry = defineEntry(THINKING_CHANGE_ENTRY_KIND);
 
 /**
- * One directory per session, so sessions stop fighting over the same files. It is a sibling of the
- * app directory on purpose: changes.ts checkpoints the whole app tree, and session
- * scratch work has no business in that journal (or in the Changes tab, or in a saved bundle). The
- * cost is that the harness code is no longer the working directory, so the agent reaches it by
- * absolute path ($PIDROID_APP_DIR).
+ * Uploaded attachments. Private state, so they live in the data directory and survive app updates.
  */
-const WORKSPACES_DIR = join(dirname(APP_DIR), "workspaces");
-const UPLOADS_DIR = join(APP_DIR, "uploads");
+const UPLOADS_DIR = join(DATA_DIR, "uploads");
+/** Largest bundle zip the Updates tab accepts. A release bundle is a few MB; this only stops runaway uploads. */
+const BUNDLE_IMPORT_MAX_BYTES = 200 * 1024 * 1024;
+/** Install unpacks, hashes and verifies the whole zip on the host, which a large one takes longer than a status read. */
+const BUNDLE_INSTALL_TIMEOUT_MS = 120_000;
+/** Uploaded zips wait here for the host to read them; not part of the bundle, and not served. */
+const INBOX_DIR = join(DATA_DIR, "inbox");
+
+/**
+ * A bridge call that answers with the host's JSON. A refusal from the host (BridgeError, e.g. "unverified" or
+ * "invalid") is a 400 carrying its code; no bridge at all is a 503.
+ */
+function bundleCall(method: string, args?: Record<string, unknown>, timeoutMs?: number): Promise<Response> {
+  return bridgeCall(method, args, timeoutMs).then(
+    (result) => Response.json(result),
+    (err: unknown) => {
+      if (err instanceof BridgeError && err.code === "unavailable") {
+        return Response.json({ error: "Not running inside the Pidroid app" }, { status: 503 });
+      }
+      if (err instanceof BridgeError) return Response.json({ error: err.message, code: err.code }, { status: 400 });
+      return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+    },
+  );
+}
+
+/** Stores the uploaded zip in the inbox, asks the host to install it, then removes the file. */
+async function importBundle(req: Request, allowUnverified: boolean): Promise<Response> {
+  const buf = await req.arrayBuffer();
+  if (!buf.byteLength) return Response.json({ error: "Empty upload" }, { status: 400 });
+  if (buf.byteLength > BUNDLE_IMPORT_MAX_BYTES) return Response.json({ error: "Bundle is larger than 200 MB" }, { status: 413 });
+  mkdirSync(INBOX_DIR, { recursive: true });
+  const file = join(INBOX_DIR, `import-${Date.now()}.zip`);
+  try {
+    await Bun.write(file, buf);
+    return await bundleCall("bundle.install", { path: file, allowUnverified }, BUNDLE_INSTALL_TIMEOUT_MS);
+  } finally {
+    rmSync(file, { force: true });
+  }
+}
+
 const MAX_AGENT_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_AGENT_IMAGES = 8;
 const MAX_AGENT_TOTAL_IMAGE_BYTES = 32 * 1024 * 1024;
@@ -173,12 +201,8 @@ function agentInputContent(
 }
 
 /* ---------- file tree (Files tab) ----------
-   The Files tab shows what a bundle archives, so its skip lists are the ones bundles.ts uses
-   (imported, not copied): the tab, the Export bundle button and the save_bundle tool therefore
-   cannot drift apart -- a file the tab promises is a file the tarball carries. */
-const TREE_SKIP_DIRS = SKIP_DIRS;
-const TREE_SKIP_FILES = SKIP_FILES;
-const TREE_SKIP_SUFFIXES = SKIP_SUFFIXES;
+   A read-only view of the app's code. Dependencies and VCS internals are left out: they are noise, not code. */
+const TREE_SKIP_DIRS = new Set([".git", "node_modules", "vendor", ".bun", ".tmp"]);
 
 /** Largest file the tree preview will render. Above this the tab shows the size and nothing else. */
 const MAX_READ_BYTES = 512 * 1024;
@@ -193,6 +217,7 @@ function sha256Hex(buf: Uint8Array): string {
 }
 
 // Initialize SQLite database
+mkdirSync(DATA_DIR, { recursive: true });
 const db = new Database(DB_PATH, { create: true });
 db.exec("PRAGMA journal_mode = WAL;");
 db.exec(`
@@ -247,13 +272,9 @@ function watchingUi(): boolean {
   return false;
 }
 
-// Changes are committed when the agent calls `checkpoint`, not per turn; the startup capture is started
-// with the boot state below, once it is known whether this start follows a planned restart.
-const changes = new Changes(process.cwd());
-
 // --- pi-durable agent ---------------------------------------------------
 const context = BACKGROUND_CONTEXT;
-const AGENT_DB_PATH = join(process.cwd(), "pidroid-agent.sqlite");
+const AGENT_DB_PATH = join(DATA_DIR, "pidroid-agent.sqlite");
 
 /**
  * pi-ai's default models store is in-memory, so a refreshed catalog dies with
@@ -262,7 +283,7 @@ const AGENT_DB_PATH = join(process.cwd(), "pidroid-agent.sqlite");
  * (the snapshot is a snapshot: DeepSeek V4.1 Flash was missing from it).
  * Persisting the published catalogs makes a refresh stick across restarts.
  */
-const MODELS_STORE_PATH = join(process.cwd(), "pidroid-models.json");
+const MODELS_STORE_PATH = join(DATA_DIR, "pidroid-models.json");
 
 /**
  * Repairs a persisted catalog in place before it is handed back to the registry: the stored copy is
@@ -320,7 +341,7 @@ class FileModelsStore {
 
 // Every pi-ai built-in provider, plus the ported OpenCode Zen free tier and
 // Command Code providers (same ids replace the built-in versions).
-const credentials = new FileCredentialStore(join(process.cwd(), "auth.json"));
+const credentials = new FileCredentialStore(join(DATA_DIR, "auth.json"));
 const models = builtinModels({ credentials, modelsStore: new FileModelsStore(MODELS_STORE_PATH) });
 models.setProvider(opencodeProvider());
 models.setProvider(commandCodeProvider());
@@ -378,8 +399,42 @@ async function providerApiKey(providerId: string): Promise<string | undefined> {
 function blockedBashReason(command: string): string | undefined {
   if (/\/proc\/(\[|\*|\$|\{)/.test(command)) return "Looping over /proc spawns hundreds of processes and gets this app killed by Android. Don't enumerate processes.";
   if (/\bfind\s+\/(\s|$|data\s|proc|sys|system|vendor|apex)/.test(command)) return "Whole-device find is refused (slow, and it can get this app killed). Search inside the workspace only.";
-  if (/\b(server\.js|vendor\/|fallback\/)/.test(command)) return `${APP_DIR}/vendor and ${APP_DIR}/fallback are generated minified bundles; reading them is useless. Read server.ts, auth.ts, changes.ts, chatview.ts, sessions.ts, extensions.ts and providers/ in ${APP_DIR} instead.`;
+  if (writesIntoAppDir(command)) return `${APP_DIR} is the app's read-only code, replaced by updates. Write user extensions to $PIDROID_DATA_DIR/extensions and everything else to your workspace.`;
   return undefined;
+}
+
+/** The app directory as a shell command would spell it. */
+const APP_DIR_SPELLINGS = [APP_DIR, "$PIDROID_APP_DIR", "${PIDROID_APP_DIR}"];
+/** Best-effort: a redirect (not 2>&1), or a command that changes files. A command that names the app and does one of these is refused. */
+const WRITE_COMMAND = /(?:^|[^\d&>])>{1,2}(?!&)|\b(?:rm|mv|cp|tee|touch|mkdir|rmdir|chmod|chown|truncate|ln|install|rsync|dd|patch)\b|\bsed\s+(?:-[a-zA-Z]*i|--in-place)|\bperl\s+-[a-zA-Z]*i/;
+
+function writesIntoAppDir(command: string): boolean {
+  return APP_DIR_SPELLINGS.some((spelling) => command.includes(spelling)) && WRITE_COMMAND.test(command);
+}
+
+/** The real location of a path, following symlinks through its longest existing prefix. */
+function realLocation(path: string): string {
+  let existing = path;
+  const missing: string[] = [];
+  while (!existsSync(existing) && dirname(existing) !== existing) {
+    missing.unshift(basename(existing));
+    existing = dirname(existing);
+  }
+  try {
+    return join(realpathSync(existing), ...missing);
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * Whether a write/edit path lands inside the app's code. A relative path is resolved against a session workspace,
+ * which sits at the same depth under WORKSPACES_DIR for every session, so `..` segments resolve the way they do there.
+ */
+function isInsideAppDir(path: string): boolean {
+  const target = resolve(join(WORKSPACES_DIR, "0"), path);
+  const appReal = realLocation(APP_DIR);
+  return [target, realLocation(target)].some((p) => p === APP_DIR || p === appReal || p.startsWith(APP_DIR + sep) || p.startsWith(appReal + sep));
 }
 
 /** Exit code the Android app treats as "restart me now" (anything else counts as a crash). */
@@ -392,8 +447,8 @@ function scheduleRestart(delayMs: number) {
   setTimeout(() => process.exit(PLANNED_EXIT_CODE), delayMs);
 }
 
-// A user-requested stop exits Bun without the planned-restart code. The Android host currently
-// treats other exit codes as crashes; a host-level stop signal would be needed to avoid that.
+// A user-requested stop exits Bun with code 0. The Android host currently treats other exit codes as crashes;
+// a host-level stop signal would be needed to avoid that.
 let stopScheduled = false;
 function scheduleStop(delayMs: number) {
   if (stopScheduled) return;
@@ -414,208 +469,59 @@ function scheduleStop(delayMs: number) {
   }, delayMs);
 }
 
-/** Bundle server.ts into a temp file: catches syntax errors and unresolved imports before they take the server down. */
-async function preflight(): Promise<string | undefined> {
-  const out = join(tmpdir(), `pidroid-preflight-${Date.now()}.js`);
-  try {
-    const proc = Bun.spawn([process.execPath, "build", "server.ts", "--target=bun", `--outfile=${out}`], {
-      cwd: process.cwd(),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-    return code === 0 ? undefined : `${stderr}${stdout}`.trim().slice(0, 3000) || `bun build exited with code ${code}`;
-  } finally {
-    rmSync(out, { force: true });
-  }
+/** What a reload did, one line per extension, for the agent to read. */
+function reloadSummary(result: ReloadResult): string {
+  const lines = [
+    ...result.loaded.map((l) => `loaded ${l}`),
+    ...result.removed.map((r) => `removed ${r}`),
+    ...Object.entries(result.errors).map(([key, error]) => `ERROR ${key}: ${error}`),
+  ];
+  return lines.join("\n") || "no extension files";
 }
-
-/**
- * Reloading the page mid-run throws away what the user is looking at (streaming text, open sections), so changes to
- * HTML/JS don't reload it on their own while the agent works. CSS swaps in place and is applied at once. The agent
- * calls reload_ui when a batch of edits is done; if it forgets, the page reloads once everything is idle.
- */
-let pendingReload = false;
-let reloadTimer: ReturnType<typeof setTimeout> | undefined;
-
-function requestUiReload(filename: string | null | undefined) {
-  if (filename?.endsWith(".css")) {
-    broadcast("ui_reload", { filename });
-    return;
-  }
-  pendingReload = true;
-  checkIdleThenReload(600);
-}
-
-function checkIdleThenReload(delayMs: number) {
-  if (reloadTimer) clearTimeout(reloadTimer);
-  reloadTimer = setTimeout(async () => {
-    reloadTimer = undefined;
-    if (!pendingReload) return;
-    const busy = await busySessions().catch(() => new Set<number>());
-    if (busy.size > 0) {
-      checkIdleThenReload(2000); // still working: look again shortly
-    } else {
-      pendingReload = false;
-      broadcast("ui_reload", { filename: "index.html" });
-    }
-  }, delayMs);
-}
-
-const reloadUiTool = defineTool({
-  name: "reload_ui",
-  description:
-    "Reload the web UI on the user's screen so your edits to www/ (HTML or JS) take effect. Editing those files does NOT reload the page by itself while you are working, " +
-    "so the user's screen stays stable; call this once, after you have finished a batch of UI edits. CSS-only changes apply immediately without it.",
-  parameters: Type.Object({}),
-  replay: "safe",
-  execute: async (_args, api) => {
-    pendingReload = false;
-    if (reloadTimer) clearTimeout(reloadTimer);
-    setTimeout(() => broadcast("ui_reload", { filename: "index.html" }), 800); // let this tool result commit first
-    api.output("The UI will reload in a moment.");
-    return {};
-  },
-});
 
 const reloadExtensionsTool = defineTool({
   name: "reload_extensions",
   description:
-    "Re-import every file in extensions/ and hot-swap the extensions (tools, prompt sections, hooks) without restarting. " +
+    "Re-import every extension file (built-in and user) and hot-swap the extensions (tools, prompt sections, hooks) without restarting. " +
     "Running work finishes on the old code; the next tool call or request uses the new one. Reports import errors per file.",
   parameters: Type.Object({}),
   replay: "safe",
   execute: async (_args, api) => {
-    const result = await loader.reload();
-    const lines = [
-      ...result.loaded.map((l) => `loaded ${l}`),
-      ...result.removed.map((r) => `removed ${r}`),
-      ...Object.entries(result.errors).map(([file, error]) => `ERROR ${file}: ${error}`),
-    ];
-    api.output(lines.join("\n") || "no extension files");
+    api.output(reloadSummary(await loader.reload()));
     return {};
   },
 });
 
-const restartServerTool = defineTool({
-  name: "restart_server",
+const listExtensionsTool = defineTool({
+  name: "list_extensions",
   description:
-    "Restart the agent server so edits to server.ts, auth.ts, changes.ts, chatview.ts, sessions.ts, extensions.ts, web-tools.ts or providers/ take effect. " +
-    "It first checks that server.ts still builds and refuses to restart if not. Every session continues afterwards; unfinished runs resume. " +
-    "If the new server fails to start 3 times the app falls back to a known-good safe-mode server so the user can undo the edit. " +
-    "For tools, prompt sections and hooks prefer reload_extensions, which needs no restart.",
-  parameters: Type.Object({ reason: Type.Optional(Type.String({ description: "Why the restart is needed" })) }),
-  execute: async (_args, api) => {
-    const problem = await preflight();
-    if (problem) throw new Error(`Not restarting: server.ts does not build.\n${problem}`);
-    // scheduleRestart arms a timer that exits this process, so this run stops right here and the app's
-    // next launch picks it up again (harness.resume). Nothing after this tool call runs in this process,
-    // which is why the message says so instead of the reassuring "your session continues".
-    api.output(
-      "Preflight passed, so the restart is committed and cannot be called off. " +
-        "This process exits in about a second; the app relaunches the server, which resumes this run from here. " +
-        "Your file edits are already on disk, so nothing has to be redone. They are not checkpointed yet: checkpoint them once the restarted server has shown they work. " +
-        "Make this the last tool call of the turn: any command run after it dies with the old process. " +
-        "Finish anything left by writing files, not by running them.",
-    );
-    scheduleRestart(1500);
-    return {};
-  },
-});
-
-/** A stamp file the app or this server wrote, trimmed; undefined when there is none. */
-function readStamp(file: string): string | undefined {
-  try {
-    return readFileSync(file, "utf8").trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** The Changes tab's answer to a choice about an app update: the outcome, or the error. */
-function updateReply(work: Promise<unknown>): Promise<Response> {
-  return work
-    .then((outcome) => {
-      broadcast("changes", {});
-      return Response.json(outcome as object);
-    })
-    .catch((err) => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
-}
-
-/** The first message of a merge session: what the update changed, where the shipped copies are, and what to do. */
-function mergePrompt(conflicts: string[], mergeDir: string): string {
-  return [
-    "An app update changed files you had also edited, and the user chose to merge them in this session.",
-    `Conflicting files: ${conflicts.join(", ")}.`,
-    `Each one is still your version in place. The app's new version is beside it in ${join(APP_DIR, mergeDir)}/<path>, unless the update deleted the file.`,
-    "For each file, write the version that should exist: keep your change where it still matters, take the update's fix where it matters, and combine the two where both do. Delete the file if neither version should stay. Read each file back after editing it.",
-    "Do not checkpoint or restart until every file is done. Then call complete_merge with a one-line summary of what you kept and what you took.",
-  ].join("\n\n");
-}
-
-const checkpointTool = defineTool({
-  name: "checkpoint",
-  description:
-    "Commit chosen changes to the app as one checkpoint, which the user can see and undo in the Changes tab. " +
-    "Nothing is committed for you: pending_changes lists what is uncommitted, and `paths` names what this checkpoint takes (a file, or a directory for everything under it). " +
-    "Whatever is not named stays uncommitted for a later checkpoint, so one checkpoint should be one coherent, finished change. " +
-    "Call it when a change is verified (the build passes, or a restart has shown it working), and before a risky step you may want to back out of.",
-  parameters: Type.Object({
-    summary: Type.String({ description: "One line on what the change does, as the Changes tab shows it" }),
-    paths: Type.Array(Type.String(), { description: "Files or directories to commit, relative to the app directory" }),
-    detail: Type.Optional(Type.String({ description: "Optional note: why the change was made, and what to check if it is undone" })),
-  }),
-  replay: "safe",
-  execute: async (args, api) => {
-    const paths = args.paths.map((p) => relative(APP_DIR, resolve(APP_DIR, p)) || ".");
-    if (!args.paths.length) throw new Error("Name the files to checkpoint in paths.");
-    const summary = args.summary.replace(/\s+/g, " ").trim().slice(0, 80);
-    const detail = args.detail?.trim();
-    const title = sessions.list().find((row) => row.conversationId === api.conversationId)?.title ?? "(unknown session)";
-    const model = pickDefaultModel();
-    const message = `[turn] ${summary}\n\n${detail ? `${detail}\n\n` : ""}session: ${title}\nmodel: ${model.provider}/${model.modelId}`;
-    const oid = await changes.snapshot(message, paths);
-    if (!oid) {
-      api.output(`Nothing to checkpoint: ${paths.join(", ")} has no changes since the last checkpoint.`);
-      return {};
-    }
-    const files = await changes.files(oid);
-    broadcast("changes", { oid });
-    api.output(`Checkpointed ${oid.slice(0, 7)}: ${summary}\n${files.map((f) => `${f.status} ${f.path}`).join("\n")}`);
-    return {};
-  },
-});
-
-const pendingChangesTool = defineTool({
-  name: "pending_changes",
-  description: "List the app's files changed since the last checkpoint (A added, M modified, D deleted), so you can choose what the next checkpoint takes.",
+    "List the extensions: built-in ones (shipped with the app, read-only) and your user extensions in $PIDROID_DATA_DIR/extensions, " +
+    "each with its key (builtin:<file> or user:<file>) and whether it is enabled.",
   parameters: Type.Object({}),
   replay: "safe",
   execute: async (_args, api) => {
-    const pending = await changes.pendingChanges();
-    const code = (status: string) => (status === "added" ? "A" : status === "deleted" ? "D" : "M");
-    api.output(pending.length ? pending.map((p) => `${code(p.status)} ${p.path}`).join("\n") : "Nothing uncommitted: every change is checkpointed.");
+    const states = loader.list();
+    api.output(states.length ? states.map((s) => `${s.key}  ${s.name}  ${s.enabled ? "enabled" : "disabled"}`).join("\n") : "No extensions.");
     return {};
   },
 });
 
-const completeMergeTool = defineTool({
-  name: "complete_merge",
+const removeExtensionTool = defineTool({
+  name: "remove_extension",
   description:
-    "Finish a merge of an app update, started from the Changes tab: commit the files as they now stand, with the app's new version and your changes both in history. " +
-    "Fails when no merge is in progress. Afterwards call restart_server so the merged code runs.",
-  parameters: Type.Object({
-    summary: Type.String({ description: "One line: what you kept from your version and what you took from the update" }),
-  }),
+    "Delete one of your user extensions (a file in $PIDROID_DATA_DIR/extensions) and unload it. Built-in extensions cannot be removed. " +
+    "Give the file name, e.g. weather.ts.",
+  parameters: Type.Object({ file: Type.String({ description: "File name in $PIDROID_DATA_DIR/extensions, e.g. weather.ts" }) }),
   replay: "safe",
   execute: async (args, api) => {
-    const summary = args.summary.replace(/\s+/g, " ").trim().slice(0, 80);
-    const oid = await changes.completeMerge(`[update] Merged app update: ${summary}`);
-    broadcast("changes", { oid });
-    api.output(`Merged ${oid.slice(0, 7)}: ${summary}. Call restart_server so the merged code runs.`);
+    const key = `user:${args.file.replace(/^user:/, "")}`;
+    const removed = loader.removeUser(key);
+    setExtensionEnabled(key, true); // forget any switch-off for a file that no longer exists
+    api.output(`Removed user:${removed}.\n${reloadSummary(await loader.reload())}`);
     return {};
   },
 });
+
 
 const READ_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const READ_IMAGE_MAX_INPUT_BYTES = 32 * 1024 * 1024;
@@ -703,38 +609,25 @@ const ImageAwareCodingTools = defineExtension({
   tools: CodingTools.tools.map((tool) => tool.name === "read" ? imageAwareReadTool : tool),
 });
 
-const SelfModify = defineExtension({
+const Pidroid = defineExtension({
   name: "pidroid",
-  tools: [reloadUiTool, reloadExtensionsTool, restartServerTool, checkpointTool, pendingChangesTool, completeMergeTool, showTool],
+  tools: [reloadExtensionsTool, listExtensionsTool, removeExtensionTool, showTool],
   sections: [
     section(
       "pidroid",
-      // `input.conversationId` is passed by the runtime (pi-durable's renderSections),
-      // so the workspace path below is the real one for this conversation rather than
-      // a placeholder the reader has to guess at. workspaceDir() is the same helper
-      // used to create the directory, so the two cannot drift apart.
-      (input) =>
-        "You are the agent embedded in the Pidroid Android app, running on Bun inside the app's own process sandbox. " +
+      () =>
+        "You are the agent embedded in the Pidroid Android app. " +
         "Your working directory is this session's own workspace ($PIDROID_WORKSPACE): scratch files, scripts and experiments belong there and are yours alone. " +
-        "It is NOT version controlled: nothing in it is checkpointed, so nothing in it can be undone -- if the user wants to keep something, copy it into the app tree (below). " +
-        "A session's tools can also run on one of the user's machines over SSH (the Machines feature, machines.ts, over pi-env): its bash, file reads and writes and everything shell-shaped then happen on that machine, in the session's own folder there (<machine folder>/session-<conversationId>), while the model, storage and credentials stay on the phone. " +
+        "It is NOT version controlled, and nothing in it is backed up. " +
+        "A session's tools can also run on one of the user's machines over SSH (the Machines feature): its bash, file reads and writes and everything shell-shaped then happen on that machine, in the session's own folder there (<machine folder>/session-<conversationId>), while the model, storage and credentials stay on the phone. " +
         "A session's machine can be changed later from its session menu while it is idle; that changes where future tools run, not its transcript or model. The user can optionally copy the current workspace to the new location (replacing the destination workspace, up to 64 MiB; symbolic links cannot be copied). A session without a machine runs on the phone exactly as described here. " +
-        "In a session on a machine, the app tree, skills, uploads and shell notes below are the phone's: that session sees the machine's filesystem instead, with the machine's own utilities and toolchain (no toybox, no bundled GNU grep), so paths and build advice here only hold for sessions running on the phone. " +
+        "In a session on a machine, the skills, uploads and shell notes below are the phone's: that session sees the machine's filesystem instead, with the machine's own utilities and toolchain (no toybox, no bundled GNU grep), so paths and build advice here only hold for sessions running on the phone. " +
         "Host keys are scanned and confirmed by the user in the Machines tab before a machine will connect at all, so never try to add, trust or SSH to a machine yourself. " +
-        "The app source is $PIDROID_APP_DIR, and you can change it -- every path below is relative to it: " +
-        "www/ is the web UI (index.html, style.css, app.js, chat.js, sessions.js, providers.js, changes.js); CSS edits apply instantly, but HTML/JS edits only show after you call reload_ui (call it once when a batch of UI edits is finished, not after every file). " +
-        "extensions/*.ts are hot-swappable pi-durable extensions (extensions/save-bundle.ts is a worked example): add tools, prompt sections and hooks there, then call reload_extensions. No restart is needed. " +
-        "Shared Agent Skills are stored outside the app source in $PIDROID_SKILLS, one directory per skill with a SKILL.md file; they are shared across sessions and survive app code updates. " +
-        "server.ts, auth.ts, artifacts.ts, changes.ts, chatview.ts, sessions.ts, extensions.ts, web-tools.ts and providers/ are the server; after editing them call restart_server (it builds first and refuses if the build fails; all sessions continue afterwards). " +
-        "vendor/ holds prebuilt dependencies and is not editable; only the packages mapped in tsconfig.json can be imported. " +
+        "Your own extensions (tools, prompt sections, hooks) live in $PIDROID_DATA_DIR/extensions: list_extensions shows what is installed, reload_extensions loads changes without a restart, and remove_extension deletes one. " +
+        "Shared Agent Skills live in $PIDROID_SKILLS, one directory per skill with a SKILL.md file. " +
         "Files the user attaches from the phone are saved in $PIDROID_UPLOADS. The read tool also supports image files and sends them as image input to vision-capable models. If a file path is shown in the message, it is absolute and should be used as given. " +
-        "The UI is black (AMOLED) themed; keep it that way. " +
-        "Nothing is committed to git automatically. Your edits take effect on disk at once, but the user can undo them only once you checkpoint them: call checkpoint with the paths of one finished, verified change (pending_changes lists what is uncommitted; the rest stays uncommitted for later). The workspace is not version controlled. If the server fails to start repeatedly the app falls back to a safe-mode server, and an edit that was never checkpointed is still captured at the next start, so it can be undone from the Changes tab. " +
-        "When an app update changes a file you also edited, the user chooses in the Changes tab: keep yours, use the bundled version, or merge in a session that runs the shipped agent and finishes with complete_merge. " +
-        "The Android shell around the web view (Kotlin) is not part of your sandbox and cannot be edited from here; if a feature needs it, say so instead of searching the device. " +
         "The shell is real bash on an Android sandbox. grep/egrep/fgrep are GNU grep 3.12, bundled and first on PATH; every other coreutil is toybox, so GNU-only flags are missing and error out loudly (cat takes only -etuv, head has no negative -n). Prefer short portable invocations; note that grep -r descends into .git and node_modules, so pass --exclude-dir. " +
-        "On PATH: bun (the full CLI: bun run / test / build / install / add), bunx, ssh and ssh-keygen. Use bun to try out your own changes: run scripts and `bun test` against extensions in isolation, and `bun build server.ts --target=bun --outfile=$PIDROID_WORKSPACE/x.js` to check that the server still builds. " +
-        "Never `bun run server.ts` (a second server would fight this one for the port and the databases). " +
+        "On PATH: bun (the full CLI: bun run / test / build / install / add), bunx, ssh and ssh-keygen. Use bun to try out your own code: run scripts and `bun test` in your workspace, or check an extension in isolation. " +
         "A package's own CLI cannot be started through bunx or node_modules/.bin on Android (those scripts start with #!/usr/bin/env, which does not exist here): after `bun add <pkg>` run its script directly, e.g. `bun node_modules/<pkg>/bin/<cli>.js`. " +
         "Keep shell commands small and targeted; never loop over /proc or search the whole filesystem.",
       { tag: false },
@@ -744,10 +637,19 @@ const SelfModify = defineExtension({
   hooks: [
     hook(ToolTask, {
       beforeTool: (call) => {
-        if (call.name !== "bash") return undefined;
-        const command = String((call.arguments as { command?: unknown })?.command ?? "");
-        const reason = blockedBashReason(command);
-        return reason ? { block: reason } : undefined;
+        const args = (call.arguments ?? {}) as Record<string, unknown>;
+        if (call.name === "bash") {
+          const reason = blockedBashReason(String(args.command ?? ""));
+          return reason ? { block: reason } : undefined;
+        }
+        // The write and edit tools take the path as `path`; file_path is accepted too, in case a tool spells it that way.
+        if (call.name === "write" || call.name === "edit") {
+          const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : "";
+          if (path && isInsideAppDir(path)) {
+            return { block: `${path} is inside the app's read-only code ($PIDROID_APP_DIR). Write user extensions to $PIDROID_DATA_DIR/extensions and everything else to your workspace.` };
+          }
+        }
+        return undefined;
       },
     }),
   ],
@@ -755,9 +657,18 @@ const SelfModify = defineExtension({
 
 const registry = createRegistry();
 registry.install(ImageAwareCodingTools);
-registry.install(SelfModify);
+registry.install(Pidroid);
 registry.install(WebTools);
-const loader = new ExtensionLoader(registry, join(APP_DIR, "extensions"), file => !disabledExtensions().has(file));
+// Built-in extensions first, then the user's own: a user file with the same name replaces the built-in one.
+writeExtensionsTsconfig(APP_DIR, USER_EXTENSIONS_DIR);
+const loader = new ExtensionLoader(
+  registry,
+  [
+    { origin: "builtin", dir: BUILTIN_EXTENSIONS_DIR },
+    { origin: "user", dir: USER_EXTENSIONS_DIR },
+  ],
+  key => !disabledExtensions().has(key),
+);
 {
   const loaded = await loader.reload();
   for (const line of loaded.loaded) console.log(`[pidroid] extension ${line}`);
@@ -779,7 +690,7 @@ const harness = await Harness.open(
       }
       // Each conversation runs in its own workspace; a conversation without a stored cwd (a session
       // created before workspaces existed, and only for the turn or two before the migration runs)
-      // still gets a directory of its own rather than sharing the app tree.
+      // still gets a directory of its own rather than sharing one.
       const dir = cwd ? join(cwd) : workspaceDir(Number(conversationId));
       mkdirSync(dir, { recursive: true });
       // Hand the shell a valid $PWD. Without it bash falls back to its own getcwd(), which walks up through parent
@@ -787,7 +698,7 @@ const harness = await Harness.open(
       // "shell-init: error retrieving current directory: getcwd: cannot access parent directories".
       return new NodeExecutionEnv({
         cwd: dir,
-        shellEnv: { PWD: dir, PIDROID_WORKSPACE: dir, PIDROID_APP_DIR: APP_DIR, PIDROID_UPLOADS: UPLOADS_DIR, PIDROID_SKILLS: SKILLS_DIR },
+        shellEnv: { PWD: dir, PIDROID_WORKSPACE: dir, PIDROID_APP_DIR: APP_DIR, PIDROID_DATA_DIR: DATA_DIR, PIDROID_UPLOADS: UPLOADS_DIR, PIDROID_SKILLS: SKILLS_DIR },
       });
     },
     // A hung provider request must fail (and retry) instead of blocking the queue forever.
@@ -803,27 +714,29 @@ function setState(key: string, value: string) {
   db.query("INSERT INTO agent_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 
-// Which extension files the user has switched off in Settings. Read fresh on every reload rather than
-// captured once, so a toggle applies to the next hot-swap without a restart.
+// Which extensions the user has switched off in Settings, by key ("builtin:<file>" or "user:<file>"). Read fresh on
+// every reload rather than captured once, so a toggle applies to the next hot-swap without a restart. A plain file name
+// was stored before user extensions existed, and meant a built-in one, so it is read as one.
 const DISABLED_EXTENSIONS_KEY = "extensions.disabled";
 function disabledExtensions(): Set<string> {
   try {
     const parsed = JSON.parse(getState(DISABLED_EXTENSIONS_KEY) ?? "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter((f): f is string => typeof f === "string") : []);
+    const keys = Array.isArray(parsed) ? parsed.filter((k): k is string => typeof k === "string") : [];
+    return new Set(keys.map((k) => (k.includes(":") ? k : `builtin:${k}`)));
   } catch {
     return new Set();
   }
 }
-function setExtensionEnabled(file: string, enabled: boolean) {
+function setExtensionEnabled(key: string, enabled: boolean) {
   const disabled = disabledExtensions();
-  if (enabled) disabled.delete(file);
-  else disabled.add(file);
+  if (enabled) disabled.delete(key);
+  else disabled.add(key);
   setState(DISABLED_EXTENSIONS_KEY, JSON.stringify([...disabled]));
 }
 
 // --- Sessions: any number of pi-durable conversations, one shown at a time ---------------------------------
 const sessions = new Sessions(db);
-const machines = new Machines(db, join(APP_DIR, "machines"));
+const machines = new Machines(db, join(DATA_DIR, "machines"));
 /** Sessions held while their workspace is being copied and their execution environment is changed. */
 const switchingConversations = new Set<number>();
 const handles = new Map<number, Conversation>();
@@ -1096,7 +1009,7 @@ if (sessions.list().length === 0) {
 await applyThinking();
 
 // Sessions created before per-session workspaces existed have no cwd stored and would still run in
-// the app tree. Point each one at its own directory once; the marker keeps later boots from rewriting
+// the app's own directory. Point each one at its own directory once; the marker keeps later boots from rewriting
 // the doc on every start.
 if (getState("workspaces") !== WORKSPACES_DIR) {
   for (const row of sessions.list()) {
@@ -1118,33 +1031,15 @@ if (getState("workspaces") !== WORKSPACES_DIR) {
   }
 }
 
-// Crash-loop guard: a run that keeps killing the process must not be resumed forever. A planned restart
-// (restart_server) is not a crash: its runs resume, and it doesn't count towards the guard. A user stop
-// is also intentional, but unfinished runs must be aborted rather than resumed if the host relaunches us.
+// Crash-loop guard: a run that keeps killing the process must not be resumed forever. A planned restart (the
+// Restart button) is not a crash: its runs resume, and it doesn't count towards the guard. A user stop is also
+// intentional, but unfinished runs must be aborted rather than resumed if the host relaunches us.
 {
   const now = Date.now();
   const planned = now - Number(getState("planned_restart") ?? 0) < 60_000;
   const userStopped = getState("planned_stop") === "1";
   setState("planned_restart", "0");
   setState("planned_stop", "0");
-  // Startup capture: commit whatever changed while no agent was running (app update, reset, crash, manual edits),
-  // unless this start follows a planned restart, whose uncommitted edits the agent will checkpoint itself. The scan
-  // of the whole app tree is slow on a phone, so it runs in the background: every git operation goes through
-  // Changes' serial queue, so a turn that starts meanwhile simply waits behind it.
-  changes.init(!planned).catch((err) => console.warn("[pidroid] startup checkpoint failed:", err));
-  // An app update: the bundle the app staged at install is reconciled with the agent's files (changes.ts). It is queued
-  // after the startup capture, so the agent's uncommitted edits are already in history when the update compares them.
-  const bundleDir = join(dirname(APP_DIR), "agent-bundle");
-  const stagedStamp = readStamp(join(bundleDir, ".stamp"));
-  if (stagedStamp && stagedStamp !== readStamp(join(APP_DIR, ".applied_stamp"))) {
-    changes.importBundle(bundleDir, stagedStamp)
-      .then((outcome) => {
-        console.log(`[pidroid] app update ${stagedStamp}: ${outcome.status}, ${outcome.conflicts.length} conflict(s)`);
-        // Applied, so this recovery run has done its job: a planned restart lets the app start the agent's own server.
-        if (outcome.status === "applied") scheduleRestart(500);
-      })
-      .catch((err) => console.warn("[pidroid] app update failed:", err));
-  }
   const boots: number[] = JSON.parse(getState("boots") ?? "[]").filter((t: number) => now - t < 120_000);
   if (userStopped) {
     console.log("[pidroid] previous process was stopped by the user; aborting unfinished runs");
@@ -1409,7 +1304,7 @@ function durableDb(): Database {
 /**
  * Remove a session's workspace directory. `force` covers the ordinary case of nothing being there;
  * the containment check is the point -- a directory outside WORKSPACES_DIR is never removed, so a
- * bug in the id that reached here cannot turn a delete into an rm -rf of the app tree.
+ * bug in the id that reached here cannot turn a delete into an rm -rf of something else.
  */
 function removeWorkspace(conversationId: number) {
   const dir = workspaceDir(conversationId);
@@ -1536,12 +1431,12 @@ function transcriptFiles(row: SessionRow, messages: TranscriptMessage[], meta: T
 /**
  * Write the transcript into shared storage, never overwriting an earlier export: two sessions
  * with the same title exported in the same minute would otherwise silently replace each other.
- * Returns the paths actually written. Falls back to the app tree if shared storage is not writable
+ * Returns the paths actually written. Falls back to the app's data directory if shared storage is not writable
  * (a device where the folder is missing), which still leaves the file somewhere reachable.
  */
 function saveTranscript(row: SessionRow, messages: TranscriptMessage[], meta: TranscriptMeta) {
   const files = transcriptFiles(row, messages, meta);
-  const dirs = [TRANSCRIPT_DIR, join(APP_DIR, "exports")];
+  const dirs = [TRANSCRIPT_DIR, join(DATA_DIR, "exports")];
   let lastError: unknown;
   for (const dir of dirs) {
     try {
@@ -1757,19 +1652,6 @@ function scheduleTitleGeneration(sessionId: number, firstMessage: string) {
   })();
 }
 
-// Watch www directory for direct agent modifications
-if (existsSync(WWW_DIR)) {
-  try {
-    const { watch } = await import("fs");
-    watch(WWW_DIR, { recursive: true }, (eventType, filename) => {
-      console.log(`[pidroid] Detected UI modification (${eventType}): ${filename}`);
-      requestUiReload(filename);
-    });
-  } catch (err) {
-    console.warn("[pidroid] File watcher warning:", err);
-  }
-}
-
 // Compile the wasm engine and the common grammars now, off the request path, so the first file
 // someone opens does not eat the ~0.5s cold start. Fire-and-forget: highlighting is optional.
 warmHighlighter();
@@ -1791,9 +1673,6 @@ const server = Bun.serve({
       const messageCount = db.query("SELECT COUNT(*) as count FROM messages").get() as { count: number };
       return Response.json({
         status: "online",
-        // "full" only this server can report. The app's recovery (fallback) server has no `mode`
-        // field, so the UI treats its absence as "not the real server" and says so on screen.
-        mode: "full",
         runtime: "bun",
         version: Bun.version,
         platform: process.platform,
@@ -2070,7 +1949,7 @@ const server = Bun.serve({
       }).catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
     }
 
-    // --- Self-modification ---
+    // --- Extensions ---
     if (url.pathname === "/api/reload" && req.method === "POST") {
       return loader.reload().then(r => Response.json(r)).catch(err => Response.json({ error: String(err) }, { status: 500 }));
     }
@@ -2087,26 +1966,56 @@ const server = Bun.serve({
     // Extensions: the settings tab lists them and toggles each one. Turning one off stores the choice and
     // reloads in the same step, so what the list shows is what is actually installed.
     if (url.pathname === "/api/extensions" && req.method === "GET") {
-      return Response.json({ extensions: loader.list() });
+      return Response.json({ extensions: loader.list(), parked: loader.parked() });
     }
 
     if (url.pathname === "/api/extensions/toggle" && req.method === "POST") {
       return req.json()
-        .then((body: { file?: string; enabled?: boolean }) => {
-          if (!body.file || !loader.list().some((e) => e.file === body.file)) throw new Error("No such extension file");
-          setExtensionEnabled(body.file, body.enabled !== false);
+        .then((body: { key?: string; file?: string; enabled?: boolean }) => {
+          // `file` is the older way to name a built-in extension.
+          const key = body.key ?? (body.file ? `builtin:${body.file}` : undefined);
+          if (!key || !loader.list().some((e) => e.key === key)) throw new Error("No such extension");
+          setExtensionEnabled(key, body.enabled !== false);
           return loader.reload();
         })
         .then(reload => Response.json({ success: true, extensions: loader.list(), reload }))
         .catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
     }
 
+    // --- Agent bundles: the Updates tab. The app's host owns the bundles (download, verify, pin, roll back); these
+    // routes are thin wrappers over its bridge calls. Outside the app there is no host, so every one answers 503.
+    if (url.pathname === "/api/bundles" && req.method === "GET") return bundleCall("bundle.status");
+    if (url.pathname === "/api/bundles/check" && req.method === "POST") return bundleCall("bundle.check");
+    if (url.pathname === "/api/bundles/unpin" && req.method === "POST") return bundleCall("bundle.unpin");
+
+    if (url.pathname === "/api/bundles/prerelease" && req.method === "POST") {
+      return req.json().catch(() => ({})).then((body: { enabled?: boolean }) =>
+        bundleCall("bundle.setPrerelease", { enabled: body.enabled === true }));
+    }
+
+    if (url.pathname === "/api/bundles/activate" && req.method === "POST") {
+      return req.json().catch(() => ({})).then((body: { code?: number }) => {
+        const code = Number(body.code);
+        if (!Number.isSafeInteger(code) || code < 1) return Response.json({ error: "No such bundle" }, { status: 400 });
+        return bundleCall("bundle.activate", { code });
+      });
+    }
+
+    // A manually chosen zip: the raw bytes are the body. The host reads the file during the call, so it is
+    // removed once the call returns, whatever the outcome. ?allowUnverified=1 is the user's confirmation that
+    // the bundle is not signed by the release key (a bundle they built themselves).
+    if (url.pathname === "/api/bundles/import" && req.method === "POST") {
+      if (!bridgeAvailable()) return Response.json({ error: "Not running inside the Pidroid app" }, { status: 503 });
+      const declared = Number(req.headers.get("content-length") ?? 0);
+      if (declared > BUNDLE_IMPORT_MAX_BYTES) return Response.json({ error: "Bundle is larger than 200 MB" }, { status: 413 });
+      const allowUnverified = url.searchParams.get("allowUnverified") === "1";
+      return importBundle(req, allowUnverified);
+    }
+
+    // The Restart button in Settings (the app's host restarts the process itself; this is the browser's way).
     if (url.pathname === "/api/restart" && req.method === "POST") {
-      return preflight().then(problem => {
-        if (problem) return Response.json({ error: `server.ts does not build:\n${problem}` }, { status: 409 });
-        scheduleRestart(300);
-        return Response.json({ success: true });
-      }).catch(err => Response.json({ error: String(err) }, { status: 500 }));
+      scheduleRestart(300);
+      return Response.json({ success: true });
     }
 
     if (url.pathname === "/api/stop" && req.method === "POST") {
@@ -2342,102 +2251,12 @@ const server = Bun.serve({
         .catch(() => Response.json({ lang: null, rows: null }));
     }
 
-    // --- Change tracking ---
-    if (url.pathname === "/api/changes" && req.method === "GET") {
-      return changes.list(Number(url.searchParams.get("limit")) || 60)
-        .then(entries => Response.json({ entries }))
-        .catch(err => Response.json({ error: String(err) }, { status: 500 }));
-    }
-
-    const changeRoute = url.pathname.match(/^\/api\/changes\/([0-9a-f]{40})\/(files|diff|undo|restore)$/);
-    if (changeRoute) {
-      const [, oid, action] = changeRoute;
-      const respond = (work: Promise<unknown>) =>
-        work.then(result => {
-          if (action === "undo" || action === "restore") broadcast("changes", {});
-          return Response.json(result as object);
-        }).catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
-      if (action === "files" && req.method === "GET") return respond(changes.files(oid).then(files => ({ files })));
-      if (action === "diff" && req.method === "GET") {
-        const filepath = url.searchParams.get("path") ?? "";
-        // Both sides are tokenised with the file's own grammar so `+` lines get new-file colours
-        // and `-` lines get old-file ones; see diffrows.ts. Anything that cannot be tokenised
-        // (binary, too large, unknown language) degrades to the patch on its own, which is what
-        // this endpoint always returned before.
-        // A tapped fold asks for its own stretch of the unfolded rows (?from=&count=) and gets just
-        // those back; the first load sends folds as positions, never the lines they hide, so a
-        // one-line change in a big file costs the change and its context, not the file.
-        const from = Number(url.searchParams.get("from"));
-        const count = Number(url.searchParams.get("count"));
-        const slice = Number.isInteger(from) && Number.isInteger(count) && from >= 0 && count > 0
-          && url.searchParams.has("from") ? { from, count } : null;
-        return respond(
-          changes.diff(oid, filepath).then(async (d) => {
-            // The patch only rides along when there are no rows to show (a binary or oversized
-            // file's one-line note): with rows it is the same file a second time over the wire.
-            const base = { binary: !!d.binary, tooLarge: !!d.tooLarge };
-            const lang = d.binary || d.tooLarge ? null : languageFor(filepath);
-            const coloured = async () => {
-              if (!lang || d.before === undefined || d.after === undefined) return null;
-              if (d.before.length + d.after.length > MAX_INTERACTIVE_CHARS) return null;
-              const [oldLit, newLit] = await Promise.all([highlight(d.before, lang), highlight(d.after, lang)]);
-              if (!oldLit && !newLit) return null;
-              return {
-                oldRows: oldLit ? oldLit.lines.map((l) => l.html) : null,
-                newRows: newLit ? newLit.lines.map((l) => l.html) : null,
-              };
-            };
-            // Without colours the rows are still the rows: the patch laid out per line, folded the
-            // same way, just with escaped text where the colours would be. Only a binary or oversized
-            // file has no rows to show, and its patch is a one-line note that renders as meta.
-            const sides = await coloured();
-            const { rows, added, removed } = assemble(d.patch, sides?.oldRows ?? null, sides?.newRows ?? null);
-            if (slice) return { rows: rows.slice(slice.from, slice.from + slice.count) };
-            // Fold long unchanged runs so the viewer opens on the change, not on the whole file.
-            const folded = withoutFolded(foldContext(rows, 3, 6));
-            return { ...base, lang, rows: folded, ...(folded.length ? {} : { patch: d.patch }), added, removed };
-          }),
-        );
-      }
-      if (action === "undo" && req.method === "POST") return respond(changes.undo(oid));
-      if (action === "restore" && req.method === "POST") return respond(changes.restore(oid));
-    }
-
-    // Undo the newest change of any kind (undoing an undo redoes it). Also used by the native "Recover" menu.
-    if (url.pathname === "/api/changes/undo-latest" && req.method === "POST") {
-      return changes.undoLatest()
-        .then(result => { broadcast("changes", {}); return Response.json(result); })
-        .catch(err => Response.json({ error: String(err) }, { status: 500 }));
-    }
-
-    // An app update the agent's files conflict with (changes.ts): its state, and the three ways to resolve it.
-    if (url.pathname === "/api/update" && req.method === "GET") {
-      return changes.updateStatus().then(status => Response.json(status)).catch(err => Response.json({ error: String(err) }, { status: 500 }));
-    }
-    // A resolved choice ends the recovery run (the app relaunches the agent's own server), so these restart the server.
-    if (url.pathname === "/api/update/keep" && req.method === "POST") {
-      return updateReply(changes.keepAgent().then((outcome) => { scheduleRestart(500); return outcome; }));
-    }
-    if (url.pathname === "/api/update/bundled" && req.method === "POST") {
-      return updateReply(changes.useBundled().then((outcome) => { scheduleRestart(500); return outcome; }));
-    }
-    if (url.pathname === "/api/update/cancel" && req.method === "POST") return updateReply(changes.cancelMerge());
-    if (url.pathname === "/api/update/merge" && req.method === "POST") {
-      // The Changes tab then opens a session with `prompt` as its first message (see changes.js).
-      return changes.beginMerge()
-        .then(({ conflicts, dir }) => {
-          broadcast("changes", {});
-          return Response.json({ conflicts, prompt: mergePrompt(conflicts, dir) });
-        })
-        .catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
-    }
-
     // Attachments from the composer's file picker. The Android picker hands the WebView a
     // content:// URI, so the bytes can be read without any storage permission; the app then
     // writes them itself, which is the only kind of file it can read back from shared
-    // storage (other apps' files are EACCES). uploads/ is gitignored, so screenshots never
-    // end up in a checkpoint. The returned path is absolute: the agent's working directory is its
-    // own session workspace, not the app tree.
+    // storage (other apps' files are EACCES). uploads/ is kept out of the app's code, so screenshots
+    // never end up in a bundle. The returned path is absolute: the agent's working directory is its
+    // own session workspace, not the app's code.
     if (url.pathname === "/api/upload" && req.method === "POST") {
       const requested = (url.searchParams.get("name") || "attachment").replace(/[^\w.\- ]+/g, "_").trim().slice(-80);
       return req.arrayBuffer().then(async buf => {
@@ -2450,152 +2269,37 @@ const server = Bun.serve({
       }).catch(err => Response.json({ error: String(err) }, { status: 500 }));
     }
 
-    if (url.pathname === "/api/files/write" && req.method === "POST") {
-      return req.json().then((body: { path: string; content: string }) => {
-        if (!body.path || body.content === undefined) {
-          return Response.json({ error: "Path and content are required" }, { status: 400 });
-        }
-        const targetPath = join(APP_DIR, body.path);
-        writeFileSync(targetPath, body.content, "utf-8");
-        return Response.json({ success: true, path: targetPath });
-      }).catch(err => Response.json({ error: String(err) }, { status: 500 }));
-    }
-
-    if (url.pathname === "/api/files/list" && req.method === "GET") {
-      const relPath = url.searchParams.get("dir") || "www";
-      const targetDir = join(APP_DIR, relPath);
-      if (!existsSync(targetDir)) return Response.json({ files: [] });
-
-      const files = readdirSync(targetDir).map(file => {
-        const st = statSync(join(targetDir, file));
-        return { name: file, isDirectory: st.isDirectory(), size: st.size };
-      });
-      return Response.json({ dir: relPath, files });
-    }
-
-    // The Files tab's tree: the whole harness in one request.
-    //
-    // The file set is deliberately the same one extensions/save-bundle.ts walks, so the tab shows
-    // exactly what save_bundle would put in a tarball -- that is the tree a user needs to see to
-    // judge a bundle. The skip lists below mirror SKIP_DIRS / SKIP_FILES / SKIP_SUFFIXES there (and
-    // changes.ts keeps a third copy in its IGNORE), so keep them in step. Consequences worth knowing:
-    // vendor/, fallback/ and .git are absent because they are never bundled, and so are auth.json and
-    // the sqlite session databases; credentials and conversation history are never readable here.
+    // The Files tab's tree: the app's code, read-only, in one request. VCS internals and dependencies are left out
+    // (TREE_SKIP_DIRS); everything else in the bundle is shown as it is.
     if (url.pathname === "/api/files/tree" && req.method === "GET") {
-      const shipped = (() => {
-        try {
-          return JSON.parse(readFileSync(join(APP_DIR, ".shipped_manifest.json"), "utf-8")) as Record<string, string>;
-        } catch {
-          return {};
-        }
-      })();
-
-      const isSkipped = (name: string) =>
-        TREE_SKIP_FILES.has(name) || TREE_SKIP_SUFFIXES.some((suffix) => name.endsWith(suffix));
-
-      // Counted as we walk rather than derived afterwards: the summary line is the only thing that
-      // reads these, and re-scanning the finished tree to total them would walk it twice.
-      // COUNT_KEY maps each status to its counter field -- the two are spelled differently
-      // ("not-shipped" vs notShipped), so indexing counts[status] would silently create a
-      // "not-shipped" key and leave the real counter at zero.
-      const COUNT_KEY = { modified: "modified", "not-shipped": "notShipped", unchanged: "unchanged" } as const;
-      const counts = { files: 0, modified: 0, notShipped: 0, unchanged: 0, totalBytes: 0 };
-
-      type TreeNode = {
-        name: string;
-        path: string;
-        dir: boolean;
-        size: number;
-        mtime: number;
-        status: "modified" | "not-shipped" | "unchanged";
-        children?: TreeNode[];
-      };
-
+      type TreeNode = { name: string; path: string; dir: boolean; size: number; mtime: number; children?: TreeNode[] };
       // withFileTypes keeps symlinks out of the recursion (entry.isDirectory() is false for a link),
       // so a self-referential link cannot spin this into an infinite walk.
       const walk = (rel: string): TreeNode[] => {
-        const abs = rel ? join(APP_DIR, rel) : APP_DIR;
         let entries;
         try {
-          entries = readdirSync(abs, { withFileTypes: true });
+          entries = readdirSync(rel ? join(APP_DIR, rel) : APP_DIR, { withFileTypes: true });
         } catch {
           return [];
         }
         const nodes: TreeNode[] = [];
         for (const entry of entries) {
           if (entry.isDirectory() && TREE_SKIP_DIRS.has(entry.name)) continue;
-          if (!entry.isDirectory() && isSkipped(entry.name)) continue;
           const path = rel ? `${rel}/${entry.name}` : entry.name;
-          let size = 0;
-          let mtime = 0;
+          let st;
           try {
-            const st = statSync(join(APP_DIR, path));
-            size = st.size;
-            mtime = st.mtimeMs;
+            st = statSync(join(APP_DIR, path));
           } catch {
-            continue; // vanished mid-walk (the agent rewrites files constantly)
+            continue; // vanished mid-walk
           }
-          const baseline = shipped[path];
-          const node: TreeNode = {
-            name: entry.name,
-            path,
-            dir: entry.isDirectory(),
-            size,
-            mtime,
-            status:
-              baseline === undefined ? "not-shipped" : baseline === sha256Hex(readFileSync(join(APP_DIR, path))) ? "unchanged" : "modified",
-          };
-          if (entry.isDirectory()) {
-            node.children = walk(path);
-          } else {
-            counts[COUNT_KEY[node.status]]++;
-            counts.files++;
-            counts.totalBytes += size;
-          }
+          const node: TreeNode = { name: entry.name, path, dir: entry.isDirectory(), size: st.size, mtime: st.mtimeMs };
+          if (entry.isDirectory()) node.children = walk(path);
           nodes.push(node);
         }
         // Folders before files, then case-insensitive name order: matches how a file tree reads.
         return nodes.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) : a.dir ? -1 : 1));
       };
-
-      const tree = walk("");
-
-      // Shipped files that are gone from disk. save_bundle reports these in MANIFEST.json instead of
-      // archiving them; showing them here keeps the two views honest about what was deleted.
-      const present = new Set<string>();
-      const markPresent = (nodes: TreeNode[]) => {
-        for (const node of nodes) {
-          present.add(node.path);
-          if (node.children) markPresent(node.children);
-        }
-      };
-      markPresent(tree);
-      const deleted = Object.keys(shipped)
-        .filter((path) => !present.has(path) && !TREE_SKIP_DIRS.has(path.split("/")[0]) && !isSkipped(path))
-        .sort();
-
-      return Response.json({
-        tree,
-        deleted,
-        counts,
-        excluded: {
-          dirs: [...TREE_SKIP_DIRS],
-          files: [...TREE_SKIP_FILES],
-          suffixes: TREE_SKIP_SUFFIXES,
-        },
-      });
-    }
-
-    // Export a bundle without asking the agent: the Files tab's "Export bundle" button.
-    //
-    // Same bundles.ts writeBundle the save_bundle tool calls, on purpose -- one implementation, so
-    // what the tab shows and what the tarball holds stay the same thing. The name is optional and
-    // arrives in the query string (a GET-shaped request needs no body and no CSRF dance); an empty
-    // or missing one falls back to the tool's default prefix.
-    if (url.pathname === "/api/files/bundle" && req.method === "POST") {
-      return writeBundle(url.searchParams.get("name") || undefined)
-        .then(result => Response.json({ ok: true, ...result }))
-        .catch(err => Response.json({ error: String(err?.message || err) }, { status: 500 }));
+      return Response.json({ tree: walk(""), excluded: [...TREE_SKIP_DIRS] });
     }
 
     // --- Artifacts: browse and serve the files in a session's own workspace ---
@@ -2732,9 +2436,9 @@ const server = Bun.serve({
       return new Response(Bun.file(real), { headers });
     }
 
-    // View one file from the tree. Guarded: the path must stay inside APP_DIR once resolved, and the
+    // View one file from the app's code. Guarded: the path must stay inside APP_DIR once resolved, and the
     // file must be small and text-ish -- this feeds a <pre>, and a 9 MB sqlite page or a PNG would
-    // only stall the WebView. Skipped files stay unreadable here as well as unbundleable.
+    // only stall the WebView.
     if (url.pathname === "/api/files/read" && req.method === "GET") {
       const requested = url.searchParams.get("path") || "";
       const target = resolve(APP_DIR, requested);
@@ -2742,9 +2446,6 @@ const server = Bun.serve({
         return Response.json({ error: "Path escapes the app directory" }, { status: 400 });
       }
       const name = target.slice(APP_DIR.length + 1);
-      if (name && (TREE_SKIP_FILES.has(target.split("/").pop()!) || TREE_SKIP_SUFFIXES.some((s) => name.endsWith(s)))) {
-        return Response.json({ error: "This file is never included in a bundle" }, { status: 403 });
-      }
       if (!existsSync(target) || !statSync(target).isFile()) {
         return Response.json({ error: "Not a file" }, { status: 404 });
       }
@@ -2835,3 +2536,11 @@ const server = Bun.serve({
 });
 
 console.log(`[pidroid] HTTP & WebSocket Server running at http://127.0.0.1:${server.port}`);
+
+// Tell the app this bundle is up. The app counts fast failures against a new bundle and rolls back to the previous one
+// unless this arrives, so it is sent once the server has stayed up for a few seconds. Outside the app there is no host.
+if (bridgeAvailable()) {
+  setTimeout(() => {
+    bridgeCall("agent.ready").catch(() => {});
+  }, 5000);
+}

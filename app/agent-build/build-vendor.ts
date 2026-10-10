@@ -28,7 +28,6 @@ const VENDOR: Record<string, string> = {
   "@earendil-works/pi-ai/api/openai-responses.lazy": "pi-ai-api-openai-responses",
   "@earendil-works/chord": "chord",
   "@earendil-works/chord/context": "chord-context",
-  "isomorphic-git": "isomorphic-git",
   diff: "diff",
   // Syntax highlighting (highlight.ts): the Oniguruma wasm engine, inlined, and one grammar per language.
   "@shikijs/core": "shiki-core",
@@ -56,7 +55,7 @@ const entrypoints: string[] = [];
 for (const [specifier, name] of Object.entries(VENDOR)) {
   const file = join(entryDir, `${name}.ts`);
   // A grammar's default export is its registration list; `export *` alone would drop it.
-  const hasDefault = specifier === "isomorphic-git" || specifier.startsWith("@shikijs/langs/");
+  const hasDefault = specifier.startsWith("@shikijs/langs/");
   writeFileSync(file, `export * from "${specifier}";\n${hasDefault ? `export { default } from "${specifier}";\n` : ""}`);
   entrypoints.push(file);
 }

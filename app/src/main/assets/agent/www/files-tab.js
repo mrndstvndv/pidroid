@@ -1,10 +1,7 @@
-// Files tab: a tree of the whole harness, mirroring exactly what save_bundle archives.
+// Files tab: a read-only tree of the app's code, as it is running now.
 //
-// The server returns the tree in one request (/api/files/tree) with each file already labelled
-// against the shipped baseline, so this file only renders and previews. Keeping the walk on the
-// server is what makes the tab honest: the skip lists (vendor, .git, auth.json, the machines' SSH
-// keys, the sqlite databases) live in one place, next to the archive code they mirror, instead of being a
-// second list of paths to drift out of sync here.
+// The server returns the tree in one request (/api/files/tree) and this file only renders and previews. The
+// walk stays on the server so the skip list (VCS internals and dependencies) lives in one place.
 //
 // Everything below is wrapped in an IIFE on purpose. These are classic scripts sharing one global
 // scope, so a top-level `function render()` here becomes window.render -- and chat.js declares a
@@ -20,7 +17,6 @@ const filesSummary = document.getElementById("files-summary");
 const filesSearch = document.getElementById("files-search");
 const filesCollapseBtn = document.getElementById("files-collapse-btn");
 const filesExpandBtn = document.getElementById("files-expand-btn");
-const exportBundleBtn = document.getElementById("export-bundle-btn");
 
 let fileTree = null;
 /** Directories the user has opened, as a Set of paths. Survives a refresh so the tree does not
@@ -37,14 +33,6 @@ function formatBytes(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
-
-/** How a file differs from the app's shipped baseline. This is the same three-way labelling
- *  save_bundle writes into MANIFEST.json, so "modified" here means "in the tarball as modified". */
-const STATUS = {
-  "not-shipped": { label: "new", title: "Not in the shipped baseline: a file added since install, or an app asset" },
-  modified: { label: "edited", title: "Differs from the shipped baseline: your work, or the agent's" },
-  unchanged: { label: "", title: "Identical to the shipped baseline" },
-};
 
 function countDescendants(node) {
   if (node.dir && node.children) return node.children.reduce((sum, child) => sum + countDescendants(child), 0);
@@ -102,13 +90,11 @@ function render() {
       return;
     }
 
-    const status = STATUS[node.status] || { label: "", title: "" };
     rows.push(`
       <div class="tree-row tree-file${previewPath === node.path ? " selected" : ""}" data-path="${escapeHtmlAttr(node.path)}" role="treeitem" tabindex="0" style="--depth:${depth}">
         <span class="tree-twist"></span>
         <span class="tree-icon">${iconTag(fileIcon(node.name), 15, "dim")}</span>
         <span class="tree-name">${escapeHtml(node.name)}</span>
-        ${status.label ? `<span class="tree-badge ${node.status}" title="${escapeHtmlAttr(status.title)}">${status.label}</span>` : ""}
         <span class="tree-meta">${formatBytes(node.size)}</span>
       </div>`);
   };
@@ -132,18 +118,24 @@ function escapeHtmlAttr(value) {
 
 /* ---------- summary ---------- */
 
-function renderSummary(deleted) {
-  if (!filesSummary) return;
-  const parts = [`<strong>${counts.files}</strong> files · ${formatBytes(counts.totalBytes)}`];
-  if (counts.modified) parts.push(`<span class="sum edited">${counts.modified} edited</span>`);
-  if (counts.notShipped) parts.push(`<span class="sum new">${counts.notShipped} new</span>`);
-  if (deleted?.length) parts.push(`<span class="sum deleted">${deleted.length} deleted from the app</span>`);
-  filesSummary.innerHTML = parts.join(" · ");
+function renderSummary() {
+  if (!filesSummary || !fileTree) return;
+  let files = 0;
+  let bytes = 0;
+  const total = (nodes) => {
+    for (const node of nodes) {
+      if (node.dir) total(node.children || []);
+      else {
+        files++;
+        bytes += node.size || 0;
+      }
+    }
+  };
+  total(fileTree);
+  filesSummary.innerHTML = `<strong>${files}</strong> files · ${formatBytes(bytes)}`;
 }
 
 /* ---------- data ---------- */
-
-let counts = { files: 0, modified: 0, notShipped: 0, totalBytes: 0 };
 
 async function loadFilesTree() {
   if (!treeContainer) return;
@@ -152,23 +144,8 @@ async function loadFilesTree() {
     const data = await fetch("/api/files/tree").then((r) => r.json());
     if (data.error) throw new Error(data.error);
     fileTree = Array.isArray(data.tree) ? data.tree : [];
-    counts = data.counts || counts;
-
-    // Deleted entries are shown at the root as a struck-through ghost list: they are real news
-    // (a shipped file is gone) but they have no content to open.
-    const ghosts = (data.deleted || []).map(
-      path => `<div class="tree-row tree-file is-deleted" role="treeitem" tabindex="-1" style="--depth:0">
-        <span class="tree-twist"></span>
-        <span class="tree-icon">${iconTag("circle-alert", 15, "dim")}</span>
-        <span class="tree-name">${escapeHtml(path)}</span>
-        <span class="tree-badge deleted" title="Was shipped with the app, now missing from disk">deleted</span>
-      </div>`);
-
     render();
-    if (ghosts.length && !filterText) {
-      treeContainer.insertAdjacentHTML("beforeend", `<div class="tree-sep"><span>missing from disk</span></div>${ghosts.join("")}`);
-    }
-    renderSummary(data.deleted || []);
+    renderSummary();
   } catch (e) {
     treeContainer.innerHTML = `<p class="files-empty">Could not load the file tree: ${escapeHtml(String(e.message || e))}</p>`;
   }
@@ -263,50 +240,6 @@ document.getElementById("refresh-files-btn")?.addEventListener("click", () => {
   closePreview();
   loadFilesTree();
 });
-
-/* ---------- export ---------- */
-
-/* The escape hatch as a button. The server route and the save_bundle tool call the same
-   writeBundle (bundles.ts), so this writes exactly the tree the tab above is showing -- no agent
-   turn, no model, and it works while a session is idle.
-
-   The button is disabled for the whole run: bundling copies and re-hashes every source file, which
-   on this phone takes a second or two, and a second tap in that window would start a second tar of
-   the same tree for no reason. The label says what is happening instead, since a greyed-out button
-   on its own reads as broken. */
-
-let exporting = false;
-
-async function exportBundle() {
-  if (!exportBundleBtn || exporting) return;
-  exporting = true;
-  const label = exportBundleBtn.querySelector(".btn-label");
-  const was = label ? label.textContent : "";
-  exportBundleBtn.disabled = true;
-  if (label) label.textContent = "Exporting…";
-  try {
-    const response = await fetch("/api/files/bundle", { method: "POST" });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.error) throw new Error(data.error || response.statusText);
-    // The archive name is long and carries a path; the toast is one line on a phone, so it gets the
-    // filename and the size, and the full path is the server's log (and the Files app's own path).
-    const name = String(data.path || "").split("/").pop();
-    toast("info", `Bundle saved: ${name} · ${formatBytes(Number(data.bytes) || 0)}`);
-    // A torn snapshot is worth saying out loud rather than burying in a toast that scrolls away.
-    if (data.unstable?.length) {
-      toast("error", `${data.unstable.length} file(s) changed while exporting — the snapshot is torn. Export again with other sessions closed.`, 9000);
-    }
-    loadFilesTree();
-  } catch (error) {
-    toast("error", `Export failed: ${error instanceof Error ? error.message : error}`, 8000);
-  } finally {
-    exporting = false;
-    exportBundleBtn.disabled = false;
-    if (label) label.textContent = was;
-  }
-}
-
-exportBundleBtn?.addEventListener("click", exportBundle);
 
 document.getElementById("file-modal-close")?.addEventListener("click", closePreview);
 registerBackLayer(100, () => document.getElementById("file-modal")?.hidden === false, closePreview);

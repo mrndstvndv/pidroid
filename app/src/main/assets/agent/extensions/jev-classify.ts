@@ -31,7 +31,6 @@
  * gate that blocks the chat models for anonymous callers does not cover this endpoint).
  * `jev-1.13` needs an OpenCode Zen key from https://opencode.ai/auth, and is a paid model.
  *
- * After editing, call reload_extensions. No restart needed.
  */
 
 import { Type } from "@earendil-works/pi-ai";

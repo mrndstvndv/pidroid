@@ -4,28 +4,25 @@ import android.content.Context
 import android.system.Os
 import android.util.Log
 import com.mrndstvndv.pidroid.bridge.AndroidBridge
+import com.mrndstvndv.pidroid.bridge.Capabilities
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.concurrent.TimeUnit
-import org.json.JSONObject
 
 /**
- * PRIMARY runs the (agent-editable) server.ts. SAFE runs the shipped bundle (the recovery server): after repeated startup
- * failures, and while an app update waits for the server to reconcile it with the agent's files (see AssetExtractor).
+ * Runs the agent: the active bundle's server.ts under Bun, restarted when it exits. The bundle is chosen by BundleStore
+ * (see there); this class only starts, watches and restarts the process.
  */
-enum class AgentMode { PRIMARY, SAFE }
-
 object AgentProcessManager {
     private const val TAG = "AgentProcessManager"
     const val SERVER_PORT = 8765
@@ -36,9 +33,6 @@ object AgentProcessManager {
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
-    private val _mode = MutableStateFlow(AgentMode.PRIMARY)
-    val mode: StateFlow<AgentMode> = _mode.asStateFlow()
-
     /** The agent's pushed count of sessions with a run in flight; null until this process's first push. */
     private val _runningCount = MutableStateFlow<Int?>(null)
     val runningCount: StateFlow<Int?> = _runningCount.asStateFlow()
@@ -46,7 +40,8 @@ object AgentProcessManager {
     /** The server exits with this code to ask for an immediate relaunch (restart_server); anything else is a crash. */
     private const val PLANNED_EXIT_CODE = 75
     private const val FAST_EXIT_MS = 20_000L
-    private const val FAST_FAILURES_BEFORE_SAFE_MODE = 3
+    /** Consecutive starts that die within FAST_EXIT_MS before the active bundle is blocked and the host falls back. */
+    private const val FAST_FAILURES_BEFORE_ROLLBACK = 3
     private var startedAt = 0L
     private var fastFailures = 0
 
@@ -61,7 +56,9 @@ object AgentProcessManager {
         }
 
         try {
-            val agentDir = AssetExtractor.extractAgentAssets(context)
+            val bundleDir = BundleStore.prepare(context)
+            val bundleCode = BundleStore.activeCode(context) ?: throw IllegalStateException("No agent bundle is active")
+            val dataDir = File(context.filesDir, "data")
             val nativeDir = context.applicationInfo.nativeLibraryDir
             val bunBinary = File(nativeDir, "libbun.so")
 
@@ -70,29 +67,28 @@ object AgentProcessManager {
                 return false
             }
 
-            // Primary: the editable TypeScript source, with dependencies prebuilt in vendor/ (see tsconfig.json paths).
-            // Safe mode: a full bundle of the shipped server, built by bundleAgent. It runs after repeated startup failures,
-            // and while an app update waits to be reconciled: the agent's own server does not yet hold the update's files.
-            val useRecovery = _mode.value == AgentMode.SAFE || AssetExtractor.updatePending(context)
-            val serverScript = if (useRecovery) File(agentDir, "fallback/server.js") else File(agentDir, "server.ts")
+            val serverScript = File(bundleDir, "server.ts")
             if (!serverScript.exists()) {
                 appendLog("[ERROR] ${serverScript.absolutePath} not found")
                 return false
             }
             startedAt = System.currentTimeMillis()
-            appendLog("[INFO] Spawning Bun runtime: ${bunBinary.absolutePath} run ${serverScript.absolutePath}")
+            appendLog("[INFO] Spawning Bun runtime: ${bunBinary.absolutePath} run ${serverScript.absolutePath} (bundle $bundleCode)")
 
             val processBuilder = ProcessBuilder(
                 bunBinary.absolutePath,
                 "run",
                 serverScript.absolutePath
             ).apply {
-                directory(agentDir)
+                directory(bundleDir)
                 environment()["PORT"] = SERVER_PORT.toString()
                 environment()["TMPDIR"] = context.cacheDir.absolutePath
                 environment()["HOME"] = context.filesDir.absolutePath
-                // The recovery server serves the shipped web UI from the staged bundle (see server.ts WWW_DIR).
-                if (useRecovery) environment()["PIDROID_RECOVERY"] = "1"
+                // The server derives every path from these (paths.ts): the read-only bundle, the app's state and its files.
+                environment()["PIDROID_APP_DIR"] = bundleDir.absolutePath
+                environment()["PIDROID_DATA_DIR"] = dataDir.absolutePath
+                environment()["PIDROID_HOME"] = context.filesDir.absolutePath
+                environment()["PIDROID_BUNDLE_CODE"] = bundleCode.toString()
                 environment()["PIDROID_BRIDGE_SOCKET"] = AndroidBridge.socketPath(context)
                 // bun / bunx / ssh / ssh-keygen on PATH: the agent's bash tool can run scripts and install packages with
                 // Bun, and pi-env finds the OpenSSH client (from Termux, packaged as native libs) by name.
@@ -131,6 +127,7 @@ object AgentProcessManager {
                 val unexpected = synchronized(this@AgentProcessManager) {
                     if (process === proc) {
                         _isRunning.value = false
+                        _runningCount.value = null
                         process = null
                         true
                     } else {
@@ -155,6 +152,7 @@ object AgentProcessManager {
             it.destroy()
             process = null
             _isRunning.value = false
+            _runningCount.value = null
             appendLog("[INFO] Agent process stopped by request.")
         }
     }
@@ -164,9 +162,9 @@ object AgentProcessManager {
     /**
      * Bun exited without the app asking it to stop.
      *  - Exit code 75: a planned restart (restart_server); relaunch at once.
-     *  - Otherwise a crash: relaunch after 2s. Three crashes in a row within seconds of starting mean the (edited)
-     *    server can't start, so switch to the shipped safe-mode server; the user can then undo the edit from the
-     *    Changes tab and tap Restart. Give up after repeated crashes so a poisoned run can't spin forever.
+     *  - Otherwise a crash: relaunch after 2s. Three crashes in a row within seconds of starting block the active bundle
+     *    and switch to the last healthy one (BundleStore.reportStartupFailure). Give up after repeated crashes so a
+     *    poisoned run can't spin forever.
      */
     private suspend fun onUnexpectedExit(context: Context, exitCode: Int, livedMs: Long) {
         if (exitCode == PLANNED_EXIT_CODE) {
@@ -178,10 +176,22 @@ object AgentProcessManager {
 
         val now = System.currentTimeMillis()
         fastFailures = if (livedMs < FAST_EXIT_MS) fastFailures + 1 else 0
-        if (fastFailures >= FAST_FAILURES_BEFORE_SAFE_MODE && _mode.value == AgentMode.PRIMARY) {
-            appendLog("[ERROR] The server failed to start $fastFailures times in a row; falling back to the shipped safe-mode server. Undo the last change in the Changes tab, then tap Restart.")
-            _mode.value = AgentMode.SAFE
+        if (fastFailures >= FAST_FAILURES_BEFORE_ROLLBACK) {
             fastFailures = 0
+            val failed = BundleStore.activeCode(context)
+            if (BundleStore.reportStartupFailure(context)) {
+                val fallback = BundleStore.activeCode(context)
+                appendLog("[ERROR] Bundle $failed failed to start $FAST_FAILURES_BEFORE_ROLLBACK times in a row; blocked it and switched to bundle $fallback.")
+                runCatching {
+                    Capabilities.showNotification(
+                        context,
+                        "Agent update rolled back",
+                        "The new agent (bundle $failed) failed to start, so the app is running bundle $fallback.",
+                    )
+                }.onFailure { appendLog("[WARN] Could not post the rollback notification: ${it.message}") }
+            } else {
+                appendLog("[ERROR] Bundle $failed failed to start $FAST_FAILURES_BEFORE_ROLLBACK times in a row and there is no other bundle to run.")
+            }
         }
 
         synchronized(crashTimes) {
@@ -197,34 +207,55 @@ object AgentProcessManager {
         startAgent(context)
     }
 
-    /** User-initiated restart: leaves safe mode and tries the editable server again. */
+    /** User-initiated restart: stops the process and starts it again, with the bundle BundleStore picks now. */
     fun restart(context: Context) {
-        scope.launch {
-            val old = process
-            stopAgent()
-            old?.waitFor(5, TimeUnit.SECONDS)
-            synchronized(crashTimes) { crashTimes.clear() }
-            fastFailures = 0
-            _mode.value = AgentMode.PRIMARY
-            startAgent(context.applicationContext)
-        }
+        val appContext = context.applicationContext
+        scope.launch { restartNow(appContext) }
     }
 
-    /** Ask the running agent to undo its newest change. Returns a short message for the user. */
-    suspend fun undoLatestChange(): String = withContext(Dispatchers.IO) {
-        runCatching {
-            val conn = URL("http://127.0.0.1:$SERVER_PORT/api/changes/undo-latest").openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 3000
-            conn.readTimeout = 15000
-            val text = (if (conn.responseCode < 400) conn.inputStream else conn.errorStream).bufferedReader().readText()
-            val json = JSONObject(text)
-            when {
-                json.has("error") -> "Undo failed: ${json.getString("error")}"
-                json.getJSONArray("reverted").length() == 0 -> "Nothing to undo"
-                else -> "Reverted ${json.getJSONArray("reverted").length()} file(s)"
+    private fun restartNow(appContext: Context) {
+        val old = process
+        stopAgent()
+        old?.waitFor(5, TimeUnit.SECONDS)
+        synchronized(crashTimes) { crashTimes.clear() }
+        fastFailures = 0
+        startAgent(appContext)
+    }
+
+    /** Callbacks for the idle restart already waiting; they run after that restart. Guarded by [idleRestartLock]. */
+    private val idleRestartLock = Any()
+    private val idleRestartCallbacks = mutableListOf<() -> Unit>()
+    private var idleRestartWaiting = false
+
+    /**
+     * Restarts the agent once no session has a run in flight, so an update never cuts a run off. Idle means the count is 0,
+     * or there is no count and no process. A stopped agent is left stopped: its next start picks the new bundle.
+     *
+     * Only one wait runs at a time: a call made while one is pending adds its [onRestart] to that wait, and the restart
+     * happens once. [onRestart] runs after the restart.
+     */
+    fun restartWhenIdle(context: Context, onRestart: (() -> Unit)? = null) {
+        val appContext = context.applicationContext
+        val alreadyWaiting = synchronized(idleRestartLock) {
+            if (onRestart != null) idleRestartCallbacks.add(onRestart)
+            val waiting = idleRestartWaiting
+            idleRestartWaiting = true
+            waiting
+        }
+        if (alreadyWaiting) return
+        scope.launch {
+            combine(runningCount, isRunning) { count, running -> count == 0 || (count == null && !running) }.first { it }
+            val callbacks = synchronized(idleRestartLock) {
+                idleRestartWaiting = false
+                idleRestartCallbacks.toList().also { idleRestartCallbacks.clear() }
             }
-        }.getOrElse { "Agent not reachable: ${it.message}" }
+            // A stopped agent stays stopped: its next start picks the new bundle anyway.
+            if (!isRunning.value) return@launch
+            restartNow(appContext)
+            for (callback in callbacks) {
+                runCatching { callback() }.onFailure { Log.w(TAG, "Restart callback failed", it) }
+            }
+        }
     }
 
     /**

@@ -20,6 +20,7 @@ import androidx.core.app.NotificationCompat
 import com.mrndstvndv.pidroid.MainActivity
 import com.mrndstvndv.pidroid.R
 import com.mrndstvndv.pidroid.agent.AgentProcessManager
+import com.mrndstvndv.pidroid.agent.BundleUpdater
 import com.mrndstvndv.pidroid.bridge.AndroidBridge
 
 class AgentForegroundService : Service() {
@@ -63,6 +64,7 @@ class AgentForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        BundleUpdater.schedule(applicationContext)
         // The agent pushes its running-session count over the bridge on every change (server.ts,
         // publishRunningCount); mirror it into the notification as each value lands. Nothing is polled,
         // so an idle agent costs no wakeups.
@@ -126,9 +128,19 @@ class AgentForegroundService : Service() {
         return START_STICKY
     }
 
+    /** The app left recents. With no agent session running there is nothing left for this service to keep alive. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (AgentProcessManager.runningCount.value == 0) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         stopped = true
         stopCountUpdates()
+        BundleUpdater.cancelSchedule()
         AgentProcessManager.stopAgent()
         AndroidBridge.stop(this)
         scope.cancel()
