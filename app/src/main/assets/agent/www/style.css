@@ -1026,6 +1026,35 @@ textarea {
 }
 .sheet-row[disabled] { opacity: 0.5; }
 
+.session-target-copy {
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--row-fill);
+}
+.session-target-copy[hidden] { display: none; }
+.session-target-copy label {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  cursor: pointer;
+}
+.session-target-copy input {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+.session-target-copy label > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.session-target-copy strong { font-size: 0.9rem; font-weight: 600; }
+.session-target-copy .provider-meta { line-height: 1.35; }
+
 .skill-card {
   min-width: 0;
   padding: 12px;
@@ -1971,6 +2000,95 @@ html[data-mode="light"] .shimmer {
   touch-action: pan-x;
   overscroll-behavior: none;
   isolation: isolate;
+}
+
+.slash-menu {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 8px);
+  z-index: 8;
+  max-height: min(44vh, 320px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-card) 94%, #161616);
+  box-shadow: 0 10px 32px rgb(0 0 0 / 55%);
+  backdrop-filter: blur(18px);
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  scrollbar-width: thin;
+}
+.slash-menu[hidden] { display: none; }
+
+.slash-menu-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px 8px;
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.slash-menu-heading span { font-weight: 400; letter-spacing: 0; text-transform: none; }
+
+.slash-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.slash-menu-item.active, .slash-menu-item:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.slash-menu-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.slash-menu-main strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slash-menu-description {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slash-menu-hint {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+.slash-menu-empty {
+  padding: 10px;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
 }
 
 .composer-card textarea {
@@ -3968,6 +4086,30 @@ html[data-mode="light"] { color-scheme: light; }
   border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
   background-color: color-mix(in srgb, var(--warn) 14%, var(--bg-secondary));
 }
+
+/* The error toast's fix button: a pill inside the pill, carrying the accent so it reads as the
+   one thing to tap. Not a pointer-events exception -- the whole toast dismisses on tap, and the
+   button stops its own tap from bubbling so pressing it runs the fix instead of dismissing. */
+.toast.toast-has-action {
+  border-radius: 18px;
+  cursor: default;
+}
+
+.toast-action {
+  flex: 0 0 auto;
+  margin-left: 2px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 999px;
+  background-color: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.toast-action:active { filter: brightness(1.15); }
 
 .toast.leaving { animation: toast-out 180ms ease-in both; }
 

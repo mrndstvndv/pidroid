@@ -156,6 +156,11 @@ export class Sessions {
     this.db.query("UPDATE sessions SET thinking = ? WHERE id = ?").run(thinking, id);
   }
 
+  /** Change where this session's tools run. A null machine id means the phone. */
+  setMachine(id: number, machineId: number | null) {
+    this.db.query("UPDATE sessions SET machine_id = ?, updated_at = ? WHERE id = ?").run(machineId, Date.now(), id);
+  }
+
   touch(id: number) {
     this.db.query("UPDATE sessions SET updated_at = ? WHERE id = ?").run(Date.now(), id);
   }

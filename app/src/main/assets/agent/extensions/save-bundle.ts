@@ -21,9 +21,9 @@ const saveBundle = defineTool({
     "agent's work normally lives only in the app sandbox, where an app update can overwrite it, and " +
     "the local commit journal is a per-turn log with no remote. The archive is always the complete " +
     "tree -- there is no partial mode -- and carries a MANIFEST.json labelling each file against the " +
-    "app's shipped baseline (.shipped_manifest.json). Credentials (auth.json), session databases, " +
-    "the local .git, scratch directories, generated bundles and the uploads/ directory of attached " +
-    "images are always excluded.",
+    "app's shipped baseline (.shipped_manifest.json). Credentials (auth.json, the machine SSH keys), " +
+    "session databases, the local .git, scratch directories, generated bundles and the uploads/ " +
+    "directory of attached images are always excluded.",
   parameters: Type.Object({
     name: Type.Optional(
       Type.String({ description: "Filename prefix (default 'pidroid-agent-changes'); a UTC timestamp is appended" }),

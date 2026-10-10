@@ -25,6 +25,7 @@ messagesEl.replaceChildren(contentEl);
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const sendBtn = document.getElementById("send-btn");
+const slashMenu = document.getElementById("slash-menu");
 
 // Status and queued messages live here, outside the list, so a line added under streaming text
 // does not move them. It sits above the composer card, which the list already reserves room for.
@@ -2126,8 +2127,9 @@ function renderStats(view) {
   cacheLabel.textContent = s.cacheLast === undefined ? "–"
     : s.cacheSession === undefined ? `${s.cacheLast}%` : `${s.cacheLast}% last · ${s.cacheSession}% overall`;
 
-  if (typeof s.cost === "number") {
-    costLabel.textContent = `$${s.cost > 0 && s.cost < 0.01 ? s.cost.toFixed(4) : s.cost.toFixed(2)}`;
+  // $0.00 is not news: the pill appears only once the session has actually spent.
+  if (typeof s.cost === "number" && s.cost > 0) {
+    costLabel.textContent = `$${s.cost < 0.01 ? s.cost.toFixed(4) : s.cost.toFixed(2)}`;
     costLabel.title = `$${s.cost.toFixed(4)} spent in this session`;
     costLabel.hidden = false;
   } else {
@@ -2429,6 +2431,198 @@ function pacedLive(live) {
 
 /* ---------- interaction ---------- */
 
+const builtinSlashCommands = [
+  { name: "compact", description: "Manually summarize older context", hint: "[instructions]" },
+  { name: "skills", description: "Browse available skills" },
+];
+let slashSkills = [];
+let slashSkillsLoadedAt = 0;
+let slashSkillsLoading = false;
+let slashSkillsError = "";
+let slashSkillsRequest = null;
+let slashActiveIndex = 0;
+
+function slashQuery() {
+  const value = chatInput.value;
+  if (!value.startsWith("/") || /\s/.test(value)) return null;
+  return value.slice(1).toLowerCase();
+}
+
+function allSlashCommands() {
+  const skills = slashSkills
+    .filter((skill) => typeof skill.name === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.name))
+    .map((skill) => ({ name: `skill:${skill.name}`, description: skill.description || "Force-load this skill" }));
+  return [...builtinSlashCommands, ...skills];
+}
+
+function renderSlashMenu() {
+  if (!slashMenu) return;
+  const query = slashQuery();
+  if (query === null) {
+    slashMenu.hidden = true;
+    slashMenu.replaceChildren();
+    return;
+  }
+
+  const prior = slashMenu.querySelector(".slash-menu-item.active")?.dataset.command;
+  const commands = allSlashCommands().filter((command) => command.name.toLowerCase().startsWith(query));
+  slashMenu.replaceChildren();
+
+  const heading = document.createElement("div");
+  heading.className = "slash-menu-heading";
+  heading.textContent = "Commands";
+  const keys = document.createElement("span");
+  keys.textContent = "↑ ↓ · Enter";
+  heading.append(keys);
+  slashMenu.append(heading);
+
+  if (commands.length) {
+    slashActiveIndex = Math.max(0, commands.findIndex((command) => `/${command.name}` === prior));
+    commands.forEach((command, index) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = `slash-menu-item${index === slashActiveIndex ? " active" : ""}`;
+      option.dataset.command = `/${command.name}`;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", index === slashActiveIndex ? "true" : "false");
+
+      const main = document.createElement("span");
+      main.className = "slash-menu-main";
+      const name = document.createElement("strong");
+      name.textContent = `/${command.name}`;
+      const description = document.createElement("span");
+      description.className = "slash-menu-description";
+      description.textContent = command.description;
+      main.append(name, description);
+      option.append(main);
+      if (command.hint) {
+        const hint = document.createElement("span");
+        hint.className = "slash-menu-hint";
+        hint.textContent = command.hint;
+        option.append(hint);
+      }
+      option.addEventListener("pointerdown", (event) => event.preventDefault());
+      option.addEventListener("click", () => completeSlashCommand(command.name));
+      slashMenu.append(option);
+    });
+  } else {
+    const empty = document.createElement("div");
+    empty.className = "slash-menu-empty";
+    empty.textContent = slashSkillsLoading
+      ? "Loading available skills…"
+      : slashSkillsError
+        ? `Could not load skills: ${slashSkillsError}`
+        : query.startsWith("skill:") && !slashSkills.length
+          ? "No skills found. Add SKILL.md files in the Skills settings tab."
+          : "No matching commands.";
+    slashMenu.append(empty);
+  }
+  slashMenu.hidden = false;
+}
+
+function refreshSlashSkills(force = false) {
+  if (slashSkillsRequest) return slashSkillsRequest;
+  if (!force && slashSkillsLoadedAt && Date.now() - slashSkillsLoadedAt < 15_000) return Promise.resolve(slashSkills);
+  slashSkillsLoading = true;
+  slashSkillsError = "";
+  renderSlashMenu();
+  slashSkillsRequest = fetch("/api/skills")
+    .then(async (response) => {
+      const data = await response.json();
+      if (!response.ok || data.error) throw new Error(data.error || response.statusText || "Request failed");
+      slashSkills = Array.isArray(data.skills) ? data.skills : [];
+      slashSkillsLoadedAt = Date.now();
+      return slashSkills;
+    })
+    .catch((error) => {
+      slashSkillsError = error instanceof Error ? error.message : String(error);
+      slashSkillsLoadedAt = Date.now();
+      return slashSkills;
+    })
+    .finally(() => {
+      slashSkillsLoading = false;
+      slashSkillsRequest = null;
+      renderSlashMenu();
+    });
+  return slashSkillsRequest;
+}
+
+function updateSlashMenu() {
+  const query = slashQuery();
+  if (query === null) {
+    renderSlashMenu();
+    return;
+  }
+  renderSlashMenu();
+  if (!slashSkillsLoading && (!slashSkillsLoadedAt || Date.now() - slashSkillsLoadedAt >= 15_000)) {
+    void refreshSlashSkills();
+  }
+}
+
+function completeSlashCommand(name) {
+  const value = `/${name} `;
+  chatInput.value = value;
+  autoSizeChatInput();
+  updateComposerAction();
+  updateSlashMenu();
+  chatInput.focus();
+  chatInput.setSelectionRange(value.length, value.length);
+}
+
+function moveSlashSelection(delta) {
+  const options = [...slashMenu.querySelectorAll(".slash-menu-item")];
+  if (!options.length) return false;
+  slashActiveIndex = (slashActiveIndex + delta + options.length) % options.length;
+  options.forEach((option, index) => {
+    option.classList.toggle("active", index === slashActiveIndex);
+    option.setAttribute("aria-selected", index === slashActiveIndex ? "true" : "false");
+  });
+  options[slashActiveIndex].scrollIntoView?.({ block: "nearest" });
+  return true;
+}
+
+function acceptActiveSlashCommand() {
+  const option = slashMenu?.querySelectorAll(".slash-menu-item")[slashActiveIndex];
+  if (!option) return false;
+  completeSlashCommand(option.dataset.command.slice(1));
+  return true;
+}
+
+function toastNotice(kind, text, ms) {
+  if (typeof window.toast === "function") window.toast(kind, text, ms);
+}
+
+function runManualCompaction(instructions) {
+  toastNotice("success", "Compaction started…", 7000);
+  return fetch("/api/compact", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ instructions }),
+  }).then(async (response) => {
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || response.statusText || "Compaction failed");
+    toastNotice("success", data.message || "Conversation compacted.");
+  }).catch((error) => {
+    toastNotice("error", error instanceof Error ? error.message : String(error), 9000);
+  });
+}
+
+async function showSkillBrowser() {
+  await refreshSlashSkills(true);
+  const validSkills = slashSkills.filter((skill) => typeof skill.name === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.name));
+  if (!validSkills.length) {
+    toastNotice(slashSkillsError ? "error" : "success", slashSkillsError || "No skills are available. Add a SKILL.md in the Skills settings tab.");
+    return;
+  }
+  chatInput.value = "/skill:";
+  autoSizeChatInput();
+  updateComposerAction();
+  chatInput.focus();
+  chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+  updateSlashMenu();
+  toastNotice("success", `${validSkills.length} skill${validSkills.length === 1 ? "" : "s"} available — choose a /skill:name command.`);
+}
+
 // Remember what the user opens or closes so streaming re-renders don't undo it.
 function updateComposerAction() {
   const hasDraft = Boolean(chatInput.value.trim() || pendingImages.length);
@@ -2482,8 +2676,21 @@ chatInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.isComposing) {
     e.preventDefault();
     chatForm.requestSubmit ? chatForm.requestSubmit() : chatForm.dispatchEvent(new Event("submit", { cancelable: true }));
+    return;
+  }
+  if (!e.isComposing && slashMenu && !slashMenu.hidden) {
+    if (e.key === "ArrowDown" && moveSlashSelection(1)) e.preventDefault();
+    else if (e.key === "ArrowUp" && moveSlashSelection(-1)) e.preventDefault();
+    else if ((e.key === "Enter" || e.key === "Tab") && acceptActiveSlashCommand()) e.preventDefault();
+    else if (e.key === "Escape") {
+      slashMenu.hidden = true;
+      e.preventDefault();
+    }
   }
 });
+
+chatInput.addEventListener("click", updateSlashMenu);
+chatInput.addEventListener("select", updateSlashMenu);
 
 chatForm.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -2496,6 +2703,7 @@ chatForm.addEventListener("submit", (e) => {
   const images = pendingImages.map(({ path, name }) => ({ path, name }));
   if (!text && !images.length) return;
   chatInput.value = "";
+  if (slashMenu) { slashMenu.hidden = true; slashMenu.replaceChildren(); }
   autoSizeChatInput();
   for (const image of pendingImages) URL.revokeObjectURL(image.previewUrl);
   pendingImages.length = 0;
@@ -2507,12 +2715,31 @@ chatForm.addEventListener("submit", (e) => {
 
 // The reply arrives through the live view; this request only reports immediate failures.
 function sendText(text, attachments = []) {
+  const message = String(text ?? "").trim();
+  const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(message);
+  if (compact) {
+    if (attachments.length) {
+      toastNotice("error", "Remove image attachments before running /compact.");
+      return Promise.resolve();
+    }
+    return runManualCompaction((compact[1] ?? "").trim());
+  }
+  if (/^\/skills\s*$/.test(message)) {
+    if (attachments.length) {
+      toastNotice("error", "Remove image attachments before browsing /skills.");
+      return Promise.resolve();
+    }
+    return showSkillBrowser();
+  }
   return fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: text, attachments }),
+    body: JSON.stringify({ message, attachments }),
   }).then(r => r.json()).then(d => { if (d.error) alert(d.error); }).catch(() => {});
 }
+// Toast actions (app.js) open agent sessions by name, so sendText is found at click time even
+// though chat.js loaded long after app.js defined the handler.
+window.sendText = sendText;
 
 /* ---------- attachments ----------
    Android gives the WebView a content:// URI for picked files; upload the bytes here, then
@@ -2556,6 +2783,7 @@ window.autoSizeChatInput = autoSizeChatInput;
 chatInput.addEventListener("input", () => {
   autoSizeChatInput();
   updateComposerAction();
+  updateSlashMenu();
 });
 // The keyboard opening or closing changes the cap.
 window.visualViewport?.addEventListener("resize", autoSizeChatInput);
@@ -2652,6 +2880,7 @@ function appendToComposer(text) {
   chatInput.value = current ? `${current} ${text}` : text;
   autoSizeChatInput();
   updateComposerAction();
+  updateSlashMenu();
   chatInput.focus();
   chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
 }

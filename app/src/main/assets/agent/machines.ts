@@ -1,7 +1,7 @@
 /**
  * Machines: other computers a session can run its tools on, over SSH, through a pi-env daemon. The agent itself
  * (model calls, storage, credentials) stays on the phone; a session on a machine has its files and shell there.
- * Each session picks its machine when it is created, and a session without one runs on the phone as before.
+ * A session can move between the phone and trusted machines while idle; moving it may optionally copy its workspace.
  *
  * Key material lives under the machines directory in the app's private storage: one Ed25519 key per machine (the
  * public half is shown so the owner can authorise it on that machine), an ssh config that is empty so the user's

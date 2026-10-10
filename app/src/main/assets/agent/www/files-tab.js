@@ -2,9 +2,9 @@
 //
 // The server returns the tree in one request (/api/files/tree) with each file already labelled
 // against the shipped baseline, so this file only renders and previews. Keeping the walk on the
-// server is what makes the tab honest: the skip lists (vendor, .git, auth.json, the sqlite
-// databases) live in one place, next to the archive code they mirror, instead of being a second
-// list of paths to drift out of sync here.
+// server is what makes the tab honest: the skip lists (vendor, .git, auth.json, the machines' SSH
+// keys, the sqlite databases) live in one place, next to the archive code they mirror, instead of being a
+// second list of paths to drift out of sync here.
 //
 // Everything below is wrapped in an IIFE on purpose. These are classic scripts sharing one global
 // scope, so a top-level `function render()` here becomes window.render -- and chat.js declares a

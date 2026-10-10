@@ -80,11 +80,13 @@ export interface UpdateOutcome {
 }
 
 // .tmp/ holds scratch scripts an agent writes while debugging; it is not part of the app, so it must not
-// reach the checkpoint journal (or a saved bundle). Note gitignore only affects untracked files: anything
+// reach the checkpoint journal (or a saved bundle). machines/ holds the SSH material for the other computers a
+// session can run on (machines.ts): one Ed25519 key pair per machine, its public half, known-hosts and an ssh
+// config. Those are credentials, like auth.json. Note gitignore only affects untracked files: anything
 // already committed stays tracked until it is deleted from the tree.
 const IGNORE = [
   "*.sqlite", "*.sqlite-*", "auth.json", "auth.json.tmp", ".installed_version", ".shipped_manifest.json",
-  ".update.json", ".applied_stamp", "node_modules/", "vendor/", "fallback/", "uploads/", ".tmp/",
+  ".update.json", ".applied_stamp", "node_modules/", "vendor/", "fallback/", "uploads/", ".tmp/", "machines/",
   "pidroid-models.json", "pidroid-models.json.tmp",
 ];
 const AUTHOR = { name: "Pidroid", email: "pidroid@localhost" };

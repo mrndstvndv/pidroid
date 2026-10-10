@@ -142,10 +142,16 @@ syncSafeTop();
    A toast, not an Android notification: it belongs to the page, so it says nothing while the app
    is backgrounded and never needs a permission. The stack is positioned, not in flow, so a
    notice can appear over the chat or any settings tab without moving the composer or the list.
-   Tapping one dismisses it early, which is the only interaction it offers. */
+   Tapping one's text dismisses it early; a toast with an action also carries a button, which
+   runs its handler instead of dismissing (it stops propagation, so the tap-to-dismiss never fires). */
 const toastStack = document.getElementById("toast-stack");
 const TOAST_MS = 4200;
 const TOAST_MAX = 3;
+/* A failure that carries a fix button stays up long enough to read the error and reach it. */
+const TOAST_FAIL_MS = 9000;
+/* The model each running title job is writing with, keyed by session: the "started" event is
+   silent now, but its detail (the model) is kept so a later failure can name it in the fix prompt. */
+const titleModelBySession = {};
 
 function dismissToast(el) {
   if (!el || el.dataset.leaving) return;
@@ -157,28 +163,104 @@ function dismissToast(el) {
   setTimeout(() => el.remove(), 400);
 }
 
-function toast(kind, text, ms = TOAST_MS) {
+/** (Re)attach an action button to a toast. Label-only: no button when the action has none. */
+function setToastAction(el, action) {
+  let btn = el.querySelector(".toast-action");
+  if (!action || !action.label) {
+    btn?.remove();
+    el.classList.remove("toast-has-action");
+    return;
+  }
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-action";
+    el.append(btn);
+  }
+  btn.textContent = action.label;
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    dismissToast(el);
+    try { action.onClick?.(); } catch (err) { console.error("[pidroid] toast action failed:", err); }
+  };
+  el.classList.add("toast-has-action");
+}
+
+function toast(kind, text, ms = TOAST_MS, action) {
+  // The third argument can be an options object ({ ms, action }) or the action itself, so a
+  // caller with a button does not have to name a duration it does not care about.
+  if (ms != null && typeof ms === "object") {
+    action = ms.action ?? (ms.label ? ms : action);
+    ms = ms.ms ?? TOAST_MS;
+  }
+  if (typeof ms !== "number") ms = TOAST_MS;
   if (!toastStack || !text) return;
   // The same line twice (a request failing the same way twice) refreshes the one on screen
-  // instead of stacking two identical notices.
-  const existing = [...toastStack.children].find(el => el.dataset.text === text);
+  // instead of stacking two identical notices. An action can carry a key (the failing session):
+  // identical lines for different keys stack separately, so two sessions failing the same way
+  // each keep their own fix button. A repeated failure refreshes the timer and picks up the
+  // latest fix handler, so its session id never goes stale.
+  const key = action?.key == null ? "" : String(action.key);
+  const existing = [...toastStack.children].find(el => el.dataset.text === text && (el.dataset.akey || "") === key);
   if (existing) {
     clearTimeout(Number(existing.dataset.timer));
+    if (action?.label) setToastAction(existing, action);
     existing.dataset.timer = String(setTimeout(() => dismissToast(existing), ms));
     return;
   }
   const el = document.createElement("div");
   el.className = `toast toast-${kind}`;
   el.dataset.text = text;
+  if (key) el.dataset.akey = key;
   el.setAttribute("role", kind === "error" ? "alert" : "status");
   el.innerHTML = `${icon(kind === "error" ? "triangle-alert" : "sparkles", 15, "ico-inline")}` +
     `<span>${escapeHtml(text)}</span>`;
+  if (action?.label) setToastAction(el, action);
   el.addEventListener("click", () => dismissToast(el));
   toastStack.append(el);
   while (toastStack.children.length > TOAST_MAX) dismissToast(toastStack.firstElementChild);
   el.dataset.timer = String(setTimeout(() => dismissToast(el), ms));
 }
 window.toast = toast;
+
+/** Open a fresh session and ask the agent to fix a failed title job. The error travels as the
+    first message, with the session and model that produced it, so the new turn can investigate
+    without any context the toast itself could not carry. Auto-sends: "with the error as prompt"
+    means the agent starts working, not that the user must press send again. */
+async function openTitleFixSession(sessionId, model, detail) {
+  const prompt = [
+    "Automatic session title generation failed.",
+    sessionId != null ? `Session ID: ${sessionId}` : null,
+    model ? `Title model: ${model}` : null,
+    `Error: ${detail || "unknown error"}`,
+    "",
+    "Please investigate why title generation is failing (check the configured title model, provider authentication, and recent server logs if available) and fix it.",
+  ].filter((line) => line !== null).join("\n");
+  try {
+    // newSession/sendText belong to later scripts; look them up at click time, when everything
+    // has loaded. newSession reports cancellation (the machine picker) as false, in which case
+    // there is no new session to send to -- so stop rather than prompt the old one by mistake.
+    if (typeof window.newSession === "function") {
+      const opened = await window.newSession();
+      if (!opened) return;
+    } else {
+      const res = await fetch("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const data = await res.json().catch(() => ({}));
+      if (data.error) throw new Error(data.error);
+    }
+    if (typeof window.sendText === "function") await window.sendText(prompt);
+    else {
+      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: prompt }) });
+      const data = await res.json().catch(() => ({}));
+      if (data.error) throw new Error(data.error);
+    }
+    showScreen("chat");
+    window.closeSidebar?.();
+    window.scrollChatToBottom?.();
+  } catch (err) {
+    toast("error", `Could not open a fix session: ${err instanceof Error ? err.message : err}`);
+  }
+}
 
 /* ---------- which server is this? ----------
    Both the real server and the app's recovery server answer /api/status, but only the real one
@@ -443,11 +525,33 @@ function connectWebSocket() {
         window.onSessionsEvent?.();
       } else if (data.event === "title_status") {
         // The title job runs beside the turn it belongs to, so these land mid-conversation.
+        // Only failures speak up: a success renames the bar in front of the user, which is
+        // notice enough, and a "naming…" line on every new session was pure noise. The "started"
+        // event still lands, but only to remember which model the job used for the fix prompt.
         const p = data.payload || {};
-        toast(p.state === "failed" ? "error" : "info",
-          p.state === "failed"
-            ? `Session title failed: ${p.detail || "unknown error"}`
-            : `Naming this session · ${p.detail || ""}`.trim());
+        if (p.state === "failed") {
+          const sid = p.sessionId ?? null;
+          // The failure's own detail is the error, not the model -- so the model comes only
+          // from the stored "started" event, or not at all if the page missed it (a reload
+          // mid-job). Never the error text wearing a "Title model:" label.
+          const entry = sid != null ? titleModelBySession[sid] : null;
+          const model = entry?.model || "";
+          if (sid != null) delete titleModelBySession[sid];
+          const detail = p.detail || "unknown error";
+          toast("error", `Session title failed: ${detail}`, TOAST_FAIL_MS, {
+            label: "Try to fix with agent",
+            key: sid ?? "",
+            onClick: () => openTitleFixSession(sid, model, detail),
+          });
+        } else if (p.state === "started" && p.sessionId != null && p.detail) {
+          // Successes report nothing back (the renamed bar is the notice), so entries would
+          // linger forever without this: drop jobs older than a quarter of an hour on arrival.
+          const cutoff = Date.now() - 15 * 60 * 1000;
+          for (const key of Object.keys(titleModelBySession)) {
+            if (titleModelBySession[key].at < cutoff) delete titleModelBySession[key];
+          }
+          titleModelBySession[p.sessionId] = { model: p.detail, at: Date.now() };
+        }
       } else if (data.event === "changes") {
         window.onChangesEvent?.();
       } else if (data.event === "login" || data.event === "providers_changed") {

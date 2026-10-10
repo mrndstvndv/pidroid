@@ -219,8 +219,12 @@ function openSessionMenu(btn, id) {
   }
   if (!sessionMenu.hidden && menuSessionId === id) return closeSessionMenu();
   menuSessionId = id;
+  const session = sessionData.sessions.find(s => s.id === id);
+  const canMoveMachine = (sessionData.machines || []).length > 0 || session?.machineId != null;
+  const moving = session?.busy || session?.switching;
   sessionMenu.innerHTML = `
     <button type="button" class="session-menu-item" role="menuitem" data-menu="rename">${icon("square-pen", 16)}<span>Rename</span></button>
+    ${canMoveMachine ? `<button type="button" class="session-menu-item" role="menuitem" data-menu="machine"${moving ? ' disabled title="Wait for this session to finish before changing machines"' : ""}>${icon("terminal", 16)}<span>Change machine</span></button>` : ""}
     <button type="button" class="session-menu-item" role="menuitem" data-menu="copy-transcript">${icon("file-text", 16)}<span>Copy transcript</span></button>
     <button type="button" class="session-menu-item" role="menuitem" data-menu="export-transcript">${icon("file-plus", 16)}<span>Export transcript</span></button>
     <button type="button" class="session-menu-item danger" role="menuitem" data-menu="delete">${icon("trash-2", 16)}<span>Delete</span></button>`;
@@ -263,17 +267,22 @@ async function newSession() {
     const { machines } = await sessionsApi("/api/machines");
     if (machines.length) {
       machineId = await window.chooseSessionMachine(machines);
-      if (machineId === undefined) return;
+      // The machine picker resolves undefined on cancel: toast callers (a fix session) need to
+      // tell "cancelled" from "opened", so report it rather than silently staying put.
+      if (machineId === undefined) return false;
     }
     await sessionsApi("/api/sessions", "POST", { machineId });
     // The new row, with its machine label, is in the sessions list the sidebar draws from.
     await loadSessions();
     window.closeSidebar?.();
     setTimeout(() => window.scrollChatToBottom?.(), 100);
+    return true;
   } catch (e) {
     alert(e.message);
+    return false;
   }
 }
+window.newSession = newSession;
 
 // New session lives in the topbar of the chat view now.
 document.getElementById("new-session-btn")?.addEventListener("click", newSession);
@@ -288,7 +297,7 @@ document.getElementById("new-session-btn")?.addEventListener("click", newSession
     obviously finished, and an alert() for every saved file is heavier than the news is. */
 let flashEl = null;
 let flashTimer = null;
-function flash(text, bad = false) {
+function flash(text, bad = false, durationMs = bad ? 5000 : 3200) {
   if (!flashEl) {
     flashEl = document.createElement("div");
     flashEl.className = "flash";
@@ -300,7 +309,7 @@ function flash(text, bad = false) {
   flashEl.classList.toggle("bad", bad);
   flashEl.hidden = false;
   clearTimeout(flashTimer);
-  flashTimer = setTimeout(() => { flashEl.hidden = true; }, bad ? 5000 : 3200);
+  flashTimer = durationMs > 0 ? setTimeout(() => { flashEl.hidden = true; }, durationMs) : null;
 }
 
 /** chat.js owns the clipboard helper; a session export must not fail just because that file
@@ -326,6 +335,30 @@ async function copyTranscript(id) {
     flash(await putOnClipboard(text) ? "Transcript copied to the clipboard" : "Could not reach the clipboard", true);
   } catch (err) {
     flash(err.message, true);
+  }
+}
+
+async function moveSessionMachine(id) {
+  const session = sessionData.sessions.find(s => s.id === id);
+  if (!session) throw new Error("No such session");
+  const { machines } = await sessionsApi("/api/machines");
+  const choice = await window.chooseSessionMachine(machines, { mode: "switch", currentMachineId: session.machineId });
+  if (choice === undefined) return;
+
+  const targetName = choice.machineId == null
+    ? "this phone"
+    : machines.find(m => m.id === choice.machineId)?.name ?? "the selected machine";
+  flash(choice.copyWorkspace ? `Copying workspace to ${targetName}…` : `Switching tools to ${targetName}…`, false, 0);
+  const result = await sessionsApi(`/api/sessions/${id}/machine`, "POST", choice);
+  await loadSessions();
+
+  if (result.copied) {
+    const size = result.copied.bytes >= 1024 * 1024
+      ? `${(result.copied.bytes / (1024 * 1024)).toFixed(1)} MiB`
+      : `${result.copied.bytes} B`;
+    flash(`Moved to ${targetName}; copied ${result.copied.files} file${result.copied.files === 1 ? "" : "s"} (${size})`);
+  } else {
+    flash(`Moved to ${targetName}; workspace was not copied`);
   }
 }
 
@@ -442,6 +475,8 @@ document.addEventListener("click", async (e) => {
         await sessionsApi(`/api/sessions/${id}/rename`, "POST", { title });
         loadSessions();
       }
+    } else if (item.dataset.menu === "machine") {
+      await moveSessionMachine(id);
     } else if (item.dataset.menu === "copy-transcript") {
       await copyTranscript(id);
     } else if (item.dataset.menu === "export-transcript") {
@@ -453,7 +488,8 @@ document.addEventListener("click", async (e) => {
       }
     }
   } catch (err) {
-    alert(err.message);
+    if (item.dataset.menu === "machine") flash(err.message, true);
+    else alert(err.message);
   }
 });
 
@@ -611,14 +647,16 @@ async function generateTitle() {
   button.innerHTML = `<span class="shimmer">Writing a title…</span>`;
   try {
     const data = await sessionsApi(`/api/sessions/${sessionData.current}/title`, "POST");
+    // The popup closes and the new name is in the box and in the top bar: the title itself is
+    // the confirmation, so there is nothing to announce here either.
     input.value = data.title;
     sessionTitle.textContent = data.title;
-    flash(`Titled with ${data.model}`);
     closeTitlePop();
   } catch (err) {
+    // The popup signals the failure itself (the button reads "Try again"), and the broadcast
+    // error toast with the fix button still fires -- so no flash here, or the same message shows twice.
     button.disabled = false;
     button.innerHTML = `${icon("sparkles", 16)}<span>Try again</span>`;
-    flash(err.message, true);
   } finally {
     titleBusy = false;
   }

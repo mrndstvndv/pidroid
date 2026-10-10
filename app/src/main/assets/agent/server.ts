@@ -32,8 +32,9 @@ import { assemble, foldContext, withoutFolded } from "./diffrows.ts";
 import { fenceLanguage, highlight, highlightPath, languageFor, MAX_INTERACTIVE_CHARS, warm as warmHighlighter } from "./highlight.ts";
 import { ExtensionLoader } from "./extensions.ts";
 import { Machines, type MachineRow } from "./machines.ts";
+import { copyWorkspaceTree } from "./workspace-copy.ts";
 import { DEFAULT_TITLE, Sessions, type SessionRow } from "./sessions.ts";
-import { discoverSkills, renderSkillsPrompt, SKILLS_DIR } from "./skills.ts";
+import { discoverSkills, expandSkillCommand, renderSkillsPrompt, SKILLS_DIR } from "./skills.ts";
 import { ChatViewBuilder, clampLevel, liveDelta, renderMarkdown, supportedLevels, MODEL_CHANGE_ENTRY_KIND, THINKING_CHANGE_ENTRY_KIND, type ChatView } from "./chatview.ts";
 import { Timings } from "./timings.ts";
 import { SKIP_DIRS, SKIP_FILES, SKIP_SUFFIXES, writeBundle } from "./bundles.ts";
@@ -111,7 +112,11 @@ type AgentInputContent = string | Array<{ type: "text"; text: string } | { type:
 type AgentImageAttachment = { path?: string; label?: string; name?: string };
 
 /** Resolve composer image references and legacy upload paths into ordered multimodal blocks. */
-function agentInputContent(text: string, attachments: AgentImageAttachment[] = []): { content: AgentInputContent; error?: string } {
+function agentInputContent(
+  text: string,
+  attachments: AgentImageAttachment[] = [],
+  legacyImageText = text,
+): { content: AgentInputContent; error?: string } {
   let uploadRoot: string;
   try {
     uploadRoot = realpathSync(UPLOADS_DIR);
@@ -154,7 +159,7 @@ function agentInputContent(text: string, attachments: AgentImageAttachment[] = [
   }
 
   // Keep accepting absolute upload paths inserted by older clients or pasted into the composer.
-  for (const line of text.split(/\r?\n/)) {
+  for (const line of legacyImageText.split(/\r?\n/)) {
     const candidate = line.trim();
     if (!candidate.startsWith(uploadPrefix)) continue;
     const error = addImage(candidate);
@@ -712,6 +717,10 @@ const SelfModify = defineExtension({
         "You are the agent embedded in the Pidroid Android app, running on Bun inside the app's own process sandbox. " +
         "Your working directory is this session's own workspace ($PIDROID_WORKSPACE): scratch files, scripts and experiments belong there and are yours alone. " +
         "It is NOT version controlled: nothing in it is checkpointed, so nothing in it can be undone -- if the user wants to keep something, copy it into the app tree (below). " +
+        "A session's tools can also run on one of the user's machines over SSH (the Machines feature, machines.ts, over pi-env): its bash, file reads and writes and everything shell-shaped then happen on that machine, in the session's own folder there (<machine folder>/session-<conversationId>), while the model, storage and credentials stay on the phone. " +
+        "A session's machine can be changed later from its session menu while it is idle; that changes where future tools run, not its transcript or model. The user can optionally copy the current workspace to the new location (replacing the destination workspace, up to 64 MiB; symbolic links cannot be copied). A session without a machine runs on the phone exactly as described here. " +
+        "In a session on a machine, the app tree, skills, uploads and shell notes below are the phone's: that session sees the machine's filesystem instead, with the machine's own utilities and toolchain (no toybox, no bundled GNU grep), so paths and build advice here only hold for sessions running on the phone. " +
+        "Host keys are scanned and confirmed by the user in the Machines tab before a machine will connect at all, so never try to add, trust or SSH to a machine yourself. " +
         "The app source is $PIDROID_APP_DIR, and you can change it -- every path below is relative to it: " +
         "www/ is the web UI (index.html, style.css, app.js, chat.js, sessions.js, providers.js, changes.js); CSS edits apply instantly, but HTML/JS edits only show after you call reload_ui (call it once when a batch of UI edits is finished, not after every file). " +
         "extensions/*.ts are hot-swappable pi-durable extensions (extensions/save-bundle.ts is a worked example): add tools, prompt sections and hooks there, then call reload_extensions. No restart is needed. " +
@@ -815,6 +824,8 @@ function setExtensionEnabled(file: string, enabled: boolean) {
 // --- Sessions: any number of pi-durable conversations, one shown at a time ---------------------------------
 const sessions = new Sessions(db);
 const machines = new Machines(db, join(APP_DIR, "machines"));
+/** Sessions held while their workspace is being copied and their execution environment is changed. */
+const switchingConversations = new Set<number>();
 const handles = new Map<number, Conversation>();
 let current!: SessionRow;
 let root!: Conversation; // the displayed session's conversation; handlers capture it at request start
@@ -846,12 +857,38 @@ function pickDefaultModel(): { provider: string; modelId: string } {
   return defaultModel();
 }
 
-function titleModelPreference(): { key: string; provider: string; modelId: string } | undefined {
-  const key = getState("title_model")?.trim();
-  if (!key) return undefined;
+/**
+ * Title model used until the user picks their own. Naming a session is a one-shot request, not a
+ * multi-turn agent turn, and on OpenCode's anonymous free tier that matters: the Muse models are
+ * only served inside a real editor turn (they carry the full tool set + conversation the free
+ * tier fingerprints for), so a bare "write a title" call is rejected with 403 FreeTierError
+ * "can only be used from within OpenCode". space-bunny-free is the free model Zen answers for a
+ * minimal one-shot request from the anonymous tier, so that is what defaults here. Keeps the
+ * handful of titling tokens off the run model regardless. "None" in the chooser turns model
+ * titles off again; that choice is remembered as the sentinel below.
+ */
+const DEFAULT_TITLE_MODEL = "opencode/space-bunny-free";
+const TITLE_MODEL_OFF = "none";
+
+/** Parse a "<provider>/<id>" key, or undefined when the catalogue no longer carries it. */
+function resolveTitleModel(key: string): { key: string; provider: string; modelId: string } | undefined {
   const [provider, ...rest] = key.split("/");
   const modelId = rest.join("/");
   return provider && modelId && models.getModel(provider, modelId) ? { key, provider, modelId } : undefined;
+}
+
+/** True when the title model in effect was the user's own pick -- not the built-in default. */
+function titleModelChosen(): boolean {
+  const key = getState("title_model")?.trim();
+  return !!key && key !== TITLE_MODEL_OFF;
+}
+
+/** The model titles are written with: the user's pick, else the built-in default while it is
+    still in the catalogue, else none at all (and titles then come from the opening message). */
+function titleModelPreference(): { key: string; provider: string; modelId: string } | undefined {
+  const key = getState("title_model")?.trim();
+  if (key === TITLE_MODEL_OFF) return undefined;
+  return resolveTitleModel(key || DEFAULT_TITLE_MODEL);
 }
 
 /** Preferred thinking effort for the displayed session, clamped to what its model supports. */
@@ -910,6 +947,81 @@ async function pointAtWorkspace(row: SessionRow): Promise<string> {
   const conv = await handleFor(row);
   await conv.configure({ cwd: dir } as any, context);
   return dir;
+}
+
+/** Move one idle session's future tool calls to another machine, optionally replacing its workspace with a copy. */
+async function changeSessionMachine(
+  sessionId: number,
+  targetMachineId: number | null,
+  copyWorkspace: boolean,
+): Promise<{ row: SessionRow; copied?: { bytes: number; files: number } }> {
+  const initial = sessions.get(sessionId);
+  if (!initial) throw new Error("No such session");
+  const conversationId = initial.conversationId;
+  if (switchingConversations.has(conversationId)) throw new Error("This session is already changing machines");
+
+  // Take the lock before inspecting the harness. A message that arrives after this point is refused, while a message
+  // that won the race before it is reflected either here or in runningConversations below.
+  switchingConversations.add(conversationId);
+  broadcast("sessions_changed", {});
+  try {
+    const busy = await busySessions();
+    if (busy.has(conversationId) || runningConversations.has(conversationId)) {
+      throw new Error("Wait for this session's run to finish before changing machines");
+    }
+
+    const row = sessions.get(sessionId);
+    if (!row) throw new Error("No such session");
+    if (row.machineId === targetMachineId) return { row };
+
+    const sourceMachine = machineOf(row);
+    const targetMachine = targetMachineId == null ? undefined : machines.get(targetMachineId);
+    if (targetMachineId != null && !targetMachine) throw new Error("No such machine");
+    if (targetMachine && !targetMachine.trusted) throw new Error(`Confirm ${targetMachine.name}'s host key before switching to it`);
+
+    const sourceFolder = sourceMachine ? machines.sessionFolder(sourceMachine, conversationId) : workspaceDir(conversationId);
+    const targetFolder = targetMachine ? machines.sessionFolder(targetMachine, conversationId) : workspaceDir(conversationId);
+    // Preflight the destination before changing the row, so a missing/untrusted machine never strands the session.
+    const destinationEnv = targetMachine
+      ? await machines.environment(targetMachine, conversationId, context)
+      : new NodeExecutionEnv({ cwd: targetFolder });
+    if (!targetMachine) mkdirSync(targetFolder, { recursive: true });
+
+    let copied: { bytes: number; files: number } | undefined;
+    if (copyWorkspace) {
+      const sourceEnv = sourceMachine
+        ? await machines.environment(sourceMachine, conversationId, context)
+        : new NodeExecutionEnv({ cwd: sourceFolder });
+      copied = await copyWorkspaceTree(sourceEnv, sourceFolder, destinationEnv, targetFolder, context);
+    }
+
+    const previousMachineId = row.machineId;
+    sessions.setMachine(sessionId, targetMachineId);
+    const updated = sessions.get(sessionId);
+    if (!updated) throw new Error("Session disappeared while changing machines");
+    try {
+      await pointAtWorkspace(updated);
+    } catch (error) {
+      sessions.setMachine(sessionId, previousMachineId);
+      const restored = sessions.get(sessionId);
+      if (restored) {
+        if (current.id === sessionId) current = restored;
+        await pointAtWorkspace(restored).catch(restoreError => {
+          console.warn(`[pidroid] could not restore session ${sessionId}'s workspace after a machine switch failed: ${restoreError}`);
+        });
+      }
+      throw error;
+    }
+
+    if (current.id === sessionId) {
+      current = updated;
+      broadcast("agent_view", chatPayload());
+    }
+    return { row: updated, copied };
+  } finally {
+    switchingConversations.delete(conversationId);
+    broadcast("sessions_changed", {});
+  }
 }
 
 /** Copy a session's files on its machine into a branch's folder there. A missing source copies nothing. */
@@ -992,6 +1104,18 @@ if (getState("workspaces") !== WORKSPACES_DIR) {
   }
   setState("workspaces", WORKSPACES_DIR);
   console.log(`[pidroid] sessions work in ${WORKSPACES_DIR}/<session id>`);
+}
+
+// A title-model preference pinned to an OpenCode Muse model cannot work: titling is a bare one-shot
+// request, and Zen's anonymous free tier only serves the Muse models to a real editor turn, so it
+// answers with 403 FreeTierError. Move any such preference to the default (space-bunny-free), which
+// the anonymous tier answers for a minimal request. Runs once per affected value; harmless after.
+{
+  const titleModelKey = getState("title_model");
+  if (titleModelKey && /^(opencode\/)?muse-/i.test(titleModelKey)) {
+    setState("title_model", DEFAULT_TITLE_MODEL);
+    console.log(`[pidroid] title model ${titleModelKey} cannot serve one-shot titles on the free tier; using ${DEFAULT_TITLE_MODEL}`);
+  }
 }
 
 // Crash-loop guard: a run that keeps killing the process must not be resumed forever. A planned restart
@@ -1175,6 +1299,7 @@ function noteRunStarted(conversationId: number) {
   runningConversations.add(conversationId);
   if (finishedRuns.delete(conversationId)) broadcast("sessions_changed", {});
   scheduleRunWatch();
+  publishRunningCount();
 }
 
 /**
@@ -1194,6 +1319,20 @@ function markRunFinished(conversationId: number, notify = true) {
     runWatchTimer = undefined;
   }
   if (notify) notifyRunFinished(conversationId);
+  publishRunningCount();
+}
+
+/* ---------- the running count, pushed out to the app ----------
+   The foreground-service notification says how many sessions have a run in flight, and this process is
+   the only side that sees a run start or end. The app could poll a route for the number, but that wakes
+   the phone every few seconds whether or not anything is running; a bridge call per transition leaves an
+   idle agent making no calls at all -- the same shape as the "done" notification just below. The count
+   is runningConversations, the reconciled view above, so the number in the notification is the same one
+   the sidebar shows. */
+function publishRunningCount() {
+  if (!bridgeAvailable()) return;
+  void bridgeCall("agent.setRunningCount", { running: runningConversations.size })
+    .catch((err: Error) => console.warn(`[pidroid] running-count push failed: ${err?.message ?? err}`));
 }
 
 /* ---------- "the run you left going is done" notification ----------
@@ -1237,9 +1376,11 @@ function notifyRunFinished(conversationId: number) {
    "done" mark on, so adopt whatever the harness still calls running and let the watcher end it. */
 busySessions()
   .then(live => {
-    if (!live.size) return;
     for (const conversationId of live) runningConversations.add(conversationId);
-    scheduleRunWatch();
+    if (live.size) scheduleRunWatch();
+    // This process owns the count from here on, zeros included: a process that replaced a crashed agent
+    // must publish its own view rather than leave the old process's number on screen.
+    publishRunningCount();
   })
   .catch(() => {});
 
@@ -1282,6 +1423,7 @@ function removeWorkspace(conversationId: number) {
 async function deleteSession(id: number) {
   const row = sessions.get(id);
   if (!row) throw new Error("No such session");
+  if (switchingConversations.has(row.conversationId)) throw new Error("This session is changing machines. Try again when it is finished.");
 
   // A fork reads the history it inherited straight out of the conversation it was branched from --
   // pi-durable stores a link, never a copy -- so those entries are part of the branch's transcript
@@ -1468,7 +1610,8 @@ function applyGeneratedTitle(sessionId: number, title: string): boolean {
 /** Tell the page that a title job started, or that it gave up and why. Purely informational:
    nothing here reads it back, and a page that never sees it (backgrounded, no browser) loses
    nothing -- the title still lands in the database either way. `detail` is the model on the way
-   in and the reason on the way out. */
+   in and the reason on the way out. The page only shows failures; "started" exists so it can
+   name the model in the fix prompt it offers with the failure. */
 function noteTitleStatus(sessionId: number, state: "started" | "failed", detail?: string) {
   broadcast("title_status", { sessionId, state, detail });
 }
@@ -1527,9 +1670,10 @@ async function messagesOf(row: SessionRow): Promise<ChatView["messages"]> {
  * which stands down the moment a session has a name of its own.
  */
 async function writeGeneratedTitle(row: SessionRow, source: string): Promise<string> {
-  // The title model when one is picked (that is what it is for), else the model this session
-  // already runs on: a manual "generate" is a deliberate request for a model to think about the
-  // name, and this one is already configured, signed in and paid for.
+  // The title model when one is in effect -- picked, or the built-in default -- and only
+  // when there is none at all ("None" was chosen) the model this session already runs on: a
+  // manual "generate" is a deliberate request for a model to think about the name, and that one
+  // is already configured, signed in and paid for.
   const key = titleModelPreference()?.key ?? row.model;
   const [provider, ...rest] = key.split("/");
   const model = models.getModel(provider, rest.join("/"));
@@ -1589,8 +1733,10 @@ function scheduleTitleGeneration(sessionId: number, firstMessage: string) {
       if (!generated) {
         // Scrubbing can leave nothing behind (an empty or punctuation-only reply), and the
         // fallback below is only for a thrown error -- so say so rather than leave the session
-        // on "New session" with no word about why.
-        noteTitleStatus(sessionId, "failed", "the model returned an empty title");
+        // on "New session" with no word about why. Same rule as below: a default nobody picked
+        // failing is not a setting to fix, so it only says so once the model was chosen.
+        if (titleModelChosen()) noteTitleStatus(sessionId, "failed", "the model returned an empty title");
+        if (titleModelPreference()?.key === preference.key) applyGeneratedTitle(sessionId, messageTitle(firstMessage));
         return;
       }
 
@@ -1599,7 +1745,10 @@ function scheduleTitleGeneration(sessionId: number, firstMessage: string) {
       applyGeneratedTitle(sessionId, generated);
     } catch (err) {
       console.warn(`[pidroid] title generation failed for session ${sessionId}:`, err);
-      noteTitleStatus(sessionId, "failed", err instanceof Error ? err.message : String(err));
+      // A default nobody picked failing is not a broken setting to fix -- Zen answers 403 for
+      // most of its free ids on the anonymous tier -- so it stays quiet and names the session
+      // after its first message, which is what picking None would have done.
+      if (titleModelChosen()) noteTitleStatus(sessionId, "failed", err instanceof Error ? err.message : String(err));
       // Better a plain title from the message than a session stuck on "New session".
       if (titleModelPreference()?.key === preference.key) applyGeneratedTitle(sessionId, messageTitle(firstMessage));
     } finally {
@@ -1664,6 +1813,11 @@ const server = Bun.serve({
 
     if (url.pathname === "/api/chat" && req.method === "POST") {
       return req.json().then(async (body: { message?: string; attachments?: AgentImageAttachment[] }) => {
+        const session = current;
+        if (switchingConversations.has(session.conversationId)) {
+          return Response.json({ error: "This session is changing machines. Wait for it to finish before sending a message." }, { status: 409 });
+        }
+        const conv = root; // Capture the session before any asynchronous work; a later view switch cannot redirect this request.
         const text = body.message?.trim() ?? "";
         const attachments = Array.isArray(body.attachments) ? body.attachments : [];
         if (!text && !attachments.length) {
@@ -1672,7 +1826,13 @@ const server = Bun.serve({
         // What the user typed is the whole message: attached images travel as image inputs,
         // never as extra text appended to it.
         const visibleText = text;
-        const agentInput = agentInputContent(visibleText, attachments);
+        const skillExpansion = expandSkillCommand(visibleText);
+        if (skillExpansion.error) {
+          return Response.json({ error: skillExpansion.error }, { status: 400 });
+        }
+        // Only the user's original text is eligible for the legacy upload-path shortcut. A skill
+        // may mention an upload path as an example, which must stay text rather than attach a file.
+        const agentInput = agentInputContent(skillExpansion.content, attachments, visibleText);
         if (agentInput.error) {
           return Response.json({ error: agentInput.error }, { status: 413 });
         }
@@ -1684,8 +1844,6 @@ const server = Bun.serve({
         broadcast("message", { role: "user", content: storedText });
 
         let replyText: string;
-        const conv = root; // a session switch mid-run must not redirect this request
-        const session = current;
         if (session.title === DEFAULT_TITLE) scheduleTitleGeneration(session.id, visibleText);
         sessions.touch(session.id);
         noteRunStarted(session.conversationId); // the row switches to "running" until this settles
@@ -1711,10 +1869,49 @@ const server = Bun.serve({
       }).catch(err => Response.json({ error: String(err) }, { status: 500 }));
     }
 
+    if (url.pathname === "/api/compact" && req.method === "POST") {
+      return req.json().catch(() => ({})).then(async (body: { instructions?: string }) => {
+        const instructions = typeof body.instructions === "string" ? body.instructions.trim() : "";
+        if (instructions.length > 4000) {
+          return Response.json({ error: "Compaction instructions must be 4,000 characters or fewer." }, { status: 400 });
+        }
+
+        const conversation = root; // finish compaction on the session the command was sent to
+        try {
+          const taskId = await conversation.compact(instructions || undefined, context);
+          const settled = await harness.waitForTask(taskId, context);
+          const outcome = (settled as any)?.state?.outcome;
+          if (outcome?.status !== "completed") {
+            const detail = outcome?.error?.message ?? outcome?.error ?? outcome?.reason;
+            throw new Error(typeof detail === "string" ? detail : `Compaction did not complete (${outcome?.status ?? "unknown status"}).`);
+          }
+
+          const submissionId = outcome.result?.submissionId;
+          if (submissionId !== undefined) {
+            const submission = await harness.submission(submissionId, context);
+            if (!submission) throw new Error("The compaction summary could not be found in the conversation.");
+            const placed = await submission.wait(context);
+            if (placed.status !== "done") {
+              const reason = (placed as any).reason;
+              throw new Error(reason === "stale"
+                ? "The conversation changed before this summary could be applied. Try /compact again when it is idle."
+                : `Compaction summary was not applied (${reason ?? placed.status}).`);
+            }
+          }
+          return Response.json({ success: true, message: "Conversation compacted." });
+        } catch (error) {
+          return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+        }
+      }).catch(err => Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 }));
+    }
+
     if (url.pathname === "/api/models" && req.method === "GET") {
       const agent = pickDefaultModel();
       const fallback = defaultModel();
       const titleModel = titleModelPreference()?.key ?? "";
+      // The chooser marks the built-in default as such: it is in use, but nobody picked it, so
+      // None remains a one-tap way back rather than a fight against the default.
+      const titleModelDefault = !!titleModel && !titleModelChosen();
       return logins.providers().then(providers => {
         // Usable = signed-in providers, plus the anonymous OpenCode free tier.
         const usable = new Set(providers.filter(p => p.configured).map(p => p.id));
@@ -1724,6 +1921,7 @@ const server = Bun.serve({
           current: `${agent.provider}/${agent.modelId}`,
           default: `${fallback.provider}/${fallback.modelId}`,
           titleModel,
+          titleModelDefault,
           models: models.getModels()
             .filter(m => usable.has(m.provider) || (m.provider === agent.provider && m.id === agent.modelId) || `${m.provider}/${m.id}` === titleModel)
             .map((m) => ({
@@ -1782,8 +1980,10 @@ const server = Bun.serve({
     if (url.pathname === "/api/title-model" && req.method === "POST") {
       return req.json().then((body: { model?: string }) => {
         const selected = (body.model ?? "").trim();
-        if (!selected || selected === "none") {
-          setState("title_model", "");
+        if (!selected || selected === TITLE_MODEL_OFF) {
+          // None is a remembered choice, not an empty one: it has to survive the built-in
+          // default rather than falling back to it on the next load.
+          setState("title_model", TITLE_MODEL_OFF);
           return Response.json({ success: true, model: "" });
         }
         const [provider, ...rest] = selected.split("/");
@@ -1925,6 +2125,7 @@ const server = Bun.serve({
           ...row,
           depth,
           busy: busy.has(row.conversationId),
+          switching: switchingConversations.has(row.conversationId),
           // A run that ended and hasn't been looked at yet: the sidebar shows "done" instead of "running".
           done: finishedRuns.has(row.conversationId),
         })),
@@ -1937,6 +2138,7 @@ const server = Bun.serve({
       return req.json().then(async (body: { id?: number; at?: number }) => {
         const row = sessions.get(Number(body.id));
         if (!row) throw new Error("No such session");
+        if (switchingConversations.has(row.conversationId)) throw new Error("This session is changing machines. Try again when it is finished.");
         const at = Number(body.at);
         if (!Number.isSafeInteger(at) || at < 1) throw new Error("No entry to branch at");
         const { branch, copied } = await forkSession(row, at);
@@ -1981,6 +2183,23 @@ const server = Bun.serve({
             return Response.json({ success: true });
           }
         }
+      }).catch(machineError);
+    }
+
+    const sessionMachineRoute = url.pathname.match(/^\/api\/sessions\/(\d+)\/machine$/);
+    if (sessionMachineRoute && req.method === "POST") {
+      const id = Number(sessionMachineRoute[1]);
+      return req.json().then(async (raw: unknown) => {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid machine change request");
+        const body = raw as { machineId?: unknown; copyWorkspace?: unknown };
+        if (!Object.prototype.hasOwnProperty.call(body, "machineId")) throw new Error("Choose where this session should run");
+        let machineId: number | null;
+        if (body.machineId === null) machineId = null;
+        else if (typeof body.machineId === "number" && Number.isSafeInteger(body.machineId) && body.machineId > 0) machineId = body.machineId;
+        else throw new Error("Invalid machine choice");
+        if (body.copyWorkspace !== undefined && typeof body.copyWorkspace !== "boolean") throw new Error("Invalid workspace-copy choice");
+        const result = await changeSessionMachine(id, machineId, body.copyWorkspace === true);
+        return Response.json({ success: true, machineId: result.row.machineId, copied: result.copied ?? null });
       }).catch(machineError);
     }
 

@@ -1,5 +1,5 @@
 // Machines: other computers a session's tools can run on, over SSH (see machines.ts on the agent). This file has the
-// Settings tab that adds and checks them, and the choice made when a new session starts.
+// Settings tab that adds and checks them, and the chooser used when starting or moving a session.
 const machinesList = document.getElementById("machines-list");
 const machineForm = document.getElementById("machine-form");
 const machineFormResult = document.getElementById("machine-form-result");
@@ -188,17 +188,35 @@ machineForm?.addEventListener("submit", async (event) => {
 
 window.loadMachinesTab = loadMachines;
 
-// Where a new session runs. Resolves with a machine id, with null for this phone, or with undefined when cancelled.
-// Machines that have not had their host key confirmed are listed but cannot be picked yet.
-window.chooseSessionMachine = (choices) => new Promise(resolve => {
+// Where a new session runs, or where an idle session should move. Creation resolves to a machine id (null is the
+// phone); moving resolves to { machineId, copyWorkspace }. Either picker resolves undefined when cancelled.
+// Machines whose host keys are not confirmed, and the current target during a move, cannot be picked.
+const sessionTargetCopyWrap = document.getElementById("session-target-copy-wrap");
+const sessionTargetCopy = document.getElementById("session-target-copy");
+const sessionTargetFoot = document.getElementById("session-target-foot");
+window.chooseSessionMachine = (choices, options = {}) => new Promise(resolve => {
+  const moving = options.mode === "switch";
+  document.getElementById("session-target-title").textContent = moving ? "Move this session's tools to" : "Run this session on";
+  sessionTargetCopyWrap.hidden = !moving;
+  sessionTargetCopy.checked = false;
+  sessionTargetFoot.textContent = moving
+    ? "Stop the session's run first. Its transcript stays on this phone."
+    : "Machines are added in Settings.";
+
+  const phoneIsCurrent = moving && options.currentMachineId == null;
   const rows = [
-    `<button type="button" class="sheet-row" data-machine-id="">${iconTag("cpu", 16)}<span>This phone</span></button>`,
-    ...choices.map(m => `
-      <button type="button" class="sheet-row" data-machine-id="${m.id}"${m.trusted ? "" : " disabled"}>
-        ${iconTag("terminal", 16)}
-        <span>${escapeHtml(m.name)}</span>
-        <span class="sheet-row-value">${m.trusted ? "" : "Confirm the host key first"}</span>
-      </button>`),
+    `<button type="button" class="sheet-row" data-machine-id=""${phoneIsCurrent ? " disabled" : ""}>${iconTag("cpu", 16)}<span>This phone</span><span class="sheet-row-value">${phoneIsCurrent ? "Current" : ""}</span></button>`,
+    ...choices.map(m => {
+      const current = moving && m.id === options.currentMachineId;
+      const unavailable = !m.trusted || current;
+      const value = current ? "Current" : m.trusted ? "" : "Confirm the host key first";
+      return `
+        <button type="button" class="sheet-row" data-machine-id="${m.id}"${unavailable ? " disabled" : ""}>
+          ${iconTag("terminal", 16)}
+          <span>${escapeHtml(m.name)}</span>
+          <span class="sheet-row-value">${value}</span>
+        </button>`;
+    }),
   ];
   sessionTargetList.innerHTML = rows.join("");
   sessionTargetModal.hidden = false;
@@ -213,7 +231,8 @@ window.chooseSessionMachine = (choices) => new Promise(resolve => {
   const onPick = (event) => {
     const row = event.target.closest("[data-machine-id]");
     if (!row || row.disabled) return;
-    finish(row.dataset.machineId === "" ? null : Number(row.dataset.machineId));
+    const machineId = row.dataset.machineId === "" ? null : Number(row.dataset.machineId);
+    finish(moving ? { machineId, copyWorkspace: sessionTargetCopy.checked } : machineId);
   };
   const onCancel = () => finish(undefined);
   const onBackdrop = (event) => {

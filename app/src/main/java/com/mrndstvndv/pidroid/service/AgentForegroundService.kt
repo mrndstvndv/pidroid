@@ -11,6 +11,11 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import kotlin.concurrent.thread
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import androidx.core.app.NotificationCompat
 import com.mrndstvndv.pidroid.MainActivity
 import com.mrndstvndv.pidroid.R
@@ -48,15 +53,41 @@ class AgentForegroundService : Service() {
     @Volatile
     private var stopped = false
 
+    private val scope = CoroutineScope(Dispatchers.Main.immediate)
+    private var countJob: Job? = null
+
+    /** The count the notification shows; null until the agent first pushes one. */
+    @Volatile
+    private var runningCount: Int? = null
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // The agent pushes its running-session count over the bridge on every change (server.ts,
+        // publishRunningCount); mirror it into the notification as each value lands. Nothing is polled,
+        // so an idle agent costs no wakeups.
+        countJob = scope.launch {
+            AgentProcessManager.runningCount.collect { count ->
+                // Under the lock stopCountUpdates takes, and after its stopped check, so an update can
+                // never be posted once a stop has removed the notification.
+                synchronized(this@AgentForegroundService) {
+                    if (!stopped && count != runningCount) {
+                        runningCount = count
+                        runCatching {
+                            getSystemService(NotificationManager::class.java)
+                                ?.notify(NOTIFICATION_ID, buildNotification(statusText(count)))
+                        }
+                    }
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
                 stopped = true
+                stopCountUpdates()
                 AgentProcessManager.stopAgent()
                 AndroidBridge.stop(this)
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -65,7 +96,7 @@ class AgentForegroundService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_START, null -> {
-                val notification = buildNotification("Pidroid Agent is running...")
+                val notification = buildNotification(statusText(runningCount))
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                         startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -97,8 +128,10 @@ class AgentForegroundService : Service() {
 
     override fun onDestroy() {
         stopped = true
+        stopCountUpdates()
         AgentProcessManager.stopAgent()
         AndroidBridge.stop(this)
+        scope.cancel()
         super.onDestroy()
     }
 
@@ -116,6 +149,20 @@ class AgentForegroundService : Service() {
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(channel)
         }
+    }
+
+    private fun stopCountUpdates() {
+        synchronized(this) {
+            countJob?.cancel()
+            countJob = null
+            runningCount = null
+        }
+    }
+
+    private fun statusText(count: Int?): String = when (count) {
+        null -> "Starting agent..."
+        1 -> "1 agent running"
+        else -> "$count agents running"
     }
 
     private fun buildNotification(status: String): Notification {

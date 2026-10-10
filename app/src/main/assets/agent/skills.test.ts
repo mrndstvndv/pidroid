@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { discoverSkills } from "./skills.ts";
+import { discoverSkills, expandSkillCommand } from "./skills.ts";
 
 const roots: string[] = [];
 
@@ -91,5 +91,25 @@ describe("discoverSkills", () => {
     utimesSync(file, later, later);
 
     expect(discoverSkills(root)[0].description).toBe("new description");
+  });
+
+  test("expands /skill:name like pi-coding-agent, strips frontmatter and appends the request", () => {
+    const root = makeRoot();
+    const file = writeSkill(root, "writer/SKILL.md", `---\nname: writer\ndescription: Writes well\n---\n\n# Writer\n\nFollow the style guide.\n`);
+    const expanded = expandSkillCommand("/skill:writer Draft a short note", root);
+
+    expect(expanded.error).toBeUndefined();
+    expect(expanded.skill?.name).toBe("writer");
+    expect(expanded.content).toBe(
+      `<skill name="writer" location="${realpathSync(file)}">\nReferences are relative to ${dirname(realpathSync(file))}.\n\n# Writer\n\nFollow the style guide.\n</skill>\n\nDraft a short note`,
+    );
+  });
+
+  test("leaves regular messages alone and reports an unknown explicit skill", () => {
+    const root = makeRoot();
+    expect(expandSkillCommand("just a regular message", root)).toEqual({ content: "just a regular message" });
+    const unknown = expandSkillCommand("/skill:missing do something", root);
+    expect(unknown.content).toBe("/skill:missing do something");
+    expect(unknown.error).toContain("Skill 'missing' was not found");
   });
 });

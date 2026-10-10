@@ -9,5 +9,6 @@ vendor/
 fallback/
 uploads/
 .tmp/
+machines/
 pidroid-models.json
 pidroid-models.json.tmp

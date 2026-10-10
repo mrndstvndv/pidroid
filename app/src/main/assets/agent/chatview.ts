@@ -159,6 +159,16 @@ function textOf(content: unknown): string {
     .join("");
 }
 
+/** Keep Pi-style forced skill instructions in the model transcript, but show the concise command
+ *  in chat instead of dumping the whole SKILL.md into the visible user bubble. */
+function userTextOf(content: unknown): string {
+  const text = textOf(content);
+  const match = /^<skill name="([^\"]+)" location="([^\"]+)">\nReferences are relative to [^\n]+\.\n\n[\s\S]*\n<\/skill>(?:\n\n([\s\S]+))?$/.exec(text);
+  if (!match) return text;
+  const args = match[3]?.trim();
+  return `/skill:${match[1]}${args ? ` ${args}` : ""}`;
+}
+
 function clip(text: string, max = MAX_TOOL_TEXT): string {
   return text.length > max ? `${text.slice(0, max)}\n… (${text.length - max} more characters)` : text;
 }
@@ -300,7 +310,7 @@ export class ChatViewBuilder {
       const message = entry?.model?.[0];
       if (!message) continue;
       if (entry.kind === "pi.user") {
-        added.push({ id: entry.id, role: "user", text: textOf(message.content), branchBefore: before });
+        added.push({ id: entry.id, role: "user", text: userTextOf(message.content), branchBefore: before });
       } else if (entry.kind === "pi.assistant") {
         const usage = message.usage ?? {};
         const blocks = withTimings(entry.id, blocksOf(message.content), timing);

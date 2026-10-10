@@ -39,6 +39,10 @@ object AgentProcessManager {
     private val _mode = MutableStateFlow(AgentMode.PRIMARY)
     val mode: StateFlow<AgentMode> = _mode.asStateFlow()
 
+    /** The agent's pushed count of sessions with a run in flight; null until this process's first push. */
+    private val _runningCount = MutableStateFlow<Int?>(null)
+    val runningCount: StateFlow<Int?> = _runningCount.asStateFlow()
+
     /** The server exits with this code to ask for an immediate relaunch (restart_server); anything else is a crash. */
     private const val PLANNED_EXIT_CODE = 75
     private const val FAST_EXIT_MS = 20_000L
@@ -101,6 +105,8 @@ object AgentProcessManager {
             val proc = processBuilder.start()
             process = proc
             _isRunning.value = true
+            // A fresh process pushes its own count; until it does, the notification says "Starting agent...".
+            _runningCount.value = null
 
             scope.launch {
                 // Reading can throw when the process dies or is destroyed (e.g. Android's phantom-process killer);
@@ -219,6 +225,15 @@ object AgentProcessManager {
                 else -> "Reverted ${json.getJSONArray("reverted").length()} file(s)"
             }
         }.getOrElse { "Agent not reachable: ${it.message}" }
+    }
+
+    /**
+     * The agent pushes its running-session count over the bridge whenever it changes (server.ts,
+     * publishRunningCount), so the notification can follow a run starting or ending without polling
+     * the agent: an idle agent makes no calls at all.
+     */
+    fun setRunningCount(count: Int) {
+        _runningCount.value = count
     }
 
     /**

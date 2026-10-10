@@ -57,6 +57,13 @@ describe("ChatViewBuilder", () => {
     expect(view.messages[1].blocks?.[0]).toEqual({ type: "text", text: "# Heading\n\n**bold**" });
   });
 
+  test("shows a concise invocation for an expanded skill prompt", () => {
+    const block = `<skill name="writer" location="/skills/writer/SKILL.md">\nReferences are relative to /skills/writer.\n\n# Writer\n\nA lot of private skill instructions.\n</skill>\n\nDraft a note`;
+    const view = new ChatViewBuilder().build(snapshot([userEntry(1, block)]), models);
+
+    expect(view.messages[0].text).toBe("/skill:writer Draft a note");
+  });
+
   test("appends new messages without mutating the previously published array", () => {
     const builder = new ChatViewBuilder();
     const first = builder.build(snapshot([userEntry(1, "first")]), models);

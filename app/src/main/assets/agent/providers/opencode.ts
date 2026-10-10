@@ -35,6 +35,7 @@ const ZEN_BASE_URL = "https://opencode.ai/zen";
 const ZEN_OPENAI_BASE_URL = `${ZEN_BASE_URL}/v1`;
 const ZEN_MODELS_URL = `${ZEN_OPENAI_BASE_URL}/models`;
 const MODELS_DEV_URL = "https://models.dev/api.json";
+const ZEN_DOCS_URL = "https://opencode.ai/docs/zen.md";
 const OPENCODE_LATEST_VERSION_URL = "https://registry.npmjs.org/opencode-ai/latest";
 const DEFAULT_OPENCODE_CLIENT_VERSION = "1.18.31";
 const MUSE_MAX_OUTPUT_TOKENS = 32000;
@@ -47,12 +48,14 @@ const FREE_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 /**
  * IDs that list as *-free but are unusable.
  *
- * Verified against the live gateway on 2026-10-07:
+ * Verified against the live gateway:
  *   - mimo-v2.5-free: 410, "Model mimo-v2.5-free has been deprecated."
- *   - exo-free: gateway answers "Upstream request failed: Endpoint is unavailable."
- *     (the string comes from Zen's own upstream provider, not from us), i.e. the
- *     model is listed but has no route behind it yet. Same class of failure as
- *     the rest of this set, so it is hidden rather than offered and then failed.
+ *   - exo-free: 410, {"type":"ModelDeprecated","message":"Model exo-free has been deprecated."}
+ *     It was announced on models.dev on 2026-10-06 and dead at the gateway within
+ *     three days, while still being listed by Zen's /models endpoint. Same class of
+ *     failure as the rest of this set, so it is hidden rather than offered and then
+ *     failed. (An earlier note here said "Endpoint is unavailable" from Zen's own
+ *     upstream provider; that was the 2026-10-07 symptom, since replaced by the 410.)
  */
 const DENYLISTED_FREE_IDS = new Set([
   "minimax-m2.5-free",
@@ -171,6 +174,17 @@ function isMuse(id: string): boolean {
   return /^muse-/i.test(id);
 }
 
+/**
+ * Whether a Zen catalog id is usable, given what models.dev knows about it.
+ *
+ * models.dev is enrichment, not a gate: `undefined` (models.dev has not listed the model
+ * yet) keeps it, only an explicit `zeroCost: false` (models.dev lists it with a price)
+ * drops it. See the note in fetchFreeModels.
+ */
+export function usableFreeId(id: string, specs: Map<string, ModelSpec>): boolean {
+  return specs.get(id)?.zeroCost !== false;
+}
+
 function isFreeId(id: string): boolean {
   return /-free$/i.test(id);
 }
@@ -262,6 +276,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+async function fetchText(url: string, signal: AbortSignal): Promise<string> {
+  const response = await fetch(url, { signal, headers: { Accept: "text/plain" } });
+  if (!response.ok) throw new Error(`GET ${url} -> ${response.status}`);
+  return response.text();
+}
+
 async function fetchJson(url: string, signal: AbortSignal, authorization?: string): Promise<unknown> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (authorization) headers.Authorization = authorization;
@@ -300,6 +320,45 @@ function parseSpecs(payload: unknown): Map<string, ModelSpec> {
   return specs;
 }
 
+/**
+ * The Zen endpoints that speak a chat dialect buildModel can drive: the two
+ * OpenAI-compatible surfaces plus Anthropic messages.
+ *
+ * Zen also serves per-model native passthroughs (/v1/models/gemini-...) and /v1/systemone,
+ * which is a different API altogether -- it takes a set of questions and answers each by id
+ * instead of generating text. That is where jev-1.13-free lives: a free, reachable
+ * classifier that would happily accept a session prompt and answer the wrong question.
+ */
+const CHAT_SURFACES = new Set<string>([
+  `${ZEN_OPENAI_BASE_URL}/chat/completions`,
+  `${ZEN_OPENAI_BASE_URL}/responses`,
+  `${ZEN_BASE_URL}/v1/messages`,
+]);
+
+/** model id -> endpoint, parsed out of Zen's published model table. */
+export function parseEndpoints(markdown: string): Map<string, string> {
+  const endpoints = new Map<string, string>();
+  for (const line of markdown.split("\n")) {
+    const cells = line.split("|").map((cell) => cell.trim());
+    if (cells.length < 4) continue;
+    const id = cells[2].replace(/\`/g, "");
+    const endpoint = cells[3].replace(/\`/g, "");
+    if (!id || !/^https?:\//.test(endpoint)) continue;
+    endpoints.set(id, endpoint.replace(/\/$/, ""));
+  }
+  return endpoints;
+}
+
+/**
+ * Whether a Zen catalog id speaks a chat dialect. An id the docs table does not list is
+ * kept: this is a statement about API shape, not a gate, and a newly announced model
+ * should not vanish from the chooser because the table has not caught up.
+ */
+export function isChatSurface(id: string, endpoints: Map<string, string>): boolean {
+  const endpoint = endpoints.get(id);
+  return endpoint === undefined || CHAT_SURFACES.has(endpoint);
+}
+
 async function fetchFreeModels(signal: AbortSignal): Promise<Model<Api>[]> {
   await refreshClientVersion(signal);
   const zen = await fetchJson(ZEN_MODELS_URL, signal, "Bearer public");
@@ -311,9 +370,32 @@ async function fetchFreeModels(signal: AbortSignal): Promise<Model<Api>[]> {
       : [];
   if (ids.length === 0) throw new Error("Zen catalog listed no free models");
 
-  const specs = parseSpecs(await fetchJson(MODELS_DEV_URL, signal));
-  const free = ids.filter((id) => specs.get(id)?.zeroCost);
-  if (free.length === 0) throw new Error("models.dev listed no zero-cost free models");
+  // models.dev is an enrichment source here, not a gate. Zen announces new free models
+  // (jev-1.13-free, 2026-10-09) well before models.dev lists them, and its /models endpoint
+  // carries only {id, object, created, owned_by} -- no context/output/image metadata -- so
+  // dropping every id models.dev has not picked up yet hides routes that work. An id that
+  // models.dev *does* list with a non-zero cost is still dropped: that is a real signal.
+  // Ids missing from models.dev fall back to buildModel's defaults, which deliberately
+  // understate context (128K) and output (32K): understating truncates earlier and asks for
+  // shorter replies, while overstating earns a 400 from the gateway.
+  let specs = new Map<string, ModelSpec>();
+  try {
+    specs = parseSpecs(await fetchJson(MODELS_DEV_URL, signal));
+  } catch {
+    // models.dev unreachable: keep Zen's own catalog and use the defaults.
+  }
+
+  // Which API a model speaks comes from Zen's own table, not from a list kept here:
+  // /v1/systemone routes (jev-1.13-free) are classifiers and are not offered as chat models.
+  let endpoints = new Map<string, string>();
+  try {
+    endpoints = parseEndpoints(await fetchText(ZEN_DOCS_URL, signal));
+  } catch {
+    // Docs unreachable: keep the catalog rather than empty the chooser.
+  }
+
+  const free = ids.filter((id) => usableFreeId(id, specs) && isChatSurface(id, endpoints));
+  if (free.length === 0) throw new Error("Zen catalog listed no usable free models");
   return free.map((id) => buildModel(id, specs.get(id))).sort((a, b) => a.id.localeCompare(b.id));
 }
 

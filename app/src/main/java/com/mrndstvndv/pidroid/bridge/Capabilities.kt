@@ -15,6 +15,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.mrndstvndv.pidroid.MainActivity
 import com.mrndstvndv.pidroid.R
+import com.mrndstvndv.pidroid.agent.AgentProcessManager
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -23,6 +24,7 @@ object Capabilities {
     val handlers: Map<String, (Context, JSONObject) -> Any?> = mapOf(
         "battery.get" to ::battery,
         "notification.post" to ::postNotification,
+        "agent.setRunningCount" to ::setRunningCount,
     )
 
     private const val CHANNEL_ID = "pidroid_agent_messages"
@@ -46,6 +48,17 @@ object Capabilities {
                 else -> "none"
             })
             .put("temperatureC", intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10.0)
+    }
+
+    /**
+     * The agent pushes its running-session count here on every change (server.ts, publishRunningCount),
+     * which is what lets the foreground-service notification follow a run without polling. There is no
+     * tool wrapper for it in extensions/android.ts: this is a status the host is told, not one the agent
+     * asks for.
+     */
+    private fun setRunningCount(context: Context, @Suppress("UNUSED_PARAMETER") args: JSONObject): JSONObject {
+        AgentProcessManager.setRunningCount(args.optInt("running", 0))
+        return JSONObject()
     }
 
     private fun postNotification(context: Context, args: JSONObject): JSONObject {

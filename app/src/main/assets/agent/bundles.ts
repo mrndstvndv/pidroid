@@ -40,6 +40,10 @@ const DOWNLOAD_DIR = "/storage/emulated/0/Download";
 /**
  * Directories never included: VCS internals, deps, generated bundles, scratch.
  *
+ * `machines` holds the SSH material for the other computers a session can run on: one Ed25519 key pair
+ * per machine, its public half, a known-hosts file and an empty ssh config (see machines.ts). A bundle is
+ * written out to shared storage, so it must not carry credentials -- the same reason auth.json is skipped.
+ *
  * `uploads` holds the images and screenshots attached to chat sessions. They are conversation
  * input, not the agent's work, and a session that attached a few dozen screenshots would
  * otherwise dominate the archive (PNG barely compresses): a bundle of ~85 source files went from
@@ -57,13 +61,15 @@ export const SKIP_DIRS = new Set([
   ".tmp",
   ".bundle-staging",
   "uploads",
+  "machines",
 ]);
 
 /**
  * Files never included: credentials, installed-state markers, the shipped hash map.
  *
  * The last three are installer and runtime state, like .installed_version: the app regenerates
- * them, so they are not the agent's work. changes.ts ignores the same names for the same reason.
+ * them, so they are not the agent's work. changes.ts ignores the same paths (and machines/, the
+ * credentials' directory) for the same reason.
  */
 export const SKIP_FILES = new Set([
   "auth.json",

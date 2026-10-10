@@ -2,12 +2,12 @@
  * Agent Skills catalog for Pidroid.
  *
  * Shared user skills live outside the app source and per-session workspaces, at
- * <app-data>/skills/<skill-name>/SKILL.md. Only names/descriptions/paths enter the prompt;
- * the model loads a skill's instructions with the ordinary read tool when relevant.
+ * <app-data>/skills/<skill-name>/SKILL.md. The prompt advertises names/descriptions/paths; the
+ * model can read relevant instructions, and `/skill:name` explicitly embeds the full skill body.
  */
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, join, sep } from "node:path";
 const APP_DIR = decodeURIComponent(new URL("./", import.meta.url).pathname).replace(/\/$/, "");
 export const SKILLS_DIR = join(dirname(APP_DIR), "skills");
 const MAX_SKILL_FILE_BYTES = 1024 * 1024;
@@ -24,10 +24,17 @@ try {
   console.warn(`[pidroid] could not create skills folder ${SKILLS_DIR}: ${error instanceof Error ? error.message : String(error)}`);
 }
 
-interface SkillMetadata {
+export interface SkillMetadata {
   name: string;
   description: string;
   location: string;
+}
+
+export interface SkillExpansionResult {
+  /** Text sent to pi-durable; a known command contains Pi's explicit skill block. */
+  content: string;
+  skill?: SkillMetadata;
+  error?: string;
 }
 
 /**
@@ -187,6 +194,50 @@ export function discoverSkills(root = SKILLS_DIR): SkillMetadata[] {
 
   scan(root, 0);
   return skills;
+}
+
+/**
+ * Expand Pi's explicit `/skill:name [request]` form into the user-message block used by
+ * pi-coding-agent. The complete SKILL.md body is injected only for an explicit invocation;
+ * ordinary prompts still get the small name/description catalog from renderSkillsPrompt().
+ */
+export function expandSkillCommand(message: string, root = SKILLS_DIR): SkillExpansionResult {
+  if (!message.startsWith("/skill:")) return { content: message };
+  const match = /^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/.exec(message);
+  if (!match) return { content: message, error: "Use /skill:<name> followed by any request for the skill." };
+
+  const [, name, rawArgs = ""] = match;
+  const skill = discoverSkills(root).find((candidate) => candidate.name === name);
+  if (!skill) return { content: message, error: `Skill '${name}' was not found. Type /skill: to browse available skills.` };
+
+  try {
+    // A skill can change between discovery and invocation. Refuse symlinks and paths that escaped
+    // the shared skills root rather than reading a replacement file outside the catalog.
+    const rootPath = realpathSync(root);
+    const filePath = realpathSync(skill.location);
+    const fileStat = lstatSync(skill.location);
+    if (!fileStat.isFile() || fileStat.isSymbolicLink()) throw new Error("SKILL.md is no longer a regular file");
+    const rootPrefix = rootPath.endsWith(sep) ? rootPath : `${rootPath}${sep}`;
+    if (!filePath.startsWith(rootPrefix)) throw new Error("SKILL.md is outside the shared skills directory");
+    if (fileStat.size > MAX_SKILL_FILE_BYTES) throw new Error(`SKILL.md is larger than ${MAX_SKILL_FILE_BYTES} bytes`);
+
+    const raw = readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+    const body = raw
+      .replace(/^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/, "")
+      .trim();
+    const baseDir = dirname(filePath);
+    const block =
+      `<skill name="${escapeXml(name)}" location="${escapeXml(filePath)}">\n` +
+      `References are relative to ${escapeXml(baseDir)}.\n\n${body}\n</skill>`;
+    const args = rawArgs.trim();
+    return { content: args ? `${block}\n\n${args}` : block, skill };
+  } catch (error) {
+    return {
+      content: message,
+      skill,
+      error: `Could not load skill '${name}': ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 export function renderSkillsPrompt(): string | undefined {

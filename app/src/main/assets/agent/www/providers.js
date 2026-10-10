@@ -43,7 +43,7 @@ const MAX_RESULTS = 80;
 const MAX_RECENTS = 5;
 const RECENTS_KEY = "pidroid.recentModels";
 
-let modelData = { current: "", default: "", titleModel: "", models: [] };
+let modelData = { current: "", default: "", titleModel: "", titleModelDefault: false, models: [] };
 let lastSeenModel = "";
 
 /* What the sheet is picking. "session" is the composer pill: the model this session runs on.
@@ -102,14 +102,17 @@ window.loadModels = loadModels;
 
 /* The summary of the title model on the Providers tab, since the list itself lives in the
    sheet. "None" is a real choice, not a placeholder: with nothing picked the session is named
-   after its opening line, so the row says which of the two is in effect. */
+   after its opening line, so the row says which of the two is in effect. A model the server is
+   using by default is named too, but marked -- nobody picked it, and None is one tap away. */
 function renderTitleModelButton() {
   if (!titleModelBtn) return;
   const m = modelData.models.find(m => m.id === modelData.titleModel);
   titleModelBtnLabel.textContent = m ? m.name : "None";
-  titleModelBtnSub.textContent = m
-    ? (m.providerName || m.provider)
-    : "Titles come from your first message";
+  const inUse = !!m;
+  const sub = !inUse
+    ? "Titles come from your first message"
+    : [m.providerName || m.provider, modelData.titleModelDefault ? "default" : ""].filter(Boolean).join(" · ");
+  titleModelBtnSub.textContent = sub;
   // The top bar's title popup names the model its Generate button would spend, so it needs to
   // hear about the preference too -- not only the tab that shows it.
   window.onTitleModelChanged?.(modelData.titleModel || "", m ? m.name : "");
@@ -353,7 +356,8 @@ modelList.addEventListener("click", async (e) => {
   }
 
   // Title mode writes the one setting and stops: no run model to switch, no default to set.
-  // The None row clears it, which the server takes as "" (the same as picking "none").
+  // The None row clears it, which the server stores as its "off" sentinel so the built-in
+  // default cannot quietly take over again.
   if (modelSheetMode === "title") {
     const none = e.target.closest("#title-model-none");
     const row = e.target.closest(".model-row");
@@ -362,6 +366,8 @@ modelList.addEventListener("click", async (e) => {
     try {
       const res = await api("/api/title-model", { model: pick });
       modelData.titleModel = res.model || "";
+      // Whatever is in effect now was just picked, so it is no longer the built-in default.
+      modelData.titleModelDefault = false;
       renderTitleModelButton();
       closeModelModal();
       loadModels();

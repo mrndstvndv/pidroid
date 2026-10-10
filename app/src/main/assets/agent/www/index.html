@@ -59,7 +59,7 @@
       </button>
     </div>
 
-    <!-- Transient in-app notices (a title job starting, one failing). A stack that floats
+    <!-- Transient in-app notices (a failed title job, with a fix button). A stack that floats
          under the top chrome: nothing is in flow, so no screen reflows when one appears. -->
     <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
 
@@ -78,6 +78,7 @@
         
         <form class="composer-card" id="chat-form">
           <div class="attachment-tray" id="attachment-tray" role="list" aria-label="Attached images" hidden></div>
+          <div class="slash-menu" id="slash-menu" role="listbox" aria-label="Slash commands" hidden></div>
           <!-- Multiline: Enter (soft keyboard) inserts a newline, the button sends.
                Ctrl/Cmd+Enter is the keyboard shortcut for sending. -->
           <textarea id="chat-input" rows="1" placeholder="Give the agent a task..." autocomplete="off"
@@ -403,7 +404,7 @@
 
     <!-- Model chooser: a floating sheet at the bottom. One page picks the model (searchable, recents
          first), the other the thinking effort; the Effort row switches between them. -->
-    <!-- Shown when a new session starts and machines exist: where its tools run. -->
+    <!-- Shown when a new session starts or an idle session changes where its tools run. -->
     <div class="modal sheet-modal" id="session-target-modal" hidden>
       <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="session-target-title">
         <div class="sheet-page">
@@ -414,8 +415,17 @@
             </button>
           </div>
           <div id="session-target-list"></div>
+          <div class="session-target-copy" id="session-target-copy-wrap" hidden>
+            <label for="session-target-copy">
+              <input type="checkbox" id="session-target-copy" />
+              <span>
+                <strong>Copy the current workspace</strong>
+                <span class="provider-meta">Replaces the destination; up to 64 MiB. Symbolic links are not copied.</span>
+              </span>
+            </label>
+          </div>
           <div class="sheet-foot">
-            <span class="provider-meta">Machines are added in Settings.</span>
+            <span class="provider-meta" id="session-target-foot">Machines are added in Settings.</span>
           </div>
         </div>
       </div>
