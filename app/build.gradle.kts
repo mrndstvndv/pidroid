@@ -1,3 +1,5 @@
+import java.io.File
+import java.security.MessageDigest
 import java.util.Properties
 import javax.inject.Inject
 import org.gradle.process.ExecOperations
@@ -8,11 +10,73 @@ plugins {
   alias(libs.plugins.kotlin.serialization)
 }
 
+val appVersionCode = (findProperty("versionCode") as String?)?.toInt() ?: 1
+/** Host API level this APK implements; a bundle with a higher minHostApi needs a newer APK. */
+val hostApi = (findProperty("hostApi") as String?)?.toInt() ?: 1
+/** Version of the bundle's on-device data layout; state is never rolled back below the highest one activated. */
+val bundleSchemaVersion = (findProperty("bundleSchemaVersion") as String?)?.toInt() ?: 1
+/** Base64 X.509 DER public key that verifies bundle signatures; empty when not configured. */
+val bundlePublicKey = (findProperty("bundlePublicKey") as String?).orEmpty()
+
 /**
- * Builds what the phone needs to run the agent from source with no node_modules:
+ * Helpers for BundleAgentTask. They live in an object rather than at the top level of this script: a task class that
+ * called script members would hold the script instance, which the configuration cache cannot store.
+ */
+object AgentAssets {
+  /**
+   * AGP's default asset ignore pattern (AaptOptions.ignoreAssetsPattern). aapt applies it to every file and directory
+   * name: the first matching entry decides, and a `!` entry keeps a name. `.*` drops hidden entries, so the agent's
+   * .gitignore and .icons/ never reach the APK; `<dir>_*` drops directories starting with an underscore.
+   */
+  class AssetIgnoreRule(val keep: Boolean, val dirsOnly: Boolean, val name: Regex)
+
+  fun globRegex(glob: String): Regex = Regex(
+    glob.map { c -> if (c == '*') ".*" else if (c == '?') "." else Regex.escape(c.toString()) }.joinToString(""),
+    RegexOption.IGNORE_CASE,
+  )
+
+  val assetIgnoreRules: List<AssetIgnoreRule> = listOf(
+    "!.svn", "!.git", "!.ds_store", "!*.scc", ".*", "<dir>_*", "!CVS", "!thumbs.db", "!picasa.ini", "!*~",
+  ).map { raw ->
+    val body = raw.removePrefix("!")
+    AssetIgnoreRule(
+      keep = raw.startsWith("!"),
+      dirsOnly = body.startsWith("<dir>"),
+      name = globRegex(body.removePrefix("<dir>")),
+    )
+  }
+
+  fun isIgnoredAsset(name: String, isDir: Boolean): Boolean {
+    for (rule in assetIgnoreRules) {
+      if (rule.dirsOnly && !isDir) continue
+      if (rule.name.matches(name)) return !rule.keep
+    }
+    return false
+  }
+
+  /** The files AGP packages from [dir] as assets, keyed by their slash-separated path relative to [dir]. */
+  fun collectAssets(dir: File, into: MutableMap<String, File>, prefix: String = ""): MutableMap<String, File> {
+    for (file in dir.listFiles().orEmpty().sortedBy { it.name }) {
+      if (isIgnoredAsset(file.name, file.isDirectory)) continue
+      val rel = if (prefix.isEmpty()) file.name else "$prefix/${file.name}"
+      if (file.isDirectory) collectAssets(file, into, rel) else into[rel] = file
+    }
+    return into
+  }
+
+  fun sha256(file: File): String =
+    MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+  fun jsonString(value: String): String =
+    "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+}
+
+/**
+ * Builds the agent bundle: what the phone runs from source with no node_modules, embedded in the APK under assets/agent
+ * and packaged as the OTA/manual-import zip (see packageAgentBundle).
  *  - vendor/ + tsconfig.json: the npm dependencies as split bundles, with `paths` mapping package names to them, so
  *    server.ts and the agent's own extensions run (and can be edited) as plain TypeScript;
- *  - fallback/server.js: a full bundle of the shipped server, started in safe mode if an edited server keeps failing.
+ *  - bundle.json: the bundle's identity (version, code, channel, host API, schema) and the sha256 of every file in it.
  * Dependencies install from the committed bun.lock (--frozen-lockfile) in a scratch dir, keeping node_modules out of the APK.
  */
 abstract class BundleAgentTask @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
@@ -28,8 +92,32 @@ abstract class BundleAgentTask @Inject constructor(private val exec: ExecOperati
   @get:Internal
   abstract val workDir: DirectoryProperty
 
+  /** Asset root for the APK; the bundle itself is in its agent/ subdirectory. */
   @get:OutputDirectory
   abstract val outputDir: DirectoryProperty
+
+  /** The bundle as the release zip is made from it: the packaged source files with the generated ones on top. */
+  @get:OutputDirectory
+  abstract val stageDir: DirectoryProperty
+
+  @get:Input
+  abstract val bundleVersion: Property<String>
+
+  @get:Input
+  abstract val bundleCode: Property<Int>
+
+  /** "local", "stable" or "prerelease" */
+  @get:Input
+  abstract val bundleChannel: Property<String>
+
+  @get:Input
+  abstract val minHostApi: Property<Int>
+
+  @get:Input
+  abstract val schemaVersion: Property<Int>
+
+  @get:Input
+  abstract val bundleCommit: Property<String>
 
   @TaskAction
   fun bundle() {
@@ -53,15 +141,82 @@ abstract class BundleAgentTask @Inject constructor(private val exec: ExecOperati
     }
     bun("install", "--frozen-lockfile")
     bun("build-vendor.ts", agentOut.absolutePath)
-    bun("build", "server.ts", "--target=bun", "--outfile=${agentOut.resolve("fallback/server.js").absolutePath}")
+
+    // Every file the APK will hold under assets/agent: the packaged source files, with the generated ones on top.
+    val files = sortedMapOf<String, File>()
+    AgentAssets.collectAssets(agentDir.get().asFile, files)
+    AgentAssets.collectAssets(agentOut, files)
+    files.remove("bundle.json")
+
+    val hashes = files.mapValues { (_, file) -> AgentAssets.sha256(file) }
+    val json = bundleJson(hashes)
+    agentOut.resolve("bundle.json").writeText(json)
+
+    val stage = stageDir.get().asFile
+    stage.deleteRecursively()
+    for ((rel, file) in files) {
+      val target = stage.resolve(rel)
+      target.parentFile.mkdirs()
+      file.copyTo(target, overwrite = true)
+    }
+    stage.resolve("bundle.json").writeText(json)
+  }
+
+  private fun bundleJson(hashes: Map<String, String>): String = buildString {
+    appendLine("{")
+    appendLine("  \"format\": 1,")
+    appendLine("  \"version\": ${AgentAssets.jsonString(bundleVersion.get())},")
+    appendLine("  \"code\": ${bundleCode.get()},")
+    appendLine("  \"channel\": ${AgentAssets.jsonString(bundleChannel.get())},")
+    appendLine("  \"minHostApi\": ${minHostApi.get()},")
+    appendLine("  \"schemaVersion\": ${schemaVersion.get()},")
+    appendLine("  \"commit\": ${AgentAssets.jsonString(bundleCommit.get())},")
+    appendLine("  \"files\": {")
+    hashes.entries.forEachIndexed { index, (rel, hash) ->
+      val comma = if (index < hashes.size - 1) "," else ""
+      appendLine("    ${AgentAssets.jsonString(rel)}: ${AgentAssets.jsonString(hash)}$comma")
+    }
+    appendLine("  }")
+    appendLine("}")
   }
 }
+
+val agentBundleStageDir = layout.buildDirectory.dir("generated/agentBundleStage")
 
 val bundleAgent = tasks.register<BundleAgentTask>("bundleAgent") {
   agentDir.set(layout.projectDirectory.dir("src/main/assets/agent"))
   toolsDir.set(layout.projectDirectory.dir("agent-build"))
   workDir.set(layout.buildDirectory.dir("agent-bundle-work"))
   outputDir.set(layout.buildDirectory.dir("generated/agentBundle"))
+  stageDir.set(agentBundleStageDir)
+  bundleVersion.set(rootProject.version.toString())
+  bundleCode.set(appVersionCode)
+  // Release builds set these; a local build is "local" at commit "unknown" unless told otherwise.
+  bundleChannel.set(providers.gradleProperty("bundleChannel").orElse("local"))
+  minHostApi.set(hostApi)
+  schemaVersion.set(bundleSchemaVersion)
+  bundleCommit.set(
+    providers.gradleProperty("bundleCommit").orElse(
+      providers.exec {
+        commandLine("git", "rev-parse", "HEAD")
+        isIgnoreExitValue = true
+      }.standardOutput.asText.map { it.trim().takeIf { head -> head.matches(Regex("[0-9a-f]{40}")) } ?: "unknown" },
+    ),
+  )
+}
+
+/**
+ * Local dev loop for the agent: `./gradlew packageAgentBundle` writes build/outputs/agent-bundle/pidroid-agent-<version>.zip,
+ * the same bundle the APK embeds, with bundle.json at the zip root. It is unsigned, so the app's Updates tab imports it
+ * only with "allow unverified".
+ */
+val packageAgentBundle = tasks.register<Zip>("packageAgentBundle") {
+  dependsOn(bundleAgent)
+  from(agentBundleStageDir)
+  archiveFileName.set("pidroid-agent-${rootProject.version}.zip")
+  destinationDirectory.set(layout.buildDirectory.dir("outputs/agent-bundle"))
+  isPreserveFileTimestamps = false
+  isReproducibleFileOrder = true
 }
 
 androidComponents {
@@ -79,10 +234,12 @@ android {
         applicationId = "com.mrndstvndv.pidroid"
         minSdk = 24
         targetSdk = 36
-        versionCode = (findProperty("versionCode") as String?)?.toInt() ?: 1
+        versionCode = appVersionCode
         versionName = (findProperty("versionName") as String?) ?: rootProject.version.toString()
         // Only arm64 ships the full native set (Bun + OpenSSH); no x86_64 libs are kept.
         ndk { abiFilters += "arm64-v8a" }
+        buildConfigField("int", "HOST_API", "$hostApi")
+        buildConfigField("String", "BUNDLE_PUBLIC_KEY", "\"$bundlePublicKey\"")
     }
 
     signingConfigs {
@@ -117,7 +274,7 @@ android {
     buildFeatures {
       compose = true
       aidl = false
-      buildConfig = false
+      buildConfig = true
       shaders = false
     }
 
