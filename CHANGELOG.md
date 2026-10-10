@@ -1,3 +1,30 @@
+# [1.0.0](https://github.com/mrndstvndv/pidroid/compare/v0.6.0...v1.0.0) (2026-10-10)
+
+
+* feat(agent)!: run the agent bundle read-only and drop self-modification ([9440aed](https://github.com/mrndstvndv/pidroid/commit/9440aed6147768394bbbfb0e0818b21e6b079c91))
+
+
+### Bug Fixes
+
+* **agent:** keep the system prompt to the environment, tools and skills ([b1a251c](https://github.com/mrndstvndv/pidroid/commit/b1a251cedbc0d718688f65e0141574fa0154b901))
+* **agent:** tell the agent how updates work and drop stale prompt lines ([e80e714](https://github.com/mrndstvndv/pidroid/commit/e80e714211ef2065dce91beb0dfdbf2ad042ef4c))
+* **app:** stop the agent service on task removal when no agent is running ([ee64d93](https://github.com/mrndstvndv/pidroid/commit/ee64d93679a6fbacd0e1b77409a7cd28bf9fefaa))
+
+
+### Features
+
+* **agent:** add an Updates tab for bundle status, import and rollback ([dffab50](https://github.com/mrndstvndv/pidroid/commit/dffab50fffcba75de64ad30542d61dbf9bc234cc))
+* **app:** check GitHub releases for agent bundles and apply them when idle ([51394f3](https://github.com/mrndstvndv/pidroid/commit/51394f397f2a1727fc63fd7bbb792a156f54f80e))
+* **app:** run immutable agent bundles with trial and rollback ([0be2dd2](https://github.com/mrndstvndv/pidroid/commit/0be2dd22630871c0087268552a4ef1abc940f564))
+
+
+### BREAKING CHANGES
+
+* the agent can no longer edit the app's own source.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BMq1pUPAG5m8RHdjboUYkp
+
 # [0.6.0](https://github.com/mrndstvndv/pidroid/compare/v0.5.0...v0.6.0) (2026-10-10)
 
 
