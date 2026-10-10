@@ -29,6 +29,14 @@ jobs:
         with:
           bun-version: '1.4.0'
 
+      # bundleAgent runs `bun install` from the committed lockfile on every build; keep Bun's downloads between runs.
+      - name: Cache Bun packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('app/agent-build/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
