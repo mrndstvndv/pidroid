@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/mrndstvndv/pidroid/compare/v1.0.0...v1.0.1) (2026-10-10)
+
+
+### Performance Improvements
+
+* **ci:** cache Bun packages between CI runs ([fc8e30a](https://github.com/mrndstvndv/pidroid/commit/fc8e30a54736921c0c136b1101553433c2a6d245))
+
 # [1.0.0](https://github.com/mrndstvndv/pidroid/compare/v0.6.0...v1.0.0) (2026-10-10)
 
 
