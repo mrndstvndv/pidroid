@@ -209,25 +209,52 @@ object AgentProcessManager {
 
     /** User-initiated restart: stops the process and starts it again, with the bundle BundleStore picks now. */
     fun restart(context: Context) {
-        scope.launch {
-            val old = process
-            stopAgent()
-            old?.waitFor(5, TimeUnit.SECONDS)
-            synchronized(crashTimes) { crashTimes.clear() }
-            fastFailures = 0
-            startAgent(context.applicationContext)
-        }
+        val appContext = context.applicationContext
+        scope.launch { restartNow(appContext) }
     }
+
+    private fun restartNow(appContext: Context) {
+        val old = process
+        stopAgent()
+        old?.waitFor(5, TimeUnit.SECONDS)
+        synchronized(crashTimes) { crashTimes.clear() }
+        fastFailures = 0
+        startAgent(appContext)
+    }
+
+    /** Callbacks for the idle restart already waiting; they run after that restart. Guarded by [idleRestartLock]. */
+    private val idleRestartLock = Any()
+    private val idleRestartCallbacks = mutableListOf<() -> Unit>()
+    private var idleRestartWaiting = false
 
     /**
      * Restarts the agent once no session has a run in flight, so an update never cuts a run off. Idle means the count is 0,
-     * or there is no count and no process (nothing has started, or it has stopped).
+     * or there is no count and no process. A stopped agent is left stopped: its next start picks the new bundle.
+     *
+     * Only one wait runs at a time: a call made while one is pending adds its [onRestart] to that wait, and the restart
+     * happens once. [onRestart] runs after the restart.
      */
-    fun restartWhenIdle(context: Context) {
+    fun restartWhenIdle(context: Context, onRestart: (() -> Unit)? = null) {
         val appContext = context.applicationContext
+        val alreadyWaiting = synchronized(idleRestartLock) {
+            if (onRestart != null) idleRestartCallbacks.add(onRestart)
+            val waiting = idleRestartWaiting
+            idleRestartWaiting = true
+            waiting
+        }
+        if (alreadyWaiting) return
         scope.launch {
             combine(runningCount, isRunning) { count, running -> count == 0 || (count == null && !running) }.first { it }
-            restart(appContext)
+            val callbacks = synchronized(idleRestartLock) {
+                idleRestartWaiting = false
+                idleRestartCallbacks.toList().also { idleRestartCallbacks.clear() }
+            }
+            // A stopped agent stays stopped: its next start picks the new bundle anyway.
+            if (!isRunning.value) return@launch
+            restartNow(appContext)
+            for (callback in callbacks) {
+                runCatching { callback() }.onFailure { Log.w(TAG, "Restart callback failed", it) }
+            }
         }
     }
 

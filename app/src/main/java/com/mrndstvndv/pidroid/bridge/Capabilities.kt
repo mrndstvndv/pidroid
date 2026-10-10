@@ -13,11 +13,17 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import com.mrndstvndv.pidroid.BuildConfig
 import com.mrndstvndv.pidroid.MainActivity
 import com.mrndstvndv.pidroid.R
 import com.mrndstvndv.pidroid.agent.AgentProcessManager
+import com.mrndstvndv.pidroid.agent.BundleException
 import com.mrndstvndv.pidroid.agent.BundleStore
+import com.mrndstvndv.pidroid.agent.BundleUpdater
+import com.mrndstvndv.pidroid.agent.BundleVerifier
+import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 /** The fixed set of Android features the agent can reach. Add one here and a tool wrapper in extensions/android.ts. */
@@ -27,6 +33,12 @@ object Capabilities {
         "notification.post" to ::postNotification,
         "agent.setRunningCount" to ::setRunningCount,
         "agent.ready" to ::agentReady,
+        "bundle.status" to ::bundleStatus,
+        "bundle.check" to ::bundleCheck,
+        "bundle.setPrerelease" to ::bundleSetPrerelease,
+        "bundle.install" to ::bundleInstall,
+        "bundle.activate" to ::bundleActivate,
+        "bundle.unpin" to ::bundleUnpin,
     )
 
     private const val CHANNEL_ID = "pidroid_agent_messages"
@@ -70,6 +82,115 @@ object Capabilities {
     private fun agentReady(context: Context, @Suppress("UNUSED_PARAMETER") args: JSONObject): JSONObject {
         BundleStore.markHealthy(context)
         return JSONObject()
+    }
+
+    /** The Updates tab's view of the bundles: the shape www/updates-tab.js renders (see the server's /api/bundles routes). */
+    private fun bundleStatus(context: Context, @Suppress("UNUSED_PARAMETER") args: JSONObject): JSONObject {
+        val state = BundleStore.state(context)
+        val active = state.active?.let { state.bundles[it] }
+        val activeJson = JSONObject()
+            .put("code", state.active ?: JSONObject.NULL)
+            .put("version", active?.version ?: JSONObject.NULL)
+            .put("source", active?.source ?: JSONObject.NULL)
+            .put("verified", active?.verified ?: false)
+        val bundles = JSONArray()
+        for (info in state.bundles.values.sortedBy { it.code }) {
+            bundles.put(
+                JSONObject()
+                    .put("code", info.code)
+                    .put("version", info.version)
+                    .put("source", info.source)
+                    .put("verified", info.verified)
+                    .put("active", info.code == state.active)
+                    .put("pinned", info.code == state.pinned)
+                    .put("blocked", info.code in state.blocked),
+            )
+        }
+        val pendingCode = BundleStore.pendingActivation(context)
+        val pending = if (pendingCode == null) {
+            JSONObject.NULL
+        } else {
+            JSONObject().put("code", pendingCode).put("version", state.bundles[pendingCode]?.version ?: JSONObject.NULL)
+        }
+        val appUpdate = state.appUpdate?.let { JSONObject().put("version", it.version).put("apkUrl", it.apkUrl) }
+        return JSONObject()
+            .put("active", activeJson)
+            .put("bundles", bundles)
+            .put("pinned", state.pinned ?: JSONObject.NULL)
+            .put("prerelease", state.prerelease)
+            .put("lastCheck", state.lastCheck)
+            .put("lastError", state.lastError ?: JSONObject.NULL)
+            .put("checking", BundleUpdater.isChecking)
+            .put("pending", pending)
+            .put("appUpdate", appUpdate ?: JSONObject.NULL)
+            .put("hostApi", BuildConfig.HOST_API)
+    }
+
+    /** Starts a check now; the status it returns says checking=true, and the page polls until it ends. */
+    private fun bundleCheck(context: Context, args: JSONObject): JSONObject {
+        BundleUpdater.check(context, force = true)
+        return bundleStatus(context, args)
+    }
+
+    private fun bundleSetPrerelease(context: Context, args: JSONObject): JSONObject {
+        BundleStore.setPrerelease(context, args.optBoolean("enabled"))
+        BundleUpdater.check(context, force = true)
+        return bundleStatus(context, args)
+    }
+
+    /**
+     * Installs a zip the server stored in data/inbox, pins it and applies it when the agent is idle. Only a file in the inbox
+     * is accepted. A bundle is unverified (and refused) unless [signature] (base64) signs it with the release key, or the
+     * caller passes allowUnverified after the user has confirmed it.
+     */
+    private fun bundleInstall(context: Context, args: JSONObject): JSONObject {
+        val file = inboxZip(context, args.optString("path"))
+        val signature = args.optString("signature").takeIf { it.isNotBlank() }
+        val allowUnverified = args.optBoolean("allowUnverified")
+        val info = bundleErrors {
+            val verified = BundleVerifier.verifyZip(context, file, expectedSha256 = null, signatureB64 = signature, allowUnverified = allowUnverified)
+            BundleStore.install(context, verified.dir, "import", verified.verified)
+        }
+        bundleErrors { BundleStore.pin(context, info.code) }
+        restartIfPending(context)
+        return JSONObject().put("code", info.code).put("version", info.version).put("verified", info.verified)
+    }
+
+    /** Switches to an installed bundle: pins it, and the agent restarts with it once idle. */
+    private fun bundleActivate(context: Context, args: JSONObject): JSONObject {
+        bundleErrors { BundleStore.pin(context, args.optInt("code", -1)) }
+        restartIfPending(context)
+        return bundleStatus(context, args)
+    }
+
+    /** Back to the latest bundle: unpins, checks for updates, and restarts if a different bundle is ready. */
+    private fun bundleUnpin(context: Context, args: JSONObject): JSONObject {
+        BundleStore.unpin(context)
+        BundleUpdater.check(context, force = true)
+        restartIfPending(context)
+        return bundleStatus(context, args)
+    }
+
+    private fun restartIfPending(context: Context) {
+        if (BundleStore.pendingActivation(context) != null) AgentProcessManager.restartWhenIdle(context)
+    }
+
+    /** Turns a BundleException into the BridgeException the agent sees, with the same code. */
+    private inline fun <T> bundleErrors(block: () -> T): T =
+        try {
+            block()
+        } catch (e: BundleException) {
+            throw BridgeException(e.code, e.message ?: e.code)
+        }
+
+    private fun inboxZip(context: Context, path: String): File {
+        if (path.isBlank()) throw BridgeException("bad_args", "path is required")
+        val inbox = File(context.filesDir, "data/inbox").canonicalFile
+        val file = File(path).canonicalFile
+        if (!file.isFile || !file.path.startsWith(inbox.path + File.separator)) {
+            throw BridgeException("invalid", "The bundle must be a file in the app's inbox")
+        }
+        return file
     }
 
     private fun postNotification(context: Context, args: JSONObject): JSONObject {
