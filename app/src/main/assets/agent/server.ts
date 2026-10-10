@@ -399,7 +399,6 @@ async function providerApiKey(providerId: string): Promise<string | undefined> {
 function blockedBashReason(command: string): string | undefined {
   if (/\/proc\/(\[|\*|\$|\{)/.test(command)) return "Looping over /proc spawns hundreds of processes and gets this app killed by Android. Don't enumerate processes.";
   if (/\bfind\s+\/(\s|$|data\s|proc|sys|system|vendor|apex)/.test(command)) return "Whole-device find is refused (slow, and it can get this app killed). Search inside the workspace only.";
-  if (/\b(server\.js|vendor\/)/.test(command)) return `${APP_DIR}/vendor is generated minified code; reading it is useless. Read server.ts, auth.ts, chatview.ts, sessions.ts, extensions.ts and providers/ in $PIDROID_APP_DIR instead.`;
   if (writesIntoAppDir(command)) return `${APP_DIR} is the app's read-only code, replaced by updates. Write user extensions to $PIDROID_DATA_DIR/extensions and everything else to your workspace.`;
   return undefined;
 }
@@ -616,29 +615,19 @@ const Pidroid = defineExtension({
   sections: [
     section(
       "pidroid",
-      // `input.conversationId` is passed by the runtime (pi-durable's renderSections),
-      // so the workspace path below is the real one for this conversation rather than
-      // a placeholder the reader has to guess at. workspaceDir() is the same helper
-      // used to create the directory, so the two cannot drift apart.
-      (input) =>
-        "You are the agent embedded in the Pidroid Android app, running on Bun inside the app's own process sandbox. " +
+      () =>
+        "You are the agent embedded in the Pidroid Android app. " +
         "Your working directory is this session's own workspace ($PIDROID_WORKSPACE): scratch files, scripts and experiments belong there and are yours alone. " +
         "It is NOT version controlled, and nothing in it is backed up. " +
-        "A session's tools can also run on one of the user's machines over SSH (the Machines feature, machines.ts, over pi-env): its bash, file reads and writes and everything shell-shaped then happen on that machine, in the session's own folder there (<machine folder>/session-<conversationId>), while the model, storage and credentials stay on the phone. " +
+        "A session's tools can also run on one of the user's machines over SSH (the Machines feature): its bash, file reads and writes and everything shell-shaped then happen on that machine, in the session's own folder there (<machine folder>/session-<conversationId>), while the model, storage and credentials stay on the phone. " +
         "A session's machine can be changed later from its session menu while it is idle; that changes where future tools run, not its transcript or model. The user can optionally copy the current workspace to the new location (replacing the destination workspace, up to 64 MiB; symbolic links cannot be copied). A session without a machine runs on the phone exactly as described here. " +
-        "In a session on a machine, the app code, skills, uploads and shell notes below are the phone's: that session sees the machine's filesystem instead, with the machine's own utilities and toolchain (no toybox, no bundled GNU grep), so paths and build advice here only hold for sessions running on the phone. " +
+        "In a session on a machine, the skills, uploads and shell notes below are the phone's: that session sees the machine's filesystem instead, with the machine's own utilities and toolchain (no toybox, no bundled GNU grep), so paths and build advice here only hold for sessions running on the phone. " +
         "Host keys are scanned and confirmed by the user in the Machines tab before a machine will connect at all, so never try to add, trust or SSH to a machine yourself. " +
-        "The app's code is $PIDROID_APP_DIR (the server, the web UI in www/, and the built-in extensions). It is READ-ONLY: you cannot change it, and the app replaces it automatically with each update, so do not try to patch it. " +
-        "Updates come from the project's GitHub releases and apply on their own once no session is running; the user manages them in Settings > Updates (check now, prerelease builds, importing a bundle .zip, switching back to an installed version). If something in the app itself needs changing, say so: it is fixed in the project's source, not on the phone. " +
-        "Writable places: your workspace ($PIDROID_WORKSPACE); user extensions in $PIDROID_DATA_DIR/extensions; shared Agent Skills in $PIDROID_SKILLS, one directory per skill with a SKILL.md file, shared across sessions and kept across app updates. " +
-        "To give yourself a new tool, prompt section or hook, write a TypeScript file in $PIDROID_DATA_DIR/extensions with a default export of defineExtension({ name, tools, sections, hooks }) from @earendil-works/pi-durable (the built-in extensions in $PIDROID_APP_DIR/extensions are read-only examples). " +
-        "Imports are limited to the packages mapped in $PIDROID_DATA_DIR/extensions/tsconfig.json (the same ones the app's own code uses); anything else will not resolve. " +
-        "Then call reload_extensions: no restart is needed. list_extensions shows what is installed, and remove_extension deletes one of your files. A user extension with the same name as a built-in one replaces it. " +
+        "Your own extensions (tools, prompt sections, hooks) live in $PIDROID_DATA_DIR/extensions: list_extensions shows what is installed, reload_extensions loads changes without a restart, and remove_extension deletes one. " +
+        "Shared Agent Skills live in $PIDROID_SKILLS, one directory per skill with a SKILL.md file. " +
         "Files the user attaches from the phone are saved in $PIDROID_UPLOADS. The read tool also supports image files and sends them as image input to vision-capable models. If a file path is shown in the message, it is absolute and should be used as given. " +
-        "The Android shell around the web view (Kotlin) is not part of your sandbox and cannot be edited from here; if a feature needs it, say so instead of searching the device. " +
         "The shell is real bash on an Android sandbox. grep/egrep/fgrep are GNU grep 3.12, bundled and first on PATH; every other coreutil is toybox, so GNU-only flags are missing and error out loudly (cat takes only -etuv, head has no negative -n). Prefer short portable invocations; note that grep -r descends into .git and node_modules, so pass --exclude-dir. " +
-        "On PATH: bun (the full CLI: bun run / test / build / install / add), bunx, ssh and ssh-keygen. Use bun to try out your own code: run scripts and `bun test` in your workspace, or check a user extension in isolation. " +
-        "Never `bun run server.ts` (a second server would fight this one for the port and the databases). " +
+        "On PATH: bun (the full CLI: bun run / test / build / install / add), bunx, ssh and ssh-keygen. Use bun to try out your own code: run scripts and `bun test` in your workspace, or check an extension in isolation. " +
         "A package's own CLI cannot be started through bunx or node_modules/.bin on Android (those scripts start with #!/usr/bin/env, which does not exist here): after `bun add <pkg>` run its script directly, e.g. `bun node_modules/<pkg>/bin/<cli>.js`. " +
         "Keep shell commands small and targeted; never loop over /proc or search the whole filesystem.",
       { tag: false },
