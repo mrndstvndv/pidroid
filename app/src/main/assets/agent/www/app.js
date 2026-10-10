@@ -365,7 +365,7 @@ document.getElementById("open-settings-btn")?.addEventListener("click", () => {
   showScreen("settings");
 });
 
-// Restart: the Android host restarts the whole agent process (works with a broken server, leaves safe mode).
+// Restart: the Android host restarts the whole agent process (works even when the server is unresponsive).
 // A plain browser has no host, so fall back to the server's own restart endpoint.
 const restartBtn = document.getElementById("restart-btn");
 restartBtn?.addEventListener("click", async () => {
