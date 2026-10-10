@@ -2,7 +2,7 @@
 # Packages the agent bundle for a GitHub release: verifies it against its bundle.json, zips it, signs the zip when a key
 # is configured, and writes agent-update.json. release-prepare.sh calls it with the built APK.
 # Usage: package-agent-bundle.sh <apk-or-bundle-dir> <version> <out-dir>
-# Env:   AGENT_BUNDLE_KEY    PEM EC P-256 private key; when unset the release has no .sig and "sig": null
+# Env:   AGENT_BUNDLE_KEY    PEM EC P-256 private key; when unset this fails unless ALLOW_UNSIGNED=1, which gives no .sig and "sig": null
 #        GITHUB_REPOSITORY   owner/repo for the download URLs (default mrndstvndv/pidroid)
 #        RELEASE_NOTES       notes stored in agent-update.json (default empty)
 set -euo pipefail
@@ -91,6 +91,8 @@ if [ -n "${AGENT_BUNDLE_KEY:-}" ]; then
   base64 -w0 "$TMP/sig.der" > "$SIG"
   echo "$SIG: signed"
 else
+  # Releases always sign (release-prepare.sh checks the keys first); only a local run may go without.
+  [ "${ALLOW_UNSIGNED:-}" = "1" ] || { echo "AGENT_BUNDLE_KEY is not set; set ALLOW_UNSIGNED=1 to package an unsigned bundle" >&2; exit 1; }
   echo "AGENT_BUNDLE_KEY is not set: $ZIP_NAME is unsigned and agent-update.json has no sig"
 fi
 

@@ -16,8 +16,9 @@ test -f keystore.properties
 # The app's update channel: main ships stable builds, every other release branch (dev) ships prereleases.
 if [ "${GITHUB_REF_NAME:-}" = "main" ]; then CHANNEL=stable; else CHANNEL=prerelease; fi
 # The public key is the one the agent bundle is verified with on the phone; AGENT_BUNDLE_KEY signs the zip (see
-# package-agent-bundle.sh). Both come from secrets and may be absent, in which case the bundle ships unsigned.
-PUBLIC_KEY="$(printf '%s' "${AGENT_BUNDLE_PUBLIC_KEY:-}" | tr -d '[:space:]')"
+# package-agent-bundle.sh). A release without a matching pair would ship an app that rejects every bundle.
+.github/scripts/check-bundle-keys.sh
+PUBLIC_KEY="$(printf '%s' "${AGENT_BUNDLE_PUBLIC_KEY}" | tr -d '[:space:]')"
 
 # versionCode must grow with every release, prereleases included; the run number does.
 ./gradlew assembleRelease --no-daemon \
