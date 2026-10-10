@@ -128,6 +128,15 @@ class AgentForegroundService : Service() {
         return START_STICKY
     }
 
+    /** The app left recents. With no agent session running there is nothing left for this service to keep alive. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (AgentProcessManager.runningCount.value == 0) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         stopped = true
         stopCountUpdates()
