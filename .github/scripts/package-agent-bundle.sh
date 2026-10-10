@@ -88,7 +88,7 @@ rm -f "$ZIP" "$SIG"
 if [ -n "${AGENT_BUNDLE_KEY:-}" ]; then
   (umask 077 && printf '%s\n' "$AGENT_BUNDLE_KEY" > "$TMP/key.pem")
   openssl dgst -sha256 -sign "$TMP/key.pem" -out "$TMP/sig.der" "$ZIP"
-  base64 -w0 "$TMP/sig.der" > "$SIG"
+  base64 < "$TMP/sig.der" | tr -d '\n' > "$SIG"
   echo "$SIG: signed"
 else
   # Releases always sign (release-prepare.sh checks the keys first); only a local run may go without.

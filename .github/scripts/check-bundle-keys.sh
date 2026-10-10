@@ -13,7 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 (umask 077 && printf '%s\n' "$AGENT_BUNDLE_KEY" > "$TMP/key.pem")
 
 # The public key derived from the private one must be exactly what the app will be built with.
-DERIVED="$(openssl ec -in "$TMP/key.pem" -pubout -outform DER 2>/dev/null | base64 -w0)" \
+DERIVED="$(openssl ec -in "$TMP/key.pem" -pubout -outform DER 2>/dev/null | base64 | tr -d '\n')" \
   || fail "AGENT_BUNDLE_KEY is not a valid EC private key in PEM form."
 GIVEN="$(printf '%s' "$AGENT_BUNDLE_PUBLIC_KEY" | tr -d '[:space:]')"
 [ "$DERIVED" = "$GIVEN" ] || fail "AGENT_BUNDLE_PUBLIC_KEY is not the public half of AGENT_BUNDLE_KEY; the app would reject every signed bundle."
