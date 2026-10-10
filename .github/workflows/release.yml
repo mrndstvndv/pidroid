@@ -17,8 +17,8 @@ concurrency:
 #   KEYSTORE_PASS    - keystore password
 #   KEY_ALIAS        - key alias
 #   KEY_PASS         - key password
-#   AGENT_BUNDLE_KEY        - PEM private key that signs the agent bundle (optional; unsigned without it)
-#   AGENT_BUNDLE_PUBLIC_KEY - base64 DER public key the app verifies bundles with (optional; empty without it)
+#   AGENT_BUNDLE_KEY        - PEM private key that signs the agent bundle (required; releases fail without it)
+#   AGENT_BUNDLE_PUBLIC_KEY - base64 DER public key the app verifies bundles with (required; must be the public half of AGENT_BUNDLE_KEY)
 #                             Both are made together by .github/scripts/generate-bundle-key.sh.
 
 jobs:
@@ -35,6 +35,14 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      # An unsigned bundle is useless to the app (it refuses to install one over the air), and a release built without
+      # the public key can never verify later bundles. Fail now, before anything is built or published.
+      - name: Check bundle signing secrets
+        env:
+          AGENT_BUNDLE_KEY: ${{ secrets.AGENT_BUNDLE_KEY }}
+          AGENT_BUNDLE_PUBLIC_KEY: ${{ secrets.AGENT_BUNDLE_PUBLIC_KEY }}
+        run: .github/scripts/check-bundle-keys.sh
 
       - name: Setup Java
         uses: actions/setup-java@v5.6.0
